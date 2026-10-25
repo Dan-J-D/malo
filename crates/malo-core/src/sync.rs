@@ -10,7 +10,7 @@ use crate::config::Account;
 use crate::crypto;
 use crate::ctx::{is_cancelled, JobCtx};
 use crate::imap::{self, ImapConn, MailboxListing};
-use crate::index::{MailboxRow, MessageRow, NewMessage, ReplicaStatus};
+use crate::index::{MailboxRow, MessageRow, ReplicaStatus};
 use crate::layout;
 use crate::store::{ManifestEntry, MarkerRead, Store};
 
@@ -47,6 +47,9 @@ pub fn backup_targets(list: &[MailboxListing], gmail: bool) -> Vec<MailboxListin
     }
     selectable.cloned().collect()
 }
+
+/// Discovered messages recorded per index transaction.
+const DISCOVER_BATCH: usize = 500;
 
 pub async fn run_backup(ctx: &JobCtx, account_id: &str) -> anyhow::Result<BackupStats> {
     let account = ctx.account(account_id)?.clone();
@@ -213,44 +216,21 @@ async fn backup_mailbox(
         .filter(|u| !known_set.contains(u))
         .collect();
 
-    // 2. Discovery pass: insert + announce before downloading.
+    // 2. Discovery pass: insert + announce before downloading. Batched: a transaction per
+    // chunk, and other tasks get a turn between chunks.
     if !new_uids.is_empty() {
-        for d in conn.discover(&new_uids).await? {
-            // Index work is synchronous; give other tasks on this worker (new connections among
-            // them) a turn now and then, or a big first sync stalls the server for its duration.
+        let found = conn.discover(&new_uids).await?;
+        for chunk in found.chunks(DISCOVER_BATCH) {
             tokio::task::consume_budget().await;
-            if ctx.index.find_membership(mb.id, d.uid)?.is_some() {
-                continue;
-            }
-            let gm = d.gm_msgid.map(|g| g.to_string());
-            if let Some(existing) = gm
-                .as_deref()
-                .map(|g| ctx.index.find_by_gm_msgid(&account.id, g))
-                .transpose()?
-                .flatten()
-            {
-                // Same Gmail message seen through another mailbox: add the membership only.
-                ctx.index
-                    .add_membership(existing, mb.id, d.uid, &d.flags, &d.gm_labels)?;
-                ctx.index
-                    .update_labels_for_message(existing, &d.gm_labels)?;
-                continue;
-            }
-            let id = ctx.index.insert_message(&NewMessage {
-                account: &account.id,
-                run: Some(run),
-                size: d.size as u64,
-                internaldate: d.internaldate,
-                message_id_hdr: d.envelope.message_id.as_deref(),
-                gm_msgid: gm.as_deref(),
-                envelope: &d.envelope,
-                state: MessageState::Discovered,
-                sha256: None,
-            })?;
-            ctx.index
-                .add_membership(id, mb.id, d.uid, &d.flags, &d.gm_labels)?;
-            stats.discovered += 1;
-            if let Some(summary) = ctx.index.summary(id, dest_ids.len() as u32)? {
+            let added = ctx.index.record_discovered(
+                &account.id,
+                mb.id,
+                run,
+                chunk,
+                dest_ids.len() as u32,
+            )?;
+            stats.discovered += added.len() as u64;
+            for summary in added {
                 ctx.events
                     .emit(SyncEvent::NewMessageDiscovered { message: summary });
             }

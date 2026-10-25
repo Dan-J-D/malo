@@ -467,47 +467,15 @@ impl Index {
     // ───── messages ─────
 
     pub fn find_by_gm_msgid(&self, account: &str, gm: &str) -> anyhow::Result<Option<i64>> {
-        self.with(|c| {
-            c.query_row(
-                "SELECT id FROM messages WHERE account=?1 AND gm_msgid=?2",
-                [account, gm],
-                |r| r.get(0),
-            )
-            .optional()
-        })
+        self.with(|c| find_by_gm_msgid_on(c, account, gm))
     }
 
     pub fn find_membership(&self, mailbox: i64, uid: u32) -> anyhow::Result<Option<MembershipRow>> {
-        self.with(|c| {
-            c.query_row(
-                &format!("{MEMBERSHIP_SELECT} WHERE mailbox=?1 AND uid=?2"),
-                params![mailbox, uid],
-                membership_row,
-            )
-            .optional()
-        })
+        self.with(|c| find_membership_on(c, mailbox, uid))
     }
 
     pub fn insert_message(&self, m: &NewMessage) -> anyhow::Result<i64> {
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO messages(account,state,first_seen_run,first_seen_at,size,internaldate,message_id_hdr,gm_msgid,envelope,sha256)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-                params![
-                    m.account,
-                    m.state.as_str(),
-                    m.run,
-                    now(),
-                    m.size as i64,
-                    m.internaldate.map(|d| d.to_rfc3339()),
-                    m.message_id_hdr,
-                    m.gm_msgid,
-                    serde_json::to_string(m.envelope).unwrap(),
-                    m.sha256,
-                ],
-            )?;
-            Ok(c.last_insert_rowid())
-        })
+        self.with(|c| insert_message_on(c, m))
     }
 
     pub fn add_membership(
@@ -518,14 +486,62 @@ impl Index {
         flags: &[String],
         labels: &[String],
     ) -> anyhow::Result<()> {
+        self.with(|c| add_membership_on(c, message, mailbox, uid, flags, labels))
+    }
+
+    /// Records a batch of messages found in one mailbox, in a single transaction: one commit
+    /// instead of several per message, which on a first sync of a large mailbox is the
+    /// difference between minutes of WAL writes and seconds. A Gmail message already known
+    /// through another mailbox only gains the membership. Returns the newly added messages.
+    pub fn record_discovered(
+        &self,
+        account: &str,
+        mailbox: i64,
+        run: i64,
+        found: &[crate::imap::Discovered],
+        destinations: u32,
+    ) -> anyhow::Result<Vec<MessageSummary>> {
         self.with(|c| {
-            c.execute(
-                "INSERT INTO memberships(message,mailbox,uid,flags,gm_labels) VALUES(?1,?2,?3,?4,?5)
-                 ON CONFLICT(mailbox,uid) DO UPDATE SET flags=?4, gm_labels=?5, deleted_on_server_at=NULL",
-                params![message, mailbox, uid, join_list(flags), join_list(labels)],
-            )
-        })?;
-        Ok(())
+            let tx = c.unchecked_transaction()?;
+            let mut added = Vec::new();
+            for d in found {
+                if find_membership_on(&tx, mailbox, d.uid)?.is_some() {
+                    continue;
+                }
+                let gm = d.gm_msgid.map(|g| g.to_string());
+                let existing = match gm.as_deref() {
+                    Some(g) => find_by_gm_msgid_on(&tx, account, g)?,
+                    None => None,
+                };
+                if let Some(existing) = existing {
+                    add_membership_on(&tx, existing, mailbox, d.uid, &d.flags, &d.gm_labels)?;
+                    update_labels_on(&tx, existing, &d.gm_labels)?;
+                    continue;
+                }
+                let id = insert_message_on(
+                    &tx,
+                    &NewMessage {
+                        account,
+                        run: Some(run),
+                        size: d.size as u64,
+                        internaldate: d.internaldate,
+                        message_id_hdr: d.envelope.message_id.as_deref(),
+                        gm_msgid: gm.as_deref(),
+                        envelope: &d.envelope,
+                        state: MessageState::Discovered,
+                        sha256: None,
+                    },
+                )?;
+                add_membership_on(&tx, id, mailbox, d.uid, &d.flags, &d.gm_labels)?;
+                let one = MessageQuery {
+                    limit: 1,
+                    ..Default::default()
+                };
+                added.extend(query_messages_on(&tx, &one, Some(id), destinations)?.1);
+            }
+            tx.commit()?;
+            Ok(added)
+        })
     }
 
     pub fn update_flags(
@@ -549,13 +565,7 @@ impl Index {
     }
 
     pub fn update_labels_for_message(&self, message: i64, labels: &[String]) -> anyhow::Result<()> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE memberships SET gm_labels=?2 WHERE message=?1",
-                params![message, join_list(labels)],
-            )
-        })?;
-        Ok(())
+        self.with(|c| update_labels_on(c, message, labels))
     }
 
     /// UIDs of a mailbox that are still believed to exist on the server.
@@ -709,78 +719,7 @@ impl Index {
         id: Option<i64>,
         destinations: u32,
     ) -> anyhow::Result<(u64, Vec<MessageSummary>)> {
-        let states: Option<String> = if q.states.is_empty() {
-            None
-        } else {
-            Some(
-                q.states
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(","),
-            )
-        };
-        let text = q
-            .text
-            .as_ref()
-            .filter(|t| !t.trim().is_empty())
-            .map(|t| format!("%{}%", like_escape(&fold(t.trim()))));
-        // A single message is a rowid lookup: written as `?6 IS NULL OR g.id=?6` SQLite can't use
-        // the key and scans the table, which made discovering n messages cost n² row reads.
-        let by_id = if id.is_some() { "g.id=?6" } else { "?6 IS NULL" };
-        let filter = format!(
-            "WHERE {by_id}
-              AND (?1 IS NULL OR g.account=?1)
-              AND (?2 IS NULL OR EXISTS(SELECT 1 FROM memberships m WHERE m.message=g.id AND m.mailbox=?2))
-              AND (?3=0 OR g.reviewed=0)
-              AND (?4 IS NULL OR malo_fold(
-                    coalesce(json_extract(g.envelope, '$.subject'), '') || ' ' ||
-                    coalesce(json_extract(g.envelope, '$.from_name'), '') || ' ' ||
-                    coalesce(json_extract(g.envelope, '$.from'), '') || ' ' ||
-                    coalesce(json_extract(g.envelope, '$.to'), '')) LIKE ?4 ESCAPE '\\')
-              AND (?5 IS NULL OR instr(',' || ?5 || ',', ',' || g.state || ',') > 0)"
-        );
-        self.with(|c| {
-            let p = params![q.account, q.mailbox, q.new_only as i32, text, states, id];
-            // The total only matters for paging a list; counting is a full scan.
-            let total: i64 = match id {
-                Some(_) => 0,
-                None => c.query_row(&format!("SELECT COUNT(*) FROM messages g {filter}"), p, |r| r.get(0))?,
-            };
-            let sql = format!(
-                "SELECT g.id, g.account, g.envelope, g.size, g.internaldate, g.state, g.error, g.reviewed, g.first_seen_at,
-                    (SELECT COUNT(*) FROM replicas r WHERE r.message=g.id AND r.status='verified'),
-                    (SELECT group_concat(mb.display, char(31)) FROM memberships m JOIN mailboxes mb ON mb.id=m.mailbox WHERE m.message=g.id),
-                    (SELECT m.gm_labels FROM memberships m WHERE m.message=g.id LIMIT 1),
-                    (SELECT m.flags FROM memberships m WHERE m.message=g.id LIMIT 1),
-                    (SELECT COUNT(*)=SUM(m.deleted_on_server_at IS NOT NULL) FROM memberships m WHERE m.message=g.id)
-                 FROM messages g {filter} ORDER BY g.id DESC LIMIT ?7 OFFSET ?8"
-            );
-            let limit = if q.limit == 0 { 100 } else { q.limit.min(1000) };
-            let mut stmt = c.prepare(&sql)?;
-            let rows = stmt
-                .query_map(params![q.account, q.mailbox, q.new_only as i32, text, states, id, limit, q.offset], |r| {
-                    Ok(MessageSummary {
-                        id: r.get(0)?,
-                        account_id: r.get(1)?,
-                        envelope: serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or_else(|_| empty_envelope()),
-                        size: r.get::<_, i64>(3)? as u64,
-                        internal_date: ts(r.get(4)?),
-                        state: MessageState::parse(&r.get::<_, String>(5)?),
-                        error: r.get(6)?,
-                        reviewed: r.get::<_, i32>(7)? != 0,
-                        first_seen_at: ts(r.get(8)?).unwrap_or_default(),
-                        stored: r.get::<_, i64>(9)? as u32,
-                        destinations,
-                        mailboxes: split_list(r.get::<_, Option<String>>(10)?.unwrap_or_default()),
-                        labels: split_list(r.get::<_, Option<String>>(11)?.unwrap_or_default()),
-                        flags: split_list(r.get::<_, Option<String>>(12)?.unwrap_or_default()),
-                        deleted_on_server: r.get::<_, Option<bool>>(13)?.unwrap_or(false),
-                    })
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok((total as u64, rows))
-        })
+        self.with(|c| query_messages_on(c, q, id, destinations))
     }
 
     pub fn mark_reviewed(
@@ -1236,6 +1175,176 @@ fn message_row(r: &rusqlite::Row) -> rusqlite::Result<MessageRow> {
         attempts: r.get(12)?,
         last_attempt_at: ts(r.get(13)?),
     })
+}
+
+// Single-statement queries shared by the `Index` methods and the batched ones (which run them
+// inside a transaction they already hold the lock for).
+
+fn find_membership_on(
+    c: &Connection,
+    mailbox: i64,
+    uid: u32,
+) -> rusqlite::Result<Option<MembershipRow>> {
+    c.query_row(
+        &format!("{MEMBERSHIP_SELECT} WHERE mailbox=?1 AND uid=?2"),
+        params![mailbox, uid],
+        membership_row,
+    )
+    .optional()
+}
+
+fn find_by_gm_msgid_on(c: &Connection, account: &str, gm: &str) -> rusqlite::Result<Option<i64>> {
+    c.query_row(
+        "SELECT id FROM messages WHERE account=?1 AND gm_msgid=?2",
+        [account, gm],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
+fn insert_message_on(c: &Connection, m: &NewMessage) -> rusqlite::Result<i64> {
+    c.execute(
+        "INSERT INTO messages(account,state,first_seen_run,first_seen_at,size,internaldate,message_id_hdr,gm_msgid,envelope,sha256)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        params![
+            m.account,
+            m.state.as_str(),
+            m.run,
+            now(),
+            m.size as i64,
+            m.internaldate.map(|d| d.to_rfc3339()),
+            m.message_id_hdr,
+            m.gm_msgid,
+            serde_json::to_string(m.envelope).unwrap(),
+            m.sha256,
+        ],
+    )?;
+    Ok(c.last_insert_rowid())
+}
+
+fn add_membership_on(
+    c: &Connection,
+    message: i64,
+    mailbox: i64,
+    uid: u32,
+    flags: &[String],
+    labels: &[String],
+) -> rusqlite::Result<()> {
+    c.execute(
+        "INSERT INTO memberships(message,mailbox,uid,flags,gm_labels) VALUES(?1,?2,?3,?4,?5)
+         ON CONFLICT(mailbox,uid) DO UPDATE SET flags=?4, gm_labels=?5, deleted_on_server_at=NULL",
+        params![message, mailbox, uid, join_list(flags), join_list(labels)],
+    )?;
+    Ok(())
+}
+
+fn update_labels_on(c: &Connection, message: i64, labels: &[String]) -> rusqlite::Result<()> {
+    c.execute(
+        "UPDATE memberships SET gm_labels=?2 WHERE message=?1",
+        params![message, join_list(labels)],
+    )?;
+    Ok(())
+}
+
+fn query_messages_on(
+    c: &Connection,
+    q: &MessageQuery,
+    id: Option<i64>,
+    destinations: u32,
+) -> rusqlite::Result<(u64, Vec<MessageSummary>)> {
+    let states: Option<String> = if q.states.is_empty() {
+        None
+    } else {
+        Some(
+            q.states
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+        )
+    };
+    let text = q
+        .text
+        .as_ref()
+        .filter(|t| !t.trim().is_empty())
+        .map(|t| format!("%{}%", like_escape(&fold(t.trim()))));
+    // A single message is a rowid lookup: written as `?6 IS NULL OR g.id=?6` SQLite can't use
+    // the key and scans the table, which made discovering n messages cost n² row reads.
+    let by_id = if id.is_some() {
+        "g.id=?6"
+    } else {
+        "?6 IS NULL"
+    };
+    let filter = format!(
+        "WHERE {by_id}
+          AND (?1 IS NULL OR g.account=?1)
+          AND (?2 IS NULL OR EXISTS(SELECT 1 FROM memberships m WHERE m.message=g.id AND m.mailbox=?2))
+          AND (?3=0 OR g.reviewed=0)
+          AND (?4 IS NULL OR malo_fold(
+                coalesce(json_extract(g.envelope, '$.subject'), '') || ' ' ||
+                coalesce(json_extract(g.envelope, '$.from_name'), '') || ' ' ||
+                coalesce(json_extract(g.envelope, '$.from'), '') || ' ' ||
+                coalesce(json_extract(g.envelope, '$.to'), '')) LIKE ?4 ESCAPE '\\')
+          AND (?5 IS NULL OR instr(',' || ?5 || ',', ',' || g.state || ',') > 0)"
+    );
+    {
+        let p = params![q.account, q.mailbox, q.new_only as i32, text, states, id];
+        // The total only matters for paging a list; counting is a full scan.
+        let total: i64 = match id {
+            Some(_) => 0,
+            None => c.query_row(
+                &format!("SELECT COUNT(*) FROM messages g {filter}"),
+                p,
+                |r| r.get(0),
+            )?,
+        };
+        let sql = format!(
+            "SELECT g.id, g.account, g.envelope, g.size, g.internaldate, g.state, g.error, g.reviewed, g.first_seen_at,
+                (SELECT COUNT(*) FROM replicas r WHERE r.message=g.id AND r.status='verified'),
+                (SELECT group_concat(mb.display, char(31)) FROM memberships m JOIN mailboxes mb ON mb.id=m.mailbox WHERE m.message=g.id),
+                (SELECT m.gm_labels FROM memberships m WHERE m.message=g.id LIMIT 1),
+                (SELECT m.flags FROM memberships m WHERE m.message=g.id LIMIT 1),
+                (SELECT COUNT(*)=SUM(m.deleted_on_server_at IS NOT NULL) FROM memberships m WHERE m.message=g.id)
+             FROM messages g {filter} ORDER BY g.id DESC LIMIT ?7 OFFSET ?8"
+        );
+        let limit = if q.limit == 0 { 100 } else { q.limit.min(1000) };
+        let mut stmt = c.prepare(&sql)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    q.account,
+                    q.mailbox,
+                    q.new_only as i32,
+                    text,
+                    states,
+                    id,
+                    limit,
+                    q.offset
+                ],
+                |r| {
+                    Ok(MessageSummary {
+                        id: r.get(0)?,
+                        account_id: r.get(1)?,
+                        envelope: serde_json::from_str(&r.get::<_, String>(2)?)
+                            .unwrap_or_else(|_| empty_envelope()),
+                        size: r.get::<_, i64>(3)? as u64,
+                        internal_date: ts(r.get(4)?),
+                        state: MessageState::parse(&r.get::<_, String>(5)?),
+                        error: r.get(6)?,
+                        reviewed: r.get::<_, i32>(7)? != 0,
+                        first_seen_at: ts(r.get(8)?).unwrap_or_default(),
+                        stored: r.get::<_, i64>(9)? as u32,
+                        destinations,
+                        mailboxes: split_list(r.get::<_, Option<String>>(10)?.unwrap_or_default()),
+                        labels: split_list(r.get::<_, Option<String>>(11)?.unwrap_or_default()),
+                        flags: split_list(r.get::<_, Option<String>>(12)?.unwrap_or_default()),
+                        deleted_on_server: r.get::<_, Option<bool>>(13)?.unwrap_or(false),
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((total as u64, rows))
+    }
 }
 
 const MEMBERSHIP_SELECT: &str =
