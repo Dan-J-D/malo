@@ -1,7 +1,7 @@
 //! Per-user index in SQLCipher (`users/<id>/index.db`).
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, TryLockError};
 
 use chrono::{DateTime, Utc};
 use malo_api::{AuditEntry, CheckReport, Envelope, MailboxInfo, MessageState, MessageSummary};
@@ -9,6 +9,27 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::Key;
+
+/// Locks a SQLite connection shared by async tasks. Uncontended, it's a plain lock. When another
+/// task holds it (a backup busy in the index), the wait happens with this runtime worker handed
+/// off: otherwise every request queued on the lock pins a worker, and once all are pinned the
+/// server can't even finish TLS handshakes.
+pub fn lock_db<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    match m.try_lock() {
+        Ok(g) => g,
+        Err(TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(TryLockError::WouldBlock) => {
+            let wait = || m.lock().unwrap_or_else(|e| e.into_inner());
+            let multi_thread = tokio::runtime::Handle::try_current()
+                .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
+            if multi_thread {
+                tokio::task::block_in_place(wait)
+            } else {
+                wait()
+            }
+        }
+    }
+}
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS mailboxes (
@@ -282,7 +303,7 @@ impl Index {
         if let Some(fault) = crate::faults::pick(crate::faults::Site::Index, "") {
             anyhow::bail!("index: {}", crate::faults::io_error(fault));
         }
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = lock_db(&self.conn);
         Ok(f(&conn)?)
     }
 
@@ -704,7 +725,12 @@ impl Index {
             .as_ref()
             .filter(|t| !t.trim().is_empty())
             .map(|t| format!("%{}%", like_escape(&fold(t.trim()))));
-        let filter = "WHERE (?1 IS NULL OR g.account=?1)
+        // A single message is a rowid lookup: written as `?6 IS NULL OR g.id=?6` SQLite can't use
+        // the key and scans the table, which made discovering n messages cost n² row reads.
+        let by_id = if id.is_some() { "g.id=?6" } else { "?6 IS NULL" };
+        let filter = format!(
+            "WHERE {by_id}
+              AND (?1 IS NULL OR g.account=?1)
               AND (?2 IS NULL OR EXISTS(SELECT 1 FROM memberships m WHERE m.message=g.id AND m.mailbox=?2))
               AND (?3=0 OR g.reviewed=0)
               AND (?4 IS NULL OR malo_fold(
@@ -712,11 +738,15 @@ impl Index {
                     coalesce(json_extract(g.envelope, '$.from_name'), '') || ' ' ||
                     coalesce(json_extract(g.envelope, '$.from'), '') || ' ' ||
                     coalesce(json_extract(g.envelope, '$.to'), '')) LIKE ?4 ESCAPE '\\')
-              AND (?5 IS NULL OR instr(',' || ?5 || ',', ',' || g.state || ',') > 0)
-              AND (?6 IS NULL OR g.id=?6)";
+              AND (?5 IS NULL OR instr(',' || ?5 || ',', ',' || g.state || ',') > 0)"
+        );
         self.with(|c| {
             let p = params![q.account, q.mailbox, q.new_only as i32, text, states, id];
-            let total: i64 = c.query_row(&format!("SELECT COUNT(*) FROM messages g {filter}"), p, |r| r.get(0))?;
+            // The total only matters for paging a list; counting is a full scan.
+            let total: i64 = match id {
+                Some(_) => 0,
+                None => c.query_row(&format!("SELECT COUNT(*) FROM messages g {filter}"), p, |r| r.get(0))?,
+            };
             let sql = format!(
                 "SELECT g.id, g.account, g.envelope, g.size, g.internaldate, g.state, g.error, g.reviewed, g.first_seen_at,
                     (SELECT COUNT(*) FROM replicas r WHERE r.message=g.id AND r.status='verified'),

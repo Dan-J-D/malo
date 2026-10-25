@@ -216,6 +216,9 @@ async fn backup_mailbox(
     // 2. Discovery pass: insert + announce before downloading.
     if !new_uids.is_empty() {
         for d in conn.discover(&new_uids).await? {
+            // Index work is synchronous; give other tasks on this worker (new connections among
+            // them) a turn now and then, or a big first sync stalls the server for its duration.
+            tokio::task::consume_budget().await;
             if ctx.index.find_membership(mb.id, d.uid)?.is_some() {
                 continue;
             }
@@ -268,6 +271,7 @@ async fn backup_mailbox(
     let pending = ctx.index.pending_messages(&account.id, ctx.manual)?;
     let mut work: Vec<(MessageRow, u32)> = Vec::new();
     for m in pending {
+        tokio::task::consume_budget().await;
         if let Some(ms) = ctx
             .index
             .memberships(m.id)?
@@ -312,6 +316,7 @@ async fn backup_mailbox(
     let mut highest = mb.highest_uid;
     let mut uids: Vec<(u32, MessageState)> = Vec::new();
     for uid in ctx.index.live_uids(mb.id)? {
+        tokio::task::consume_budget().await;
         if let Some(ms) = ctx.index.find_membership(mb.id, uid)? {
             let st = ctx
                 .index

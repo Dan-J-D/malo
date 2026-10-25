@@ -167,7 +167,7 @@ impl Db {
     }
 
     pub fn with<R>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<R>) -> anyhow::Result<R> {
-        let c = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let c = malo_core::index::lock_db(&self.conn);
         Ok(f(&c)?)
     }
 

@@ -24,6 +24,18 @@ fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
+/// reqwest's own message ("error sending request for url …") hides why; the cause chain has it
+/// (timed out, connection refused, certificate mismatch…).
+fn net_err(e: reqwest::Error) -> String {
+    let mut msg = e.to_string();
+    let mut src = std::error::Error::source(&e);
+    while let Some(s) = src {
+        msg = format!("{msg}: {s}");
+        src = s.source();
+    }
+    msg
+}
+
 #[derive(Clone)]
 struct Conn {
     base: String,
@@ -477,7 +489,7 @@ async fn api(
     if let Some(b) = body {
         r = r.json(&b);
     }
-    let resp = check(r.send().await.map_err(err)?).await?;
+    let resp = check(r.send().await.map_err(net_err)?).await?;
     let text = resp.text().await.map_err(err)?;
     if text.is_empty() {
         return Ok(serde_json::Value::Null);
