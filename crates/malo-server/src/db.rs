@@ -1,0 +1,614 @@
+//! `server.db`: plain SQLite without secrets — users, sessions, invites, job metadata, schedules, settings.
+
+use std::path::Path;
+use std::sync::Mutex;
+
+use chrono::{DateTime, Utc};
+use malo_api::{
+    AdminSettings, JobInfo, JobKind, JobProgress, JobState, JobTrigger, Role, ScheduledJob,
+    UserInfo,
+};
+use rusqlite::{params, Connection, OptionalExtension};
+
+const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    role TEXT NOT NULL,
+    disabled INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    max_accounts INTEGER,
+    last_login TEXT
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS invites (
+    code_hash TEXT PRIMARY KEY,
+    username TEXT,
+    role TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS jobs (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    state TEXT NOT NULL,
+    trigger TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    progress TEXT NOT NULL DEFAULT '{"done":0,"total":0,"message":""}',
+    error TEXT,
+    result TEXT
+);
+CREATE INDEX IF NOT EXISTS jobs_user ON jobs(user_id, created_at);
+CREATE TABLE IF NOT EXISTS schedules (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    interval_secs INTEGER NOT NULL,
+    next_run TEXT NOT NULL,
+    PRIMARY KEY(user_id, key)
+);
+CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+"#;
+
+pub struct Db {
+    conn: Mutex<Connection>,
+}
+
+fn ts(s: Option<String>) -> Option<DateTime<Utc>> {
+    s.and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+        .map(|d| d.with_timezone(&Utc))
+}
+
+fn role_str(r: Role) -> &'static str {
+    match r {
+        Role::Admin => "admin",
+        Role::User => "user",
+    }
+}
+
+fn parse_role(s: &str) -> Role {
+    if s == "admin" {
+        Role::Admin
+    } else {
+        Role::User
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UserRow {
+    pub id: String,
+    pub username: String,
+    pub role: Role,
+    pub disabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub max_accounts: Option<u32>,
+    pub last_login: Option<DateTime<Utc>>,
+}
+
+impl UserRow {
+    pub fn info(&self, unlocked: bool) -> UserInfo {
+        UserInfo {
+            id: self.id.clone(),
+            username: self.username.clone(),
+            role: self.role,
+            disabled: self.disabled,
+            created_at: self.created_at,
+            max_accounts: self.max_accounts,
+            unlocked,
+        }
+    }
+}
+
+fn user_row(r: &rusqlite::Row) -> rusqlite::Result<UserRow> {
+    Ok(UserRow {
+        id: r.get(0)?,
+        username: r.get(1)?,
+        role: parse_role(&r.get::<_, String>(2)?),
+        disabled: r.get::<_, i32>(3)? != 0,
+        created_at: ts(r.get(4)?).unwrap_or_default(),
+        max_accounts: r.get(5)?,
+        last_login: ts(r.get(6)?),
+    })
+}
+
+const USER_SELECT: &str =
+    "SELECT id, username, role, disabled, created_at, max_accounts, last_login FROM users";
+
+fn job_row(r: &rusqlite::Row) -> rusqlite::Result<(String, JobInfo)> {
+    let kind: String = r.get(2)?;
+    let progress: String = r.get(8)?;
+    let result: Option<String> = r.get(10)?;
+    Ok((
+        r.get(1)?,
+        JobInfo {
+            id: r.get(0)?,
+            kind: serde_json::from_str(&kind).unwrap_or(JobKind::Check {
+                scope: malo_api::CheckScope::All,
+                deep: false,
+            }),
+            state: JobState::parse(&r.get::<_, String>(3)?),
+            trigger: if r.get::<_, String>(4)? == "scheduled" {
+                JobTrigger::Scheduled
+            } else {
+                JobTrigger::Manual
+            },
+            created_at: ts(r.get(5)?).unwrap_or_default(),
+            started_at: ts(r.get(6)?),
+            finished_at: ts(r.get(7)?),
+            progress: serde_json::from_str(&progress).unwrap_or_default(),
+            error: r.get(9)?,
+            result: result.and_then(|s| serde_json::from_str(&s).ok()),
+        },
+    ))
+}
+
+const JOB_SELECT: &str =
+    "SELECT id, user_id, kind, state, trigger, created_at, started_at, finished_at, progress, error, result FROM jobs";
+
+impl Db {
+    pub fn open(path: &Path) -> anyhow::Result<Db> {
+        let conn = Connection::open(path)?;
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;",
+        )?;
+        conn.execute_batch(SCHEMA)?;
+        Ok(Db {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    pub fn with<R>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<R>) -> anyhow::Result<R> {
+        let c = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(f(&c)?)
+    }
+
+    // ───── settings ─────
+
+    pub fn setting(&self, k: &str) -> anyhow::Result<Option<String>> {
+        self.with(|c| {
+            c.query_row("SELECT v FROM settings WHERE k=?1", [k], |r| r.get(0))
+                .optional()
+        })
+    }
+
+    pub fn set_setting(&self, k: &str, v: &str) -> anyhow::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO settings(k,v) VALUES(?1,?2) ON CONFLICT(k) DO UPDATE SET v=?2",
+                [k, v],
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn delete_setting(&self, k: &str) -> anyhow::Result<()> {
+        self.with(|c| c.execute("DELETE FROM settings WHERE k=?1", [k]))?;
+        Ok(())
+    }
+
+    pub fn admin_settings(&self) -> anyhow::Result<AdminSettings> {
+        Ok(self
+            .setting("admin")?
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default())
+    }
+
+    pub fn set_admin_settings(&self, s: &AdminSettings) -> anyhow::Result<()> {
+        self.set_setting("admin", &serde_json::to_string(s)?)
+    }
+
+    // ───── users ─────
+
+    pub fn active_admin_count(&self) -> anyhow::Result<u64> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM users WHERE role='admin' AND disabled=0",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n as u64)
+        })
+    }
+
+    pub fn user_count(&self) -> anyhow::Result<u64> {
+        self.with(|c| {
+            c.query_row("SELECT COUNT(*) FROM users", [], |r| r.get::<_, i64>(0))
+                .map(|n| n as u64)
+        })
+    }
+
+    pub fn create_user(
+        &self,
+        id: &str,
+        username: &str,
+        role: Role,
+        max_accounts: Option<u32>,
+    ) -> anyhow::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO users(id, username, role, created_at, max_accounts) VALUES(?1,?2,?3,?4,?5)",
+                params![id, username, role_str(role), Utc::now().to_rfc3339(), max_accounts],
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn user(&self, id: &str) -> anyhow::Result<Option<UserRow>> {
+        self.with(|c| {
+            c.query_row(&format!("{USER_SELECT} WHERE id=?1"), [id], user_row)
+                .optional()
+        })
+    }
+
+    pub fn user_by_name(&self, username: &str) -> anyhow::Result<Option<UserRow>> {
+        self.with(|c| {
+            c.query_row(
+                &format!("{USER_SELECT} WHERE username=?1"),
+                [username],
+                user_row,
+            )
+            .optional()
+        })
+    }
+
+    pub fn users(&self) -> anyhow::Result<Vec<UserRow>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(&format!("{USER_SELECT} ORDER BY username"))?;
+            let rows = stmt.query_map([], user_row)?.collect();
+            rows
+        })
+    }
+
+    pub fn update_user(
+        &self,
+        id: &str,
+        disabled: Option<bool>,
+        role: Option<Role>,
+        max_accounts: Option<Option<u32>>,
+    ) -> anyhow::Result<()> {
+        self.with(|c| {
+            if let Some(d) = disabled {
+                c.execute("UPDATE users SET disabled=?2 WHERE id=?1", params![id, d])?;
+            }
+            if let Some(r) = role {
+                c.execute(
+                    "UPDATE users SET role=?2 WHERE id=?1",
+                    params![id, role_str(r)],
+                )?;
+            }
+            if let Some(m) = max_accounts {
+                c.execute(
+                    "UPDATE users SET max_accounts=?2 WHERE id=?1",
+                    params![id, m],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn touch_login(&self, id: &str) -> anyhow::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE users SET last_login=?2 WHERE id=?1",
+                params![id, Utc::now().to_rfc3339()],
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn delete_user(&self, id: &str) -> anyhow::Result<()> {
+        self.with(|c| c.execute("DELETE FROM users WHERE id=?1", [id]))?;
+        Ok(())
+    }
+
+    // ───── sessions ─────
+
+    pub fn create_session(
+        &self,
+        token_hash: &str,
+        user_id: &str,
+        expires_at: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO sessions(token_hash,user_id,created_at,last_seen,expires_at) VALUES(?1,?2,?3,?3,?4)",
+                params![token_hash, user_id, now, expires_at.to_rfc3339()],
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Returns the user id if the session exists, isn't expired and hasn't been idle too long.
+    pub fn check_session(
+        &self,
+        token_hash: &str,
+        idle: chrono::Duration,
+    ) -> anyhow::Result<Option<String>> {
+        let now = Utc::now();
+        self.with(|c| {
+            let row: Option<(String, String, String)> = c
+                .query_row(
+                    "SELECT user_id, last_seen, expires_at FROM sessions WHERE token_hash=?1",
+                    [token_hash],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            let Some((user, last_seen, expires)) = row else {
+                return Ok(None);
+            };
+            let expired = ts(Some(expires)).is_none_or(|e| e <= now);
+            let idle_out = ts(Some(last_seen)).is_none_or(|l| now - l > idle);
+            if expired || idle_out {
+                c.execute("DELETE FROM sessions WHERE token_hash=?1", [token_hash])?;
+                return Ok(None);
+            }
+            c.execute(
+                "UPDATE sessions SET last_seen=?2 WHERE token_hash=?1",
+                params![token_hash, now.to_rfc3339()],
+            )?;
+            Ok(Some(user))
+        })
+    }
+
+    pub fn delete_session(&self, token_hash: &str) -> anyhow::Result<()> {
+        self.with(|c| c.execute("DELETE FROM sessions WHERE token_hash=?1", [token_hash]))?;
+        Ok(())
+    }
+
+    pub fn delete_user_sessions(&self, user_id: &str) -> anyhow::Result<()> {
+        self.with(|c| c.execute("DELETE FROM sessions WHERE user_id=?1", [user_id]))?;
+        Ok(())
+    }
+
+    pub fn delete_all_sessions(&self) -> anyhow::Result<()> {
+        self.with(|c| c.execute("DELETE FROM sessions", []))?;
+        Ok(())
+    }
+
+    // ───── invites ─────
+
+    pub fn create_invite(
+        &self,
+        code_hash: &str,
+        username: Option<&str>,
+        role: Role,
+        expires: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO invites(code_hash,username,role,expires_at) VALUES(?1,?2,?3,?4)",
+                params![code_hash, username, role_str(role), expires.to_rfc3339()],
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Consumes an invite. Returns its role if valid for `username`.
+    pub fn redeem_invite(&self, code_hash: &str, username: &str) -> anyhow::Result<Option<Role>> {
+        self.with(|c| {
+            let row: Option<(Option<String>, String, String, i32)> = c
+                .query_row(
+                    "SELECT username, role, expires_at, used FROM invites WHERE code_hash=?1",
+                    [code_hash],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?;
+            let Some((name, role, exp, used)) = row else {
+                return Ok(None);
+            };
+            if used != 0 || ts(Some(exp)).is_none_or(|e| e < Utc::now()) {
+                return Ok(None);
+            }
+            if name.is_some_and(|n| !n.eq_ignore_ascii_case(username)) {
+                return Ok(None);
+            }
+            c.execute("UPDATE invites SET used=1 WHERE code_hash=?1", [code_hash])?;
+            Ok(Some(parse_role(&role)))
+        })
+    }
+
+    // ───── jobs ─────
+
+    pub fn insert_job(&self, user_id: &str, job: &JobInfo) -> anyhow::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO jobs(id,user_id,kind,state,trigger,created_at,started_at,finished_at,error) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![
+                    job.id,
+                    user_id,
+                    serde_json::to_string(&job.kind).unwrap(),
+                    job.state.as_str(),
+                    if job.trigger == JobTrigger::Scheduled { "scheduled" } else { "manual" },
+                    job.created_at.to_rfc3339(),
+                    job.started_at.map(|t| t.to_rfc3339()),
+                    job.finished_at.map(|t| t.to_rfc3339()),
+                    job.error,
+                ],
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn update_job(&self, job: &JobInfo) -> anyhow::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE jobs SET state=?2, started_at=?3, finished_at=?4, progress=?5, error=?6, result=?7 WHERE id=?1",
+                params![
+                    job.id,
+                    job.state.as_str(),
+                    job.started_at.map(|t| t.to_rfc3339()),
+                    job.finished_at.map(|t| t.to_rfc3339()),
+                    serde_json::to_string(&job.progress).unwrap(),
+                    job.error,
+                    job.result.as_ref().map(|r| r.to_string()),
+                ],
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn update_progress(&self, id: &str, p: &JobProgress) -> anyhow::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE jobs SET progress=?2 WHERE id=?1",
+                params![id, serde_json::to_string(p).unwrap()],
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn job(&self, id: &str) -> anyhow::Result<Option<(String, JobInfo)>> {
+        self.with(|c| {
+            c.query_row(&format!("{JOB_SELECT} WHERE id=?1"), [id], job_row)
+                .optional()
+        })
+    }
+
+    pub fn jobs(&self, user_id: &str, limit: u32) -> anyhow::Result<Vec<JobInfo>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(&format!(
+                "{JOB_SELECT} WHERE user_id=?1 ORDER BY created_at DESC LIMIT ?2"
+            ))?;
+            let rows = stmt
+                .query_map(params![user_id, limit], job_row)?
+                .map(|r| r.map(|(_, j)| j))
+                .collect();
+            rows
+        })
+    }
+
+    pub fn active_jobs(&self, user_id: &str) -> anyhow::Result<Vec<JobInfo>> {
+        self.with(|c| {
+            let mut stmt =
+                c.prepare(&format!("{JOB_SELECT} WHERE user_id=?1 AND state IN ('queued','running') ORDER BY created_at"))?;
+            let rows = stmt.query_map(params![user_id], job_row)?.map(|r| r.map(|(_, j)| j)).collect();
+            rows
+        })
+    }
+
+    /// Jobs left queued/running by a previous process are marked failed at startup.
+    pub fn fail_stale_jobs(&self) -> anyhow::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE jobs SET state='failed', error='server restarted', finished_at=?1 WHERE state IN ('queued','running')",
+                [Utc::now().to_rfc3339()],
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn skipped_since(
+        &self,
+        user_id: &str,
+        since: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<u32> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM jobs WHERE user_id=?1 AND state='skipped_locked' AND (?2 IS NULL OR created_at > ?2)",
+                params![user_id, since.map(|s| s.to_rfc3339())],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n as u32)
+        })
+    }
+
+    pub fn prune_jobs(&self, keep_days: i64) -> anyhow::Result<()> {
+        let cutoff = (Utc::now() - chrono::Duration::days(keep_days)).to_rfc3339();
+        self.with(|c| {
+            c.execute(
+                "DELETE FROM jobs WHERE created_at < ?1 AND state NOT IN ('queued','running')",
+                [cutoff],
+            )
+        })?;
+        Ok(())
+    }
+
+    // ───── schedules ─────
+
+    pub fn schedules(
+        &self,
+        user_id: Option<&str>,
+    ) -> anyhow::Result<Vec<(String, ScheduledJob, i64)>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT user_id, key, kind, next_run, interval_secs FROM schedules WHERE (?1 IS NULL OR user_id=?1) ORDER BY next_run",
+            )?;
+            let rows = stmt
+                .query_map(params![user_id], |r| {
+                    let kind: String = r.get(2)?;
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        ScheduledJob {
+                            key: r.get(1)?,
+                            kind: serde_json::from_str(&kind).unwrap_or(JobKind::Check { scope: malo_api::CheckScope::All, deep: false }),
+                            next_run: ts(r.get(3)?).unwrap_or_default(),
+                        },
+                        r.get::<_, i64>(4)?,
+                    ))
+                })?
+                .collect();
+            rows
+        })
+    }
+
+    pub fn upsert_schedule(
+        &self,
+        user_id: &str,
+        key: &str,
+        kind: &JobKind,
+        interval_secs: i64,
+        first_run: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO schedules(user_id,key,kind,interval_secs,next_run) VALUES(?1,?2,?3,?4,?5)
+                 ON CONFLICT(user_id,key) DO UPDATE SET kind=?3,
+                    next_run=CASE WHEN interval_secs<>?4 THEN ?5 ELSE next_run END, interval_secs=?4",
+                params![user_id, key, serde_json::to_string(kind).unwrap(), interval_secs, first_run.to_rfc3339()],
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn set_next_run(
+        &self,
+        user_id: &str,
+        key: &str,
+        next: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE schedules SET next_run=?3 WHERE user_id=?1 AND key=?2",
+                params![user_id, key, next.to_rfc3339()],
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn retain_schedules(&self, user_id: &str, keep: &[String]) -> anyhow::Result<()> {
+        let existing: Vec<String> = self.with(|c| {
+            let mut stmt = c.prepare("SELECT key FROM schedules WHERE user_id=?1")?;
+            let rows = stmt.query_map([user_id], |r| r.get(0))?.collect();
+            rows
+        })?;
+        for k in existing.into_iter().filter(|k| !keep.contains(k)) {
+            self.with(|c| {
+                c.execute(
+                    "DELETE FROM schedules WHERE user_id=?1 AND key=?2",
+                    params![user_id, k],
+                )
+            })?;
+        }
+        Ok(())
+    }
+}

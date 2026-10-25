@@ -1,0 +1,85 @@
+{
+  "seed": 204,
+  "violation": {
+    "kind": "zombie_user_dir",
+    "detail": "deleted user 1's folder came back: /tmp/.tmpBFCpDY/users/75b3b290-2981-4f8d-bd5b-cde58eaefce1",
+    "step": 9
+  },
+  "ops": [
+    {
+      "Register": {
+        "u": 0
+      }
+    },
+    {
+      "Register": {
+        "u": 1
+      }
+    },
+    {
+      "AddAccount": {
+        "u": 0,
+        "mailbox": 0
+      }
+    },
+    {
+      "AddAccount": {
+        "u": 1,
+        "mailbox": 0
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 0,
+        "to_box": false
+      }
+    },
+    {
+      "Register": {
+        "u": 3
+      }
+    },
+    {
+      "Probe": {
+        "u": 3,
+        "v": 0
+      }
+    },
+    {
+      "AddDestination": {
+        "u": 1,
+        "kind": "Traversal"
+      }
+    },
+    {
+      "AdminDelete": {
+        "u": 1
+      }
+    },
+    {
+      "AddAccount": {
+        "u": 0,
+        "mailbox": 0
+      }
+    },
+    {
+      "Repair": {
+        "u": 0,
+        "wait": true
+      }
+    }
+  ],
+  "trace": [
+    "  0: Register { u: 0 }",
+    "  1: Register { u: 1 }",
+    "  2: AddAccount { u: 0, mailbox: 0 }",
+    "  3: AddAccount { u: 1, mailbox: 0 }",
+    "  4: ImapAppend { m: 0, to_box: false }",
+    "  5: Register { u: 3 }",
+    "  6: Probe { u: 3, v: 0 }",
+    "  7: AddDestination { u: 1, kind: Traversal }",
+    "  8: AdminDelete { u: 1 }",
+    "  9: AddAccount { u: 0, mailbox: 0 }",
+    "summary: 3 users registered (1 deleted), 3 accounts, 1 messages created, 0 purged by Malo, 1 jobs"
+  ]
+}

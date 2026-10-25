@@ -1,0 +1,8 @@
+target
+node_modules
+dist
+.astro
+src-tauri/target
+src-tauri/binaries
+data
+.git

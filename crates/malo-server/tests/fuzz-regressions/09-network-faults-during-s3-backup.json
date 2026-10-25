@@ -1,0 +1,171 @@
+{
+ "seed": 0,
+ "violation": {
+  "kind": "scenario",
+  "detail": "",
+  "step": 0
+ },
+ "ops": [
+  {
+   "Register": {
+    "u": 0
+   }
+  },
+  {
+   "AddDestination": {
+    "u": 0,
+    "kind": "SharedS3"
+   }
+  },
+  {
+   "AddAccount": {
+    "u": 0,
+    "mailbox": 0
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "Burst": {
+    "ops": [
+     {
+      "Backup": {
+       "u": 0,
+       "slot": 0,
+       "wait": false
+      }
+     }
+    ]
+   }
+  },
+  {
+   "Net": {
+    "kind": "CutUpload",
+    "ms": 2500
+   }
+  },
+  {
+   "Backup": {
+    "u": 0,
+    "slot": 0,
+    "wait": true
+   }
+  },
+  {
+   "Net": {
+    "kind": "Reset",
+    "ms": 1500
+   }
+  },
+  {
+   "Backup": {
+    "u": 0,
+    "slot": 0,
+    "wait": true
+   }
+  },
+  {
+   "Net": {
+    "kind": "Latency",
+    "ms": 2000
+   }
+  },
+  {
+   "Check": {
+    "u": 0,
+    "deep": true,
+    "wait": true
+   }
+  },
+  {
+   "Faults": {
+    "site": "StoreRead",
+    "fault": "FlipBit",
+    "per_mille": 1000,
+    "target": {
+     "Shared": {
+      "u": 0
+     }
+    },
+    "count": 5
+   }
+  },
+  {
+   "Check": {
+    "u": 0,
+    "deep": true,
+    "wait": true
+   }
+  },
+  {
+   "ArmPurge": {
+    "u": 0,
+    "slot": 0
+   }
+  },
+  {
+   "Faults": {
+    "site": "StoreWrite",
+    "fault": "LostWrite",
+    "per_mille": 1000,
+    "target": "AnyDestination",
+    "count": 10
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "Backup": {
+    "u": 0,
+    "slot": 0,
+    "wait": true
+   }
+  },
+  {
+   "Purge": {
+    "u": 0,
+    "slot": 0,
+    "wait": true
+   }
+  }
+ ],
+ "trace": []
+}

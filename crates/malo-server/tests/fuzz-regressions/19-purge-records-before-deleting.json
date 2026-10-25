@@ -1,0 +1,2226 @@
+{
+  "seed": 1000356,
+  "violation": {
+    "kind": "mail_lost",
+    "detail": "fztmpRtUjiXx8 vanished from mailbox 2 without any purge record",
+    "step": 316
+  },
+  "ops": [
+    {
+      "Register": {
+        "u": 0
+      }
+    },
+    {
+      "Register": {
+        "u": 1
+      }
+    },
+    {
+      "AddAccount": {
+        "u": 0,
+        "mailbox": 0
+      }
+    },
+    {
+      "AddAccount": {
+        "u": 1,
+        "mailbox": 0
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 0,
+        "to_box": false
+      }
+    },
+    {
+      "ImapDelete": {
+        "m": 0
+      }
+    },
+    {
+      "Lock": {
+        "u": 2
+      }
+    },
+    {
+      "LoginB": {
+        "u": 3
+      }
+    },
+    {
+      "Backup": {
+        "u": 2,
+        "slot": 2,
+        "wait": false
+      }
+    },
+    {
+      "Faults": {
+        "site": "ConfigWrite",
+        "fault": "NoSpace",
+        "per_mille": 393,
+        "target": "Local",
+        "count": 2
+      }
+    },
+    {
+      "ImapDelete": {
+        "m": 0
+      }
+    },
+    {
+      "Backup": {
+        "u": 0,
+        "slot": 0,
+        "wait": false
+      }
+    },
+    {
+      "Register": {
+        "u": 2
+      }
+    },
+    {
+      "AddDestination": {
+        "u": 3,
+        "kind": "SharedS3"
+      }
+    },
+    {
+      "Backup": {
+        "u": 0,
+        "slot": 0,
+        "wait": true
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 1,
+        "to_box": true
+      }
+    },
+    {
+      "AddAccount": {
+        "u": 0,
+        "mailbox": 2
+      }
+    },
+    {
+      "Backup": {
+        "u": 1,
+        "slot": 1,
+        "wait": true
+      }
+    },
+    {
+      "Backup": {
+        "u": 2,
+        "slot": 0,
+        "wait": false
+      }
+    },
+    {
+      "LogoutB": {
+        "u": 0
+      }
+    },
+    {
+      "AddAccount": {
+        "u": 0,
+        "mailbox": 1
+      }
+    },
+    {
+      "Login": {
+        "u": 0
+      }
+    },
+    {
+      "Login": {
+        "u": 3
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 0,
+        "to_box": false
+      }
+    },
+    {
+      "RemoveDestination": {
+        "u": 2,
+        "slot": 0
+      }
+    },
+    {
+      "Net": {
+        "kind": "CutUpload",
+        "ms": 574
+      }
+    },
+    {
+      "Register": {
+        "u": 0
+      }
+    },
+    {
+      "AddDestination": {
+        "u": 1,
+        "kind": "Traversal"
+      }
+    },
+    {
+      "ArmPurge": {
+        "u": 0,
+        "slot": 0
+      }
+    },
+    {
+      "CancelLatest": {
+        "u": 0
+      }
+    },
+    {
+      "AddDestination": {
+        "u": 0,
+        "kind": "SharedS3"
+      }
+    },
+    {
+      "Backup": {
+        "u": 2,
+        "slot": 2,
+        "wait": false
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 1,
+        "to_box": false
+      }
+    },
+    {
+      "RenameAccount": {
+        "u": 0,
+        "slot": 1
+      }
+    },
+    {
+      "Backup": {
+        "u": 1,
+        "slot": 1,
+        "wait": false
+      }
+    },
+    {
+      "DeleteSharedObject": {
+        "pick": 2669924852
+      }
+    },
+    {
+      "Login": {
+        "u": 0
+      }
+    },
+    {
+      "Register": {
+        "u": 1
+      }
+    },
+    {
+      "Register": {
+        "u": 3
+      }
+    },
+    {
+      "Faults": {
+        "site": "Spool",
+        "fault": "NoSpace",
+        "per_mille": 679,
+        "target": "Local",
+        "count": 6
+      }
+    },
+    "Restart",
+    {
+      "Faults": {
+        "site": "StoreWrite",
+        "fault": "FlipBit",
+        "per_mille": 187,
+        "target": {
+          "Shared": {
+            "u": 3
+          }
+        },
+        "count": 2
+      }
+    },
+    {
+      "LoginB": {
+        "u": 1
+      }
+    },
+    {
+      "AdminSetDisabled": {
+        "u": 2,
+        "disabled": false
+      }
+    },
+    {
+      "RemoveDestination": {
+        "u": 3,
+        "slot": 0
+      }
+    },
+    {
+      "Backup": {
+        "u": 2,
+        "slot": 2,
+        "wait": true
+      }
+    },
+    {
+      "Lock": {
+        "u": 3
+      }
+    },
+    {
+      "Sleep": {
+        "ms": 732
+      }
+    },
+    {
+      "LogoutB": {
+        "u": 1
+      }
+    },
+    {
+      "Backup": {
+        "u": 1,
+        "slot": 1,
+        "wait": false
+      }
+    },
+    {
+      "Lock": {
+        "u": 2
+      }
+    },
+    {
+      "Login": {
+        "u": 2
+      }
+    },
+    {
+      "ImapRecreateBox": {
+        "m": 0
+      }
+    },
+    {
+      "Faults": {
+        "site": "Cache",
+        "fault": "Error",
+        "per_mille": 743,
+        "target": "Local",
+        "count": 10
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 1,
+        "to_box": false
+      }
+    },
+    {
+      "Faults": {
+        "site": "StoreWrite",
+        "fault": "WriteThenError",
+        "per_mille": 264,
+        "target": {
+          "Shared": {
+            "u": 2
+          }
+        },
+        "count": 10
+      }
+    },
+    {
+      "Login": {
+        "u": 0
+      }
+    },
+    {
+      "StaleEdit": {
+        "u": 0,
+        "slot": 1
+      }
+    },
+    {
+      "Register": {
+        "u": 2
+      }
+    },
+    {
+      "Repair": {
+        "u": 3,
+        "wait": true
+      }
+    },
+    {
+      "ImapKick": {
+        "m": 2
+      }
+    },
+    {
+      "Login": {
+        "u": 3
+      }
+    },
+    {
+      "Rebuild": {
+        "u": 3,
+        "slot": 2,
+        "wait": false
+      }
+    },
+    {
+      "Backup": {
+        "u": 2,
+        "slot": 2,
+        "wait": false
+      }
+    },
+    {
+      "StaleEdit": {
+        "u": 3,
+        "slot": 0
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 2,
+        "to_box": false
+      }
+    },
+    {
+      "Faults": {
+        "site": "Index",
+        "fault": "NoSpace",
+        "per_mille": 349,
+        "target": "Local",
+        "count": 9
+      }
+    },
+    {
+      "ReadOnlyPrimary": {
+        "u": 1,
+        "ms": 931
+      }
+    },
+    {
+      "Purge": {
+        "u": 2,
+        "slot": 2,
+        "wait": false
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 1,
+        "to_box": false
+      }
+    },
+    "Restart",
+    {
+      "Probe": {
+        "u": 3,
+        "v": 0
+      }
+    },
+    {
+      "AddAccount": {
+        "u": 3,
+        "mailbox": 2
+      }
+    },
+    "Restart",
+    {
+      "Purge": {
+        "u": 0,
+        "slot": 2,
+        "wait": true
+      }
+    },
+    {
+      "Register": {
+        "u": 0
+      }
+    },
+    {
+      "AddDestination": {
+        "u": 1,
+        "kind": "SharedMount"
+      }
+    },
+    {
+      "Faults": {
+        "site": "StoreMeta",
+        "fault": "NoSpace",
+        "per_mille": 736,
+        "target": "AnyDestination",
+        "count": 2
+      }
+    },
+    {
+      "Purge": {
+        "u": 2,
+        "slot": 0,
+        "wait": false
+      }
+    },
+    {
+      "AddDestination": {
+        "u": 0,
+        "kind": "SharedMount"
+      }
+    },
+    {
+      "Register": {
+        "u": 1
+      }
+    },
+    "Restart",
+    {
+      "Register": {
+        "u": 0
+      }
+    },
+    {
+      "Burst": {
+        "ops": [
+          {
+            "Probe": {
+              "u": 3,
+              "v": 3
+            }
+          },
+          {
+            "Lock": {
+              "u": 3
+            }
+          },
+          {
+            "Backup": {
+              "u": 1,
+              "slot": 2,
+              "wait": false
+            }
+          },
+          {
+            "Backup": {
+              "u": 0,
+              "slot": 0,
+              "wait": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "Backup": {
+        "u": 1,
+        "slot": 0,
+        "wait": false
+      }
+    },
+    {
+      "Lock": {
+        "u": 1
+      }
+    },
+    {
+      "AddAccount": {
+        "u": 0,
+        "mailbox": 2
+      }
+    },
+    {
+      "CorruptSharedObject": {
+        "pick": 718867767
+      }
+    },
+    {
+      "Probe": {
+        "u": 1,
+        "v": 3
+      }
+    },
+    {
+      "ImapRecreateBox": {
+        "m": 2
+      }
+    },
+    {
+      "StorageOutage": {
+        "ms": 2395
+      }
+    },
+    {
+      "RenameAccount": {
+        "u": 1,
+        "slot": 2
+      }
+    },
+    {
+      "AddAccount": {
+        "u": 3,
+        "mailbox": 2
+      }
+    },
+    {
+      "ArmPurge": {
+        "u": 0,
+        "slot": 2
+      }
+    },
+    {
+      "Lock": {
+        "u": 0
+      }
+    },
+    {
+      "Login": {
+        "u": 0
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 2,
+        "to_box": false
+      }
+    },
+    {
+      "Login": {
+        "u": 2
+      }
+    },
+    {
+      "Login": {
+        "u": 1
+      }
+    },
+    {
+      "ArmPurge": {
+        "u": 2,
+        "slot": 0
+      }
+    },
+    {
+      "Backup": {
+        "u": 1,
+        "slot": 0,
+        "wait": false
+      }
+    },
+    {
+      "StaleEdit": {
+        "u": 1,
+        "slot": 2
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 2,
+        "to_box": false
+      }
+    },
+    {
+      "Lock": {
+        "u": 0
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 2,
+        "to_box": false
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 1,
+        "to_box": false
+      }
+    },
+    {
+      "AddAccount": {
+        "u": 0,
+        "mailbox": 2
+      }
+    },
+    {
+      "AddAccount": {
+        "u": 0,
+        "mailbox": 2
+      }
+    },
+    {
+      "Backup": {
+        "u": 3,
+        "slot": 0,
+        "wait": false
+      }
+    },
+    {
+      "AddDestination": {
+        "u": 3,
+        "kind": "SharedS3"
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 1,
+        "to_box": false
+      }
+    },
+    {
+      "Register": {
+        "u": 1
+      }
+    },
+    {
+      "AddDestination": {
+        "u": 3,
+        "kind": "SharedMount"
+      }
+    },
+    {
+      "Faults": {
+        "site": "ConfigWrite",
+        "fault": "Error",
+        "per_mille": 527,
+        "target": "Local",
+        "count": 8
+      }
+    },
+    {
+      "Faults": {
+        "site": "StoreRead",
+        "fault": "FlipBit",
+        "per_mille": 794,
+        "target": "AnyDestination",
+        "count": 10
+      }
+    },
+    {
+      "Backup": {
+        "u": 1,
+        "slot": 2,
+        "wait": true
+      }
+    },
+    {
+      "Rebuild": {
+        "u": 0,
+        "slot": 1,
+        "wait": true
+      }
+    },
+    {
+      "Sleep": {
+        "ms": 1056
+      }
+    },
+    {
+      "Backup": {
+        "u": 2,
+        "slot": 2,
+        "wait": false
+      }
+    },
+    {
+      "Login": {
+        "u": 2
+      }
+    },
+    {
+      "ReadOnlyPrimary": {
+        "u": 3,
+        "ms": 2897
+      }
+    },
+    {
+      "Repair": {
+        "u": 2,
+        "wait": false
+      }
+    },
+    {
+      "LogoutB": {
+        "u": 0
+      }
+    },
+    {
+      "Backup": {
+        "u": 1,
+        "slot": 1,
+        "wait": false
+      }
+    },
+    "ClearFaults",
+    {
+      "ImapAppend": {
+        "m": 2,
+        "to_box": true
+      }
+    },
+    {
+      "Backup": {
+        "u": 0,
+        "slot": 2,
+        "wait": false
+      }
+    },
+    {
+      "DeleteSharedObject": {
+        "pick": 2337014170
+      }
+    },
+    {
+      "Probe": {
+        "u": 2,
+        "v": 1
+      }
+    },
+    {
+      "Register": {
+        "u": 3
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 1,
+        "to_box": true
+      }
+    },
+    {
+      "RemoveAccount": {
+        "u": 3,
+        "slot": 1
+      }
+    },
+    {
+      "AddDestination": {
+        "u": 0,
+        "kind": "SharedS3"
+      }
+    },
+    {
+      "ImapDelete": {
+        "m": 2
+      }
+    },
+    {
+      "Login": {
+        "u": 2
+      }
+    },
+    {
+      "Login": {
+        "u": 3
+      }
+    },
+    {
+      "Backup": {
+        "u": 2,
+        "slot": 1,
+        "wait": false
+      }
+    },
+    {
+      "Probe": {
+        "u": 0,
+        "v": 0
+      }
+    },
+    {
+      "Purge": {
+        "u": 0,
+        "slot": 1,
+        "wait": false
+      }
+    },
+    {
+      "RenameAccount": {
+        "u": 1,
+        "slot": 1
+      }
+    },
+    {
+      "Check": {
+        "u": 1,
+        "deep": false,
+        "wait": false
+      }
+    },
+    {
+      "Register": {
+        "u": 0
+      }
+    },
+    {
+      "Backup": {
+        "u": 2,
+        "slot": 2,
+        "wait": false
+      }
+    },
+    {
+      "Probe": {
+        "u": 3,
+        "v": 2
+      }
+    },
+    {
+      "Register": {
+        "u": 1
+      }
+    },
+    {
+      "DeleteSharedObject": {
+        "pick": 3518235987
+      }
+    },
+    {
+      "ArmPurge": {
+        "u": 0,
+        "slot": 0
+      }
+    },
+    {
+      "Login": {
+        "u": 3
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 1,
+        "to_box": true
+      }
+    },
+    {
+      "Backup": {
+        "u": 3,
+        "slot": 1,
+        "wait": false
+      }
+    },
+    {
+      "Faults": {
+        "site": "ConfigWrite",
+        "fault": "NoSpace",
+        "per_mille": 866,
+        "target": "Local",
+        "count": 5
+      }
+    },
+    {
+      "Logout": {
+        "u": 1
+      }
+    },
+    {
+      "ChangePassword": {
+        "u": 1
+      }
+    },
+    {
+      "AddDestination": {
+        "u": 3,
+        "kind": "SharedS3"
+      }
+    },
+    {
+      "RenameAccount": {
+        "u": 0,
+        "slot": 2
+      }
+    },
+    {
+      "ArmPurge": {
+        "u": 1,
+        "slot": 0
+      }
+    },
+    {
+      "Sleep": {
+        "ms": 926
+      }
+    },
+    {
+      "Login": {
+        "u": 0
+      }
+    },
+    {
+      "ImapDelete": {
+        "m": 2
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 1,
+        "to_box": false
+      }
+    },
+    {
+      "Repair": {
+        "u": 1,
+        "wait": false
+      }
+    },
+    {
+      "Repair": {
+        "u": 0,
+        "wait": false
+      }
+    },
+    {
+      "Purge": {
+        "u": 3,
+        "slot": 0,
+        "wait": false
+      }
+    },
+    {
+      "Backup": {
+        "u": 2,
+        "slot": 0,
+        "wait": false
+      }
+    },
+    {
+      "Login": {
+        "u": 2
+      }
+    },
+    {
+      "CancelLatest": {
+        "u": 2
+      }
+    },
+    {
+      "Backup": {
+        "u": 1,
+        "slot": 2,
+        "wait": true
+      }
+    },
+    {
+      "Lock": {
+        "u": 2
+      }
+    },
+    {
+      "AddDestination": {
+        "u": 0,
+        "kind": "SharedMount"
+      }
+    },
+    {
+      "Purge": {
+        "u": 1,
+        "slot": 1,
+        "wait": false
+      }
+    },
+    {
+      "LoginB": {
+        "u": 3
+      }
+    },
+    {
+      "LogoutB": {
+        "u": 1
+      }
+    },
+    {
+      "Faults": {
+        "site": "Spool",
+        "fault": "NoSpace",
+        "per_mille": 768,
+        "target": "Local",
+        "count": 8
+      }
+    },
+    {
+      "Login": {
+        "u": 1
+      }
+    },
+    {
+      "Backup": {
+        "u": 3,
+        "slot": 1,
+        "wait": true
+      }
+    },
+    {
+      "Probe": {
+        "u": 0,
+        "v": 0
+      }
+    },
+    {
+      "Register": {
+        "u": 1
+      }
+    },
+    {
+      "RemoveDestination": {
+        "u": 0,
+        "slot": 2
+      }
+    },
+    {
+      "Login": {
+        "u": 3
+      }
+    },
+    {
+      "ReadOnlyPrimary": {
+        "u": 0,
+        "ms": 1894
+      }
+    },
+    {
+      "AddAccount": {
+        "u": 1,
+        "mailbox": 0
+      }
+    },
+    {
+      "AddDestination": {
+        "u": 2,
+        "kind": "SharedMount"
+      }
+    },
+    {
+      "LoginB": {
+        "u": 2
+      }
+    },
+    {
+      "Backup": {
+        "u": 3,
+        "slot": 0,
+        "wait": true
+      }
+    },
+    {
+      "Login": {
+        "u": 1
+      }
+    },
+    {
+      "Sleep": {
+        "ms": 1063
+      }
+    },
+    {
+      "Backup": {
+        "u": 0,
+        "slot": 0,
+        "wait": true
+      }
+    },
+    "ClearFaults",
+    {
+      "AddAccount": {
+        "u": 3,
+        "mailbox": 1
+      }
+    },
+    {
+      "Lock": {
+        "u": 3
+      }
+    },
+    {
+      "StorageOutage": {
+        "ms": 1523
+      }
+    },
+    {
+      "Check": {
+        "u": 1,
+        "deep": false,
+        "wait": false
+      }
+    },
+    {
+      "LoginB": {
+        "u": 0
+      }
+    },
+    {
+      "Backup": {
+        "u": 1,
+        "slot": 0,
+        "wait": true
+      }
+    },
+    {
+      "Faults": {
+        "site": "StoreRead",
+        "fault": "FlipBit",
+        "per_mille": 397,
+        "target": {
+          "Primary": {
+            "u": 2
+          }
+        },
+        "count": 7
+      }
+    },
+    {
+      "Backup": {
+        "u": 2,
+        "slot": 0,
+        "wait": true
+      }
+    },
+    {
+      "DeleteSharedObject": {
+        "pick": 1714850190
+      }
+    },
+    {
+      "Backup": {
+        "u": 1,
+        "slot": 2,
+        "wait": false
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 0,
+        "to_box": false
+      }
+    },
+    {
+      "Login": {
+        "u": 3
+      }
+    },
+    {
+      "Logout": {
+        "u": 0
+      }
+    },
+    {
+      "ImapRecreateBox": {
+        "m": 1
+      }
+    },
+    {
+      "Faults": {
+        "site": "StoreMeta",
+        "fault": "NoSpace",
+        "per_mille": 832,
+        "target": {
+          "Primary": {
+            "u": 3
+          }
+        },
+        "count": 7
+      }
+    },
+    {
+      "ReadOnlyPrimary": {
+        "u": 3,
+        "ms": 320
+      }
+    },
+    {
+      "ChangePassword": {
+        "u": 3
+      }
+    },
+    {
+      "ImapKick": {
+        "m": 2
+      }
+    },
+    {
+      "AddDestination": {
+        "u": 3,
+        "kind": "SharedMount"
+      }
+    },
+    {
+      "Purge": {
+        "u": 2,
+        "slot": 1,
+        "wait": true
+      }
+    },
+    {
+      "Probe": {
+        "u": 2,
+        "v": 0
+      }
+    },
+    {
+      "Register": {
+        "u": 3
+      }
+    },
+    {
+      "Lock": {
+        "u": 0
+      }
+    },
+    {
+      "DeleteSelf": {
+        "u": 2
+      }
+    },
+    {
+      "Logout": {
+        "u": 0
+      }
+    },
+    {
+      "ReadOnlyPrimary": {
+        "u": 3,
+        "ms": 946
+      }
+    },
+    {
+      "Check": {
+        "u": 1,
+        "deep": true,
+        "wait": true
+      }
+    },
+    {
+      "RemoveAccount": {
+        "u": 1,
+        "slot": 0
+      }
+    },
+    {
+      "Backup": {
+        "u": 0,
+        "slot": 1,
+        "wait": false
+      }
+    },
+    {
+      "Backup": {
+        "u": 2,
+        "slot": 0,
+        "wait": false
+      }
+    },
+    {
+      "ImapRecreateBox": {
+        "m": 2
+      }
+    },
+    {
+      "Register": {
+        "u": 0
+      }
+    },
+    {
+      "LogoutB": {
+        "u": 0
+      }
+    },
+    {
+      "Register": {
+        "u": 3
+      }
+    },
+    {
+      "Repair": {
+        "u": 0,
+        "wait": true
+      }
+    },
+    {
+      "ImapRecreateBox": {
+        "m": 0
+      }
+    },
+    {
+      "Register": {
+        "u": 3
+      }
+    },
+    {
+      "Login": {
+        "u": 3
+      }
+    },
+    {
+      "ImapDelete": {
+        "m": 1
+      }
+    },
+    {
+      "Register": {
+        "u": 0
+      }
+    },
+    {
+      "Sleep": {
+        "ms": 1001
+      }
+    },
+    {
+      "Sleep": {
+        "ms": 601
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 2,
+        "to_box": false
+      }
+    },
+    {
+      "Login": {
+        "u": 0
+      }
+    },
+    {
+      "Purge": {
+        "u": 0,
+        "slot": 2,
+        "wait": false
+      }
+    },
+    {
+      "Faults": {
+        "site": "Index",
+        "fault": "NoSpace",
+        "per_mille": 271,
+        "target": "Local",
+        "count": 2
+      }
+    },
+    {
+      "ImapDelete": {
+        "m": 0
+      }
+    },
+    {
+      "Login": {
+        "u": 3
+      }
+    },
+    {
+      "Purge": {
+        "u": 3,
+        "slot": 2,
+        "wait": false
+      }
+    },
+    {
+      "AddDestination": {
+        "u": 0,
+        "kind": "SharedS3"
+      }
+    },
+    {
+      "ImapKick": {
+        "m": 0
+      }
+    },
+    {
+      "CorruptSharedObject": {
+        "pick": 3547614300
+      }
+    },
+    {
+      "ImapDelete": {
+        "m": 0
+      }
+    },
+    {
+      "Check": {
+        "u": 1,
+        "deep": true,
+        "wait": true
+      }
+    },
+    {
+      "Check": {
+        "u": 1,
+        "deep": true,
+        "wait": true
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 0,
+        "to_box": true
+      }
+    },
+    {
+      "ArmPurge": {
+        "u": 0,
+        "slot": 2
+      }
+    },
+    {
+      "Register": {
+        "u": 3
+      }
+    },
+    {
+      "ArmPurge": {
+        "u": 2,
+        "slot": 0
+      }
+    },
+    {
+      "Register": {
+        "u": 1
+      }
+    },
+    {
+      "Rebuild": {
+        "u": 0,
+        "slot": 0,
+        "wait": false
+      }
+    },
+    {
+      "Sleep": {
+        "ms": 393
+      }
+    },
+    {
+      "StaleEdit": {
+        "u": 1,
+        "slot": 2
+      }
+    },
+    {
+      "Login": {
+        "u": 1
+      }
+    },
+    "ClearFaults",
+    {
+      "Backup": {
+        "u": 3,
+        "slot": 0,
+        "wait": true
+      }
+    },
+    {
+      "Probe": {
+        "u": 2,
+        "v": 0
+      }
+    },
+    "Restart",
+    {
+      "AddAccount": {
+        "u": 0,
+        "mailbox": 1
+      }
+    },
+    {
+      "Lock": {
+        "u": 3
+      }
+    },
+    {
+      "Register": {
+        "u": 0
+      }
+    },
+    {
+      "AddAccount": {
+        "u": 2,
+        "mailbox": 2
+      }
+    },
+    {
+      "Faults": {
+        "site": "StoreRead",
+        "fault": "Truncate",
+        "per_mille": 659,
+        "target": {
+          "Shared": {
+            "u": 3
+          }
+        },
+        "count": 7
+      }
+    },
+    {
+      "AddDestination": {
+        "u": 3,
+        "kind": "Traversal"
+      }
+    },
+    {
+      "CancelLatest": {
+        "u": 1
+      }
+    },
+    {
+      "Check": {
+        "u": 3,
+        "deep": false,
+        "wait": true
+      }
+    },
+    {
+      "ChangePassword": {
+        "u": 0
+      }
+    },
+    {
+      "ImapRecreateBox": {
+        "m": 0
+      }
+    },
+    {
+      "AddDestination": {
+        "u": 0,
+        "kind": "SharedMount"
+      }
+    },
+    {
+      "Check": {
+        "u": 3,
+        "deep": true,
+        "wait": false
+      }
+    },
+    {
+      "Login": {
+        "u": 0
+      }
+    },
+    {
+      "ImapKick": {
+        "m": 1
+      }
+    },
+    {
+      "Login": {
+        "u": 0
+      }
+    },
+    "ClearFaults",
+    {
+      "ImapRecreateBox": {
+        "m": 2
+      }
+    },
+    {
+      "Register": {
+        "u": 0
+      }
+    },
+    {
+      "LoginB": {
+        "u": 2
+      }
+    },
+    {
+      "Purge": {
+        "u": 3,
+        "slot": 1,
+        "wait": false
+      }
+    },
+    {
+      "Net": {
+        "kind": "Latency",
+        "ms": 800
+      }
+    },
+    {
+      "Check": {
+        "u": 3,
+        "deep": false,
+        "wait": false
+      }
+    },
+    {
+      "LoginB": {
+        "u": 2
+      }
+    },
+    {
+      "Backup": {
+        "u": 2,
+        "slot": 2,
+        "wait": false
+      }
+    },
+    {
+      "Register": {
+        "u": 3
+      }
+    },
+    {
+      "Register": {
+        "u": 0
+      }
+    },
+    {
+      "AddDestination": {
+        "u": 2,
+        "kind": "SharedS3"
+      }
+    },
+    {
+      "Purge": {
+        "u": 0,
+        "slot": 0,
+        "wait": true
+      }
+    },
+    {
+      "Faults": {
+        "site": "Index",
+        "fault": "Error",
+        "per_mille": 627,
+        "target": "Local",
+        "count": 4
+      }
+    },
+    {
+      "Faults": {
+        "site": "Index",
+        "fault": "Error",
+        "per_mille": 237,
+        "target": "Local",
+        "count": 1
+      }
+    },
+    {
+      "Backup": {
+        "u": 0,
+        "slot": 0,
+        "wait": true
+      }
+    },
+    {
+      "Lock": {
+        "u": 1
+      }
+    },
+    {
+      "Register": {
+        "u": 1
+      }
+    },
+    {
+      "ImapKick": {
+        "m": 1
+      }
+    },
+    {
+      "RenameAccount": {
+        "u": 1,
+        "slot": 2
+      }
+    },
+    {
+      "ChangePassword": {
+        "u": 2
+      }
+    },
+    {
+      "Lock": {
+        "u": 2
+      }
+    },
+    {
+      "RenameAccount": {
+        "u": 1,
+        "slot": 2
+      }
+    },
+    {
+      "Register": {
+        "u": 3
+      }
+    },
+    {
+      "ImapKick": {
+        "m": 0
+      }
+    },
+    {
+      "Lock": {
+        "u": 0
+      }
+    },
+    {
+      "Check": {
+        "u": 2,
+        "deep": false,
+        "wait": false
+      }
+    },
+    {
+      "RemoveDestination": {
+        "u": 0,
+        "slot": 2
+      }
+    },
+    {
+      "ImapKick": {
+        "m": 2
+      }
+    },
+    {
+      "ImapKick": {
+        "m": 1
+      }
+    },
+    {
+      "AddAccount": {
+        "u": 3,
+        "mailbox": 0
+      }
+    },
+    {
+      "Login": {
+        "u": 3
+      }
+    },
+    {
+      "LoginB": {
+        "u": 1
+      }
+    },
+    {
+      "LoginB": {
+        "u": 1
+      }
+    },
+    {
+      "ArmPurge": {
+        "u": 1,
+        "slot": 2
+      }
+    },
+    {
+      "Lock": {
+        "u": 0
+      }
+    },
+    {
+      "RemoveDestination": {
+        "u": 1,
+        "slot": 1
+      }
+    },
+    {
+      "RemoveAccount": {
+        "u": 0,
+        "slot": 1
+      }
+    },
+    {
+      "Sleep": {
+        "ms": 209
+      }
+    },
+    {
+      "Login": {
+        "u": 1
+      }
+    },
+    {
+      "Register": {
+        "u": 0
+      }
+    },
+    {
+      "Logout": {
+        "u": 3
+      }
+    },
+    {
+      "StaleEdit": {
+        "u": 3,
+        "slot": 1
+      }
+    },
+    {
+      "StaleEdit": {
+        "u": 2,
+        "slot": 0
+      }
+    },
+    {
+      "Backup": {
+        "u": 3,
+        "slot": 2,
+        "wait": true
+      }
+    }
+  ],
+  "trace": [
+    "  0: Register { u: 0 }",
+    "  1: Register { u: 1 }",
+    "  2: AddAccount { u: 0, mailbox: 0 }",
+    "  3: AddAccount { u: 1, mailbox: 0 }",
+    "  4: ImapAppend { m: 0, to_box: false }",
+    "  5: ImapDelete { m: 0 }",
+    "  6: Lock { u: 2 }",
+    "  7: LoginB { u: 3 }",
+    "  8: Backup { u: 2, slot: 2, wait: false }",
+    "  9: Faults { site: ConfigWrite, fault: NoSpace, per_mille: 393, target: Local, count: 2 }",
+    " 10: ImapDelete { m: 0 }",
+    " 11: Backup { u: 0, slot: 0, wait: false }",
+    " 12: Register { u: 2 }",
+    " 13: AddDestination { u: 3, kind: SharedS3 }",
+    " 14: Backup { u: 0, slot: 0, wait: true }",
+    " 15: ImapAppend { m: 1, to_box: true }",
+    " 16: AddAccount { u: 0, mailbox: 2 }",
+    " 17: Backup { u: 1, slot: 1, wait: true }",
+    " 18: Backup { u: 2, slot: 0, wait: false }",
+    " 19: LogoutB { u: 0 }",
+    " 20: AddAccount { u: 0, mailbox: 1 }",
+    " 21: Login { u: 0 }",
+    " 22: Login { u: 3 }",
+    " 23: ImapAppend { m: 0, to_box: false }",
+    " 24: RemoveDestination { u: 2, slot: 0 }",
+    " 25: Net { kind: CutUpload, ms: 574 }",
+    " 26: Register { u: 0 }",
+    " 27: AddDestination { u: 1, kind: Traversal }",
+    " 28: ArmPurge { u: 0, slot: 0 }",
+    " 29: CancelLatest { u: 0 }",
+    " 30: AddDestination { u: 0, kind: SharedS3 }",
+    " 31: Backup { u: 2, slot: 2, wait: false }",
+    " 32: ImapAppend { m: 1, to_box: false }",
+    " 33: RenameAccount { u: 0, slot: 1 }",
+    " 34: Backup { u: 1, slot: 1, wait: false }",
+    " 35: DeleteSharedObject { pick: 2669924852 }",
+    " 36: Login { u: 0 }",
+    " 37: Register { u: 1 }",
+    " 38: Register { u: 3 }",
+    " 39: Faults { site: Spool, fault: NoSpace, per_mille: 679, target: Local, count: 6 }",
+    " 40: Restart",
+    " 41: Faults { site: StoreWrite, fault: FlipBit, per_mille: 187, target: Shared { u: 3 }, count: 2 }",
+    " 42: LoginB { u: 1 }",
+    " 43: AdminSetDisabled { u: 2, disabled: false }",
+    " 44: RemoveDestination { u: 3, slot: 0 }",
+    " 45: Backup { u: 2, slot: 2, wait: true }",
+    " 46: Lock { u: 3 }",
+    " 47: Sleep { ms: 732 }",
+    " 48: LogoutB { u: 1 }",
+    " 49: Backup { u: 1, slot: 1, wait: false }",
+    " 50: Lock { u: 2 }",
+    " 51: Login { u: 2 }",
+    " 52: ImapRecreateBox { m: 0 }",
+    " 53: Faults { site: Cache, fault: Error, per_mille: 743, target: Local, count: 10 }",
+    " 54: ImapAppend { m: 1, to_box: false }",
+    " 55: Faults { site: StoreWrite, fault: WriteThenError, per_mille: 264, target: Shared { u: 2 }, count: 10 }",
+    " 56: Login { u: 0 }",
+    " 57: StaleEdit { u: 0, slot: 1 }",
+    " 58: Register { u: 2 }",
+    " 59: Repair { u: 3, wait: true }",
+    " 60: ImapKick { m: 2 }",
+    " 61: Login { u: 3 }",
+    " 62: Rebuild { u: 3, slot: 2, wait: false }",
+    " 63: Backup { u: 2, slot: 2, wait: false }",
+    " 64: StaleEdit { u: 3, slot: 0 }",
+    " 65: ImapAppend { m: 2, to_box: false }",
+    " 66: Faults { site: Index, fault: NoSpace, per_mille: 349, target: Local, count: 9 }",
+    " 67: ReadOnlyPrimary { u: 1, ms: 931 }",
+    " 68: Purge { u: 2, slot: 2, wait: false }",
+    " 69: ImapAppend { m: 1, to_box: false }",
+    " 70: Restart",
+    " 71: Probe { u: 3, v: 0 }",
+    " 72: AddAccount { u: 3, mailbox: 2 }",
+    " 73: Restart",
+    " 74: Purge { u: 0, slot: 2, wait: true }",
+    " 75: Register { u: 0 }",
+    " 76: AddDestination { u: 1, kind: SharedMount }",
+    " 77: Faults { site: StoreMeta, fault: NoSpace, per_mille: 736, target: AnyDestination, count: 2 }",
+    " 78: Purge { u: 2, slot: 0, wait: false }",
+    " 79: AddDestination { u: 0, kind: SharedMount }",
+    " 80: Register { u: 1 }",
+    " 81: Restart",
+    " 82: Register { u: 0 }",
+    " 83: Burst { ops: [Probe { u: 3, v: 3 }, Lock { u: 3 }, Backup { u: 1, slot: 2, wait: false }, Backup { u: 0, slot: 0, wait: false }] }",
+    " 84: Backup { u: 1, slot: 0, wait: false }",
+    " 85: Lock { u: 1 }",
+    " 86: AddAccount { u: 0, mailbox: 2 }",
+    " 87: CorruptSharedObject { pick: 718867767 }",
+    " 88: Probe { u: 1, v: 3 }",
+    " 89: ImapRecreateBox { m: 2 }",
+    " 90: StorageOutage { ms: 2395 }",
+    " 91: RenameAccount { u: 1, slot: 2 }",
+    " 92: AddAccount { u: 3, mailbox: 2 }",
+    " 93: ArmPurge { u: 0, slot: 2 }",
+    " 94: Lock { u: 0 }",
+    " 95: Login { u: 0 }",
+    " 96: ImapAppend { m: 2, to_box: false }",
+    " 97: Login { u: 2 }",
+    " 98: Login { u: 1 }",
+    " 99: ArmPurge { u: 2, slot: 0 }",
+    "100: Backup { u: 1, slot: 0, wait: false }",
+    "101: StaleEdit { u: 1, slot: 2 }",
+    "102: ImapAppend { m: 2, to_box: false }",
+    "103: Lock { u: 0 }",
+    "104: ImapAppend { m: 2, to_box: false }",
+    "105: ImapAppend { m: 1, to_box: false }",
+    "106: AddAccount { u: 0, mailbox: 2 }",
+    "107: AddAccount { u: 0, mailbox: 2 }",
+    "108: Backup { u: 3, slot: 0, wait: false }",
+    "109: AddDestination { u: 3, kind: SharedS3 }",
+    "110: ImapAppend { m: 1, to_box: false }",
+    "111: Register { u: 1 }",
+    "112: AddDestination { u: 3, kind: SharedMount }",
+    "113: Faults { site: ConfigWrite, fault: Error, per_mille: 527, target: Local, count: 8 }",
+    "114: Faults { site: StoreRead, fault: FlipBit, per_mille: 794, target: AnyDestination, count: 10 }",
+    "115: Backup { u: 1, slot: 2, wait: true }",
+    "116: Rebuild { u: 0, slot: 1, wait: true }",
+    "117: Sleep { ms: 1056 }",
+    "118: Backup { u: 2, slot: 2, wait: false }",
+    "119: Login { u: 2 }",
+    "120: ReadOnlyPrimary { u: 3, ms: 2897 }",
+    "121: Repair { u: 2, wait: false }",
+    "122: LogoutB { u: 0 }",
+    "123: Backup { u: 1, slot: 1, wait: false }",
+    "124: ClearFaults",
+    "125: ImapAppend { m: 2, to_box: true }",
+    "126: Backup { u: 0, slot: 2, wait: false }",
+    "127: DeleteSharedObject { pick: 2337014170 }",
+    "  deleted fuzz-f43a43e2433/d9e9dfb06fe26515a923a31ef32d894b/objects/d6/d62a6161b712c7d66f3bd062f43cf942d48abfd7620b130cec05533182621720.enc",
+    "128: Probe { u: 2, v: 1 }",
+    "129: Register { u: 3 }",
+    "130: ImapAppend { m: 1, to_box: true }",
+    "131: RemoveAccount { u: 3, slot: 1 }",
+    "132: AddDestination { u: 0, kind: SharedS3 }",
+    "133: ImapDelete { m: 2 }",
+    "134: Login { u: 2 }",
+    "135: Login { u: 3 }",
+    "136: Backup { u: 2, slot: 1, wait: false }",
+    "137: Probe { u: 0, v: 0 }",
+    "138: Purge { u: 0, slot: 1, wait: false }",
+    "139: RenameAccount { u: 1, slot: 1 }",
+    "140: Check { u: 1, deep: false, wait: false }",
+    "141: Register { u: 0 }",
+    "142: Backup { u: 2, slot: 2, wait: false }",
+    "143: Probe { u: 3, v: 2 }",
+    "144: Register { u: 1 }",
+    "145: DeleteSharedObject { pick: 3518235987 }",
+    "  deleted fuzz-f43a43e2433/fc05f9959cec6b8497d9f353f6dd9f1b/objects/2d/2d9ed5794734ae994f58480474a0dd8d0488c461481125626822693ce3fe6c13.enc",
+    "146: ArmPurge { u: 0, slot: 0 }",
+    "147: Login { u: 3 }",
+    "148: ImapAppend { m: 1, to_box: true }",
+    "149: Backup { u: 3, slot: 1, wait: false }",
+    "150: Faults { site: ConfigWrite, fault: NoSpace, per_mille: 866, target: Local, count: 5 }",
+    "151: Logout { u: 1 }",
+    "152: ChangePassword { u: 1 }",
+    "153: AddDestination { u: 3, kind: SharedS3 }",
+    "154: RenameAccount { u: 0, slot: 2 }",
+    "155: ArmPurge { u: 1, slot: 0 }",
+    "156: Sleep { ms: 926 }",
+    "157: Login { u: 0 }",
+    "158: ImapDelete { m: 2 }",
+    "159: ImapAppend { m: 1, to_box: false }",
+    "160: Repair { u: 1, wait: false }",
+    "161: Repair { u: 0, wait: false }",
+    "162: Purge { u: 3, slot: 0, wait: false }",
+    "163: Backup { u: 2, slot: 0, wait: false }",
+    "164: Login { u: 2 }",
+    "165: CancelLatest { u: 2 }",
+    "166: Backup { u: 1, slot: 2, wait: true }",
+    "167: Lock { u: 2 }",
+    "168: AddDestination { u: 0, kind: SharedMount }",
+    "169: Purge { u: 1, slot: 1, wait: false }",
+    "170: LoginB { u: 3 }",
+    "171: LogoutB { u: 1 }",
+    "172: Faults { site: Spool, fault: NoSpace, per_mille: 768, target: Local, count: 8 }",
+    "173: Login { u: 1 }",
+    "174: Backup { u: 3, slot: 1, wait: true }",
+    "175: Probe { u: 0, v: 0 }",
+    "176: Register { u: 1 }",
+    "177: RemoveDestination { u: 0, slot: 2 }",
+    "178: Login { u: 3 }",
+    "179: ReadOnlyPrimary { u: 0, ms: 1894 }",
+    "180: AddAccount { u: 1, mailbox: 0 }",
+    "181: AddDestination { u: 2, kind: SharedMount }",
+    "182: LoginB { u: 2 }",
+    "183: Backup { u: 3, slot: 0, wait: true }",
+    "184: Login { u: 1 }",
+    "185: Sleep { ms: 1063 }",
+    "186: Backup { u: 0, slot: 0, wait: true }",
+    "187: ClearFaults",
+    "188: AddAccount { u: 3, mailbox: 1 }",
+    "189: Lock { u: 3 }",
+    "190: StorageOutage { ms: 1523 }",
+    "191: Check { u: 1, deep: false, wait: false }",
+    "192: LoginB { u: 0 }",
+    "193: Backup { u: 1, slot: 0, wait: true }",
+    "194: Faults { site: StoreRead, fault: FlipBit, per_mille: 397, target: Primary { u: 2 }, count: 7 }",
+    "195: Backup { u: 2, slot: 0, wait: true }",
+    "196: DeleteSharedObject { pick: 1714850190 }",
+    "  deleted fuzz-f43a43e2433/3c69601d1d12e3ec8704e2c5d676680b/objects/37/37f7d104b7417dbe35b1b3ce188872d19b779e6ecf3997fda9e24eb25c5e03b8.enc",
+    "197: Backup { u: 1, slot: 2, wait: false }",
+    "198: ImapAppend { m: 0, to_box: false }",
+    "199: Login { u: 3 }",
+    "200: Logout { u: 0 }",
+    "201: ImapRecreateBox { m: 1 }",
+    "202: Faults { site: StoreMeta, fault: NoSpace, per_mille: 832, target: Primary { u: 3 }, count: 7 }",
+    "203: ReadOnlyPrimary { u: 3, ms: 320 }",
+    "204: ChangePassword { u: 3 }",
+    "205: ImapKick { m: 2 }",
+    "206: AddDestination { u: 3, kind: SharedMount }",
+    "207: Purge { u: 2, slot: 1, wait: true }",
+    "208: Probe { u: 2, v: 0 }",
+    "209: Register { u: 3 }",
+    "210: Lock { u: 0 }",
+    "211: DeleteSelf { u: 2 }",
+    "212: Logout { u: 0 }",
+    "213: ReadOnlyPrimary { u: 3, ms: 946 }",
+    "214: Check { u: 1, deep: true, wait: true }",
+    "215: RemoveAccount { u: 1, slot: 0 }",
+    "216: Backup { u: 0, slot: 1, wait: false }",
+    "217: Backup { u: 2, slot: 0, wait: false }",
+    "218: ImapRecreateBox { m: 2 }",
+    "219: Register { u: 0 }",
+    "220: LogoutB { u: 0 }",
+    "221: Register { u: 3 }",
+    "222: Repair { u: 0, wait: true }",
+    "223: ImapRecreateBox { m: 0 }",
+    "224: Register { u: 3 }",
+    "225: Login { u: 3 }",
+    "226: ImapDelete { m: 1 }",
+    "227: Register { u: 0 }",
+    "228: Sleep { ms: 1001 }",
+    "229: Sleep { ms: 601 }",
+    "230: ImapAppend { m: 2, to_box: false }",
+    "231: Login { u: 0 }",
+    "232: Purge { u: 0, slot: 2, wait: false }",
+    "233: Faults { site: Index, fault: NoSpace, per_mille: 271, target: Local, count: 2 }",
+    "234: ImapDelete { m: 0 }",
+    "235: Login { u: 3 }",
+    "236: Purge { u: 3, slot: 2, wait: false }",
+    "237: AddDestination { u: 0, kind: SharedS3 }",
+    "238: ImapKick { m: 0 }",
+    "239: CorruptSharedObject { pick: 3547614300 }",
+    "  corrupted fuzz-f43a43e2433/d9e9dfb06fe26515a923a31ef32d894b/objects/d6/d62a6161b712c7d66f3bd062f43cf942d48abfd7620b130cec05533182621720.enc",
+    "240: ImapDelete { m: 0 }",
+    "241: Check { u: 1, deep: true, wait: true }",
+    "242: Check { u: 1, deep: true, wait: true }",
+    "243: ImapAppend { m: 0, to_box: true }",
+    "244: ArmPurge { u: 0, slot: 2 }",
+    "245: Register { u: 3 }",
+    "246: ArmPurge { u: 2, slot: 0 }",
+    "247: Register { u: 1 }",
+    "248: Rebuild { u: 0, slot: 0, wait: false }",
+    "249: Sleep { ms: 393 }",
+    "250: StaleEdit { u: 1, slot: 2 }",
+    "251: Login { u: 1 }",
+    "252: ClearFaults",
+    "253: Backup { u: 3, slot: 0, wait: true }",
+    "254: Probe { u: 2, v: 0 }",
+    "255: Restart",
+    "256: AddAccount { u: 0, mailbox: 1 }",
+    "257: Lock { u: 3 }",
+    "258: Register { u: 0 }",
+    "259: AddAccount { u: 2, mailbox: 2 }",
+    "260: Faults { site: StoreRead, fault: Truncate, per_mille: 659, target: Shared { u: 3 }, count: 7 }",
+    "261: AddDestination { u: 3, kind: Traversal }",
+    "262: CancelLatest { u: 1 }",
+    "263: Check { u: 3, deep: false, wait: true }",
+    "264: ChangePassword { u: 0 }",
+    "265: ImapRecreateBox { m: 0 }",
+    "266: AddDestination { u: 0, kind: SharedMount }",
+    "267: Check { u: 3, deep: true, wait: false }",
+    "268: Login { u: 0 }",
+    "269: ImapKick { m: 1 }",
+    "270: Login { u: 0 }",
+    "271: ClearFaults",
+    "272: ImapRecreateBox { m: 2 }",
+    "273: Register { u: 0 }",
+    "274: LoginB { u: 2 }",
+    "275: Purge { u: 3, slot: 1, wait: false }",
+    "276: Net { kind: Latency, ms: 800 }",
+    "277: Check { u: 3, deep: false, wait: false }",
+    "278: LoginB { u: 2 }",
+    "279: Backup { u: 2, slot: 2, wait: false }",
+    "280: Register { u: 3 }",
+    "281: Register { u: 0 }",
+    "282: AddDestination { u: 2, kind: SharedS3 }",
+    "283: Purge { u: 0, slot: 0, wait: true }",
+    "284: Faults { site: Index, fault: Error, per_mille: 627, target: Local, count: 4 }",
+    "285: Faults { site: Index, fault: Error, per_mille: 237, target: Local, count: 1 }",
+    "286: Backup { u: 0, slot: 0, wait: true }",
+    "287: Lock { u: 1 }",
+    "288: Register { u: 1 }",
+    "289: ImapKick { m: 1 }",
+    "290: RenameAccount { u: 1, slot: 2 }",
+    "291: ChangePassword { u: 2 }",
+    "292: Lock { u: 2 }",
+    "293: RenameAccount { u: 1, slot: 2 }",
+    "294: Register { u: 3 }",
+    "295: ImapKick { m: 0 }",
+    "296: Lock { u: 0 }",
+    "297: Check { u: 2, deep: false, wait: false }",
+    "298: RemoveDestination { u: 0, slot: 2 }",
+    "299: ImapKick { m: 2 }",
+    "300: ImapKick { m: 1 }",
+    "301: AddAccount { u: 3, mailbox: 0 }",
+    "302: Login { u: 3 }",
+    "303: LoginB { u: 1 }",
+    "304: LoginB { u: 1 }",
+    "305: ArmPurge { u: 1, slot: 2 }",
+    "306: Lock { u: 0 }",
+    "307: RemoveDestination { u: 1, slot: 1 }",
+    "308: RemoveAccount { u: 0, slot: 1 }",
+    "309: Sleep { ms: 209 }",
+    "310: Login { u: 1 }",
+    "311: Register { u: 0 }",
+    "312: Logout { u: 3 }",
+    "313: StaleEdit { u: 3, slot: 1 }",
+    "314: StaleEdit { u: 2, slot: 0 }",
+    "315: Backup { u: 3, slot: 2, wait: true }",
+    "final check",
+    "  converge backup acc0-0-0: Done None {\"bytes\":0,\"discovered\":0,\"downloaded\":0,\"errors\":[],\"mailboxes\":6,\"verified\":0}",
+    "  converge backup acc0-2-2: Done None {\"bytes\":360,\"discovered\":1,\"downloaded\":1,\"errors\":[],\"mailboxes\":6,\"verified\":6}",
+    "  converge backup acc0-2-3: Done None {\"bytes\":360,\"discovered\":1,\"downloaded\":1,\"errors\":[],\"mailboxes\":6,\"verified\":5}",
+    "  converge backup acc0-2-4: Done None {\"bytes\":360,\"discovered\":1,\"downloaded\":1,\"errors\":[],\"mailboxes\":6,\"verified\":5}",
+    "  converge backup acc0-1-5: Done None {\"bytes\":0,\"discovered\":0,\"downloaded\":0,\"errors\":[],\"mailboxes\":6,\"verified\":5}",
+    "  converge repair: Some(Done) None {\"accounts\":[{\"account_id\":\"f5ad87a1-96d8-48a2-b2bc-8a1a94442a7c\",\"backlog\":0,\"error\":null,\"name\":\"acc0-0-0\",\"on_server\":0,\"vanished\":0},{\"account_id\":\"6ca24fd2-d63a-4373-816b-8d9b1344ccf7\",\"backlog\":0,\"error\":null,\"name\":\"acc0-2-2\",\"on_server\":1,\"vanished\":0},{\"account_id\":\"257488b5-0e47-4c2b-aa11-e4eada9eca10\",\"backlog\":0,\"error\":null,\"name\":\"acc0-2-3\",\"on_server\":1,\"vanished\":0},{\"account_id\":\"9f1fa296-06b0-4768-b9d4-635695448976\",\"backlog\":0,\"error\":null,\"name\":\"acc0-2-4\",\"on_server\":1,\"vanished\":0},{\"account_id\":\"e5510491-0d67-4898-8388-70346359a2da\",\"backlog\":0,\"error\":null,\"name\":\"acc0-1-5\",\"on_server\":5,\"vanished\":0}],\"created_at\":\"2026-10-24T11:21:57.640528695Z\",\"deep\":true,\"destinations\":[{\"checked_deep\":28,\"corrupt\":0,\"destination_id\":\"df1cff00-e9f8-4bad-a04b-1d6c2a5397b2\",\"error\":null,\"healthy\":28,\"missing\":0,\"name\":\"primary\",\"ok\":true,\"orphaned\":0,\"pending\":0},{\"checked_deep\":21,\"corrupt\":0,\"destination_id\":\"6d0815e6-c381-4782-ba93-281d0041675e\",\"error\":null,\"healthy\":21,\"missing\":0,\"name\":\"shared-s3\",\"ok\":true,\"orphaned\":7,\"pending\":0},{\"checked_deep\":21,\"corrupt\":0,\"destination_id\":\"5337a796-216e-4ef0-858c-d65e6f6b05c5\",\"error\":null,\"healthy\":21,\"missing\":0,\"name\":\"shared-mount\",\"ok\":true,\"orphaned\":0,\"pending\":0},{\"checked_deep\":21,\"corrupt\":0,\"destination_id\":\"0741e524-32af-4700-8694-9753aa2307c4\",\"error\":null,\"healthy\":21,\"missing\":0,\"name\":\"shared-mount\",\"ok\":true,\"orphaned\":0,\"pending\":0}],\"id\":5,\"ok\":true,\"repaired\":0,\"scope\":{\"scope\":\"all\"}}",
+    "  converge user 0 account acc0-0-0: 0 messages",
+    "  converge user 0 account acc0-2-2: 6 messages",
+    "  converge user 0 account acc0-2-3: 5 messages",
+    "  converge user 0 account acc0-2-4: 5 messages",
+    "  converge user 0 account acc0-1-5: 5 messages",
+    "  converge backup acc1-0-1-a22146-r39934: Done None {\"bytes\":0,\"discovered\":0,\"downloaded\":0,\"errors\":[],\"mailboxes\":6,\"verified\":0}",
+    "  converge repair: Some(Done) None {\"accounts\":[{\"account_id\":\"68a71937-0c9e-4cec-a22e-17d2ec2473ab\",\"backlog\":0,\"error\":null,\"name\":\"acc1-0-1-a22146-r39934\",\"on_server\":0,\"vanished\":0}],\"created_at\":\"2026-10-24T11:21:59.187969405Z\",\"deep\":true,\"destinations\":[{\"checked_deep\":1,\"corrupt\":0,\"destination_id\":\"5c8271e4-cc55-4b74-802e-e551031c5a7c\",\"error\":null,\"healthy\":1,\"missing\":0,\"name\":\"primary\",\"ok\":true,\"orphaned\":0,\"pending\":0}],\"id\":9,\"ok\":true,\"repaired\":0,\"scope\":{\"scope\":\"all\"}}",
+    "  converge user 1 account acc1-0-1-a22146-r39934: 0 messages",
+    "  converge backup acc3-2-0: Done None {\"bytes\":0,\"discovered\":0,\"downloaded\":0,\"errors\":[],\"mailboxes\":6,\"verified\":0}",
+    "  converge backup acc3-1-1-a46979: Done None {\"bytes\":84210,\"discovered\":5,\"downloaded\":5,\"errors\":[],\"mailboxes\":6,\"verified\":5}",
+    "  converge backup acc3-0-2: Done None {\"bytes\":0,\"discovered\":0,\"downloaded\":0,\"errors\":[],\"mailboxes\":6,\"verified\":0}",
+    "  converge repair: Some(Done) None {\"accounts\":[{\"account_id\":\"a4ff4285-94c0-499f-b4b0-2a7a46c6f522\",\"backlog\":0,\"error\":null,\"name\":\"acc3-2-0\",\"on_server\":1,\"vanished\":0},{\"account_id\":\"cc36d36d-dc60-4aae-bf70-d1327ab98bb2\",\"backlog\":0,\"error\":null,\"name\":\"acc3-1-1-a46979\",\"on_server\":5,\"vanished\":0},{\"account_id\":\"912c91ea-c0c0-40e5-8bc7-7cc44a334045\",\"backlog\":0,\"error\":null,\"name\":\"acc3-0-2\",\"on_server\":0,\"vanished\":0}],\"created_at\":\"2026-10-24T11:22:00.425522591Z\",\"deep\":true,\"destinations\":[{\"checked_deep\":13,\"corrupt\":0,\"destination_id\":\"bca72e0d-c8f3-435d-bfef-57ceca395136\",\"error\":null,\"healthy\":13,\"missing\":0,\"name\":\"primary\",\"ok\":true,\"orphaned\":0,\"pending\":0},{\"checked_deep\":11,\"corrupt\":0,\"destination_id\":\"4ce93be8-b3ef-40f6-aa00-a3d19feda288\",\"error\":null,\"healthy\":11,\"missing\":0,\"name\":\"shared-s3\",\"ok\":true,\"orphaned\":0,\"pending\":0},{\"checked_deep\":11,\"corrupt\":0,\"destination_id\":\"0cb3404c-ed4d-4f82-b65b-f60efef8f7c8\",\"error\":null,\"healthy\":11,\"missing\":0,\"name\":\"shared-mount\",\"ok\":true,\"orphaned\":0,\"pending\":0},{\"checked_deep\":11,\"corrupt\":0,\"destination_id\":\"fcc15a39-c76b-43e0-9d58-ae24666536b5\",\"error\":null,\"healthy\":11,\"missing\":0,\"name\":\"shared-mount\",\"ok\":true,\"orphaned\":0,\"pending\":0}],\"id\":7,\"ok\":true,\"repaired\":0,\"scope\":{\"scope\":\"all\"}}",
+    "  converge user 3 account acc3-2-0: 6 messages",
+    "  converge user 3 account acc3-1-1-a46979: 5 messages",
+    "  converge user 3 account acc3-0-2: 0 messages",
+    "final: 33 verified backups across surviving users",
+    "summary: 4 users registered (1 deleted), 12 accounts, 19 messages created, 1 purged by Malo, 89 jobs, 46 I/O faults injected"
+  ]
+}

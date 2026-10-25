@@ -1,0 +1,122 @@
+# Malo backup server. The test profile adds Dovecot, RustFS (S3) and fake-gcs-server.
+#   Production:   docker compose up -d malo
+#   Test stack:   docker compose --profile test up -d
+#                 MALO_IT=1 cargo test -p malo-server --test integration -- --test-threads=1
+services:
+  malo:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: malo-server:latest
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+    volumes:
+      - malo-data:/data
+    environment:
+      MALO_LISTEN: 0.0.0.0:8443
+      MALO_DATA_DIR: /data
+      MALO_MAX_AUTO_LOCK_HOURS: "24"
+      # MALO_TLS_HOSTNAMES: backup.example.com     # extra SANs for the self-signed cert
+      # MALO_TLS_CERT: /data/tls/real-cert.pem      # or bring your own certificate
+      # MALO_TLS_KEY: /data/tls/real-key.pem
+      # MALO_ALLOWED_FS_MOUNTS: /mnt/nas           # extra fs destinations (mount them as volumes)
+      RUST_LOG: info
+    # Keys live in RAM only: never let them reach swap or core dumps.
+    mem_swappiness: 0
+    ulimits:
+      core: 0
+      memlock: -1
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+  dovecot:
+    profiles: [test]
+    image: dovecot/dovecot:2.3.21
+    ports:
+      - "10993:993"
+      - "10143:143"
+    volumes:
+      - ./docker/test/dovecot/dovecot.conf:/etc/dovecot/dovecot.conf:ro
+
+  dovecot-nouidplus:
+    profiles: [test]
+    image: dovecot/dovecot:2.3.21
+    ports:
+      - "11993:993"
+    volumes:
+      - ./docker/test/dovecot/dovecot.conf:/etc/dovecot/dovecot.conf:ro
+      - ./docker/test/dovecot/no-uidplus.conf:/etc/dovecot/malo-extra.conf:ro
+
+  # Local OAuth2 provider (authorization code + PKCE + refresh tokens, interactive login form)
+  # and a Dovecot that only accepts XOAUTH2 tokens it issued. Dovecot shares the provider's
+  # network namespace so both see the same issuer URL (http://localhost:18080/default).
+  mockoauth:
+    profiles: [test]
+    image: ghcr.io/navikt/mock-oauth2-server:2.1.10
+    environment:
+      SERVER_PORT: "18080"
+      JSON_CONFIG: '{"interactiveLogin":true}'
+    ports:
+      - "18080:18080"
+      - "12993:993"
+
+  dovecot-oauth:
+    profiles: [test]
+    image: dovecot/dovecot:2.3.21
+    network_mode: "service:mockoauth"
+    depends_on: [mockoauth]
+    volumes:
+      - ./docker/test/dovecot/dovecot-oauth.conf:/etc/dovecot/dovecot.conf:ro
+      - ./docker/test/dovecot/dovecot-oauth2.conf.ext:/etc/dovecot/dovecot-oauth2.conf.ext:ro
+
+  rustfs:
+    profiles: [test]
+    image: rustfs/rustfs:latest
+    ports:
+      - "19000:9000"
+    environment:
+      RUSTFS_ACCESS_KEY: malo-test
+      RUSTFS_SECRET_KEY: malo-test-secret
+    tmpfs:
+      - /data:uid=10001,gid=10001
+      - /logs:uid=10001,gid=10001
+
+  # Network faults between Malo and S3 (resets, timeouts, latency, connections cut mid-upload).
+  # Malo's fuzzers talk to RustFS through 127.0.0.1:19001.
+  toxiproxy:
+    profiles: [test]
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    ports:
+      - "8474:8474"
+      - "19001-19016:19001-19016"
+
+  rustfs-init:
+    profiles: [test]
+    image: amazon/aws-cli:latest
+    depends_on: [rustfs]
+    environment:
+      AWS_ACCESS_KEY_ID: malo-test
+      AWS_SECRET_ACCESS_KEY: malo-test-secret
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+          aws --endpoint-url http://rustfs:9000 s3 ls >/dev/null 2>&1 && break; sleep 1
+        done
+        for b in malo-a malo-b; do aws --endpoint-url http://rustfs:9000 s3 mb s3://$$b || true; done
+
+  gcs:
+    profiles: [test]
+    image: fsouza/fake-gcs-server:latest
+    command: ["-scheme", "http", "-port", "4443", "-public-host", "localhost:14443", "-backend", "memory"]
+    ports:
+      - "14443:4443"
+
+volumes:
+  malo-data:

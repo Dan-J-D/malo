@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimal capabilities: the UI only calls Malo's own commands. No fs, no shell, no direct HTTP from JS.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

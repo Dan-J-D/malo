@@ -1,0 +1,363 @@
+{
+  "seed": 1000972,
+  "violation": {
+    "kind": "job_hang",
+    "detail": "job 04b4b9ad-1fd7-47b2-8612-0f05c12eea82 never finished",
+    "step": 45
+  },
+  "ops": [
+    {
+      "Login": {
+        "u": 2
+      }
+    },
+    {
+      "Login": {
+        "u": 2
+      }
+    },
+    {
+      "Register": {
+        "u": 0
+      }
+    },
+    {
+      "Login": {
+        "u": 1
+      }
+    },
+    {
+      "Login": {
+        "u": 2
+      }
+    },
+    {
+      "Check": {
+        "u": 1,
+        "deep": false,
+        "wait": false
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 1,
+        "to_box": true,
+        "folder": null,
+        "shape": {
+          "kind": 0,
+          "size": 1657351,
+          "flags": [
+            "fuzzkw"
+          ],
+          "date": "13-Apr-2005 08:53:36 +1400",
+          "dup_id": false,
+          "name": "#\\"
+        }
+      }
+    },
+    {
+      "LoginB": {
+        "u": 3
+      }
+    },
+    {
+      "Login": {
+        "u": 1
+      }
+    },
+    {
+      "ArmPurge": {
+        "u": 3,
+        "slot": 0,
+        "policy": {
+          "older_than_days": 1040,
+          "exclude_flagged": false,
+          "exclude_pick": null,
+          "only_primary": false
+        }
+      }
+    },
+    {
+      "ImapKick": {
+        "m": 0
+      }
+    },
+    {
+      "RemoveDestination": {
+        "u": 3,
+        "slot": 0
+      }
+    },
+    {
+      "Faults": {
+        "site": "StoreMeta",
+        "fault": "NoSpace",
+        "per_mille": 292,
+        "target": "AnyDestination",
+        "count": 5
+      }
+    },
+    {
+      "Register": {
+        "u": 2
+      }
+    },
+    {
+      "StaleEdit": {
+        "u": 0,
+        "slot": 0
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 1,
+        "to_box": true,
+        "folder": null,
+        "shape": null
+      }
+    },
+    {
+      "ArmPurge": {
+        "u": 2,
+        "slot": 2,
+        "policy": {
+          "older_than_days": 2733,
+          "exclude_flagged": false,
+          "exclude_pick": null,
+          "only_primary": false
+        }
+      }
+    },
+    {
+      "Purge": {
+        "u": 3,
+        "slot": 1,
+        "wait": true
+      }
+    },
+    {
+      "Purge": {
+        "u": 2,
+        "slot": 2,
+        "wait": false
+      }
+    },
+    {
+      "Repair": {
+        "u": 2,
+        "wait": true
+      }
+    },
+    {
+      "AddDestination": {
+        "u": 0,
+        "kind": "SharedS3",
+        "name": "?%2e%2ecafé",
+        "root": "Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧",
+        "encrypt": true,
+        "deep": 0
+      }
+    },
+    {
+      "ImapKick": {
+        "m": 2
+      }
+    },
+    {
+      "Purge": {
+        "u": 1,
+        "slot": 0,
+        "wait": false
+      }
+    },
+    {
+      "Faults": {
+        "site": "StoreMeta",
+        "fault": "NoSpace",
+        "per_mille": 793,
+        "target": "AnyDestination",
+        "count": 11
+      }
+    },
+    {
+      "ImapKick": {
+        "m": 1
+      }
+    },
+    {
+      "Login": {
+        "u": 3
+      }
+    },
+    {
+      "ReadOnlyPrimary": {
+        "u": 3,
+        "ms": 534
+      }
+    },
+    {
+      "Faults": {
+        "site": "Spool",
+        "fault": "Error",
+        "per_mille": 297,
+        "target": "Local",
+        "count": 3
+      }
+    },
+    {
+      "Register": {
+        "u": 0
+      }
+    },
+    {
+      "AddDestination": {
+        "u": 0,
+        "kind": "SharedS3",
+        "name": "\n$HOMEcafé",
+        "root": null,
+        "encrypt": false,
+        "deep": 1
+      }
+    },
+    {
+      "Login": {
+        "u": 1
+      }
+    },
+    {
+      "Login": {
+        "u": 0
+      }
+    },
+    {
+      "Login": {
+        "u": 1
+      }
+    },
+    "Restart",
+    {
+      "LoginB": {
+        "u": 3
+      }
+    },
+    {
+      "Probe": {
+        "u": 1,
+        "v": 2
+      }
+    },
+    {
+      "ImapDelete": {
+        "m": 2
+      }
+    },
+    {
+      "Register": {
+        "u": 0
+      }
+    },
+    {
+      "ArmPurge": {
+        "u": 0,
+        "slot": 0,
+        "policy": {
+          "older_than_days": 0,
+          "exclude_flagged": true,
+          "exclude_pick": 1637817849,
+          "only_primary": false
+        }
+      }
+    },
+    {
+      "Sleep": {
+        "ms": 501
+      }
+    },
+    {
+      "Rebuild": {
+        "u": 0,
+        "slot": 0,
+        "wait": false
+      }
+    },
+    {
+      "AddAccount": {
+        "u": 0,
+        "mailbox": 0,
+        "name": null,
+        "opts": {
+          "starttls": false,
+          "idle": false
+        }
+      }
+    },
+    {
+      "Register": {
+        "u": 1
+      }
+    },
+    {
+      "StaleEdit": {
+        "u": 0,
+        "slot": 0
+      }
+    },
+    {
+      "Probe": {
+        "u": 0,
+        "v": 1
+      }
+    }
+  ],
+  "trace": [
+    "  0: Login { u: 2 }",
+    "  1: Login { u: 2 }",
+    "  2: Register { u: 0 }",
+    "  3: Login { u: 1 }",
+    "  4: Login { u: 2 }",
+    "  5: Check { u: 1, deep: false, wait: false }",
+    "  6: ImapAppend { m: 1, to_box: true, folder: None, shape: Some(MsgShape { kind: 0, size: 1657351, flags: [\"fuzzkw\"], date: \"13-Apr-2005 08:53:36 +1400\", dup_id: false, name: \"#\\\\\" }) }",
+    "  7: LoginB { u: 3 }",
+    "  8: Login { u: 1 }",
+    "  9: ArmPurge { u: 3, slot: 0, policy: Some(PolicyShape { older_than_days: 1040, exclude_flagged: false, exclude_pick: None, only_primary: false }) }",
+    " 10: ImapKick { m: 0 }",
+    " 11: RemoveDestination { u: 3, slot: 0 }",
+    " 12: Faults { site: StoreMeta, fault: NoSpace, per_mille: 292, target: AnyDestination, count: 5 }",
+    " 13: Register { u: 2 }",
+    " 14: StaleEdit { u: 0, slot: 0 }",
+    " 15: ImapAppend { m: 1, to_box: true, folder: None, shape: None }",
+    " 16: ArmPurge { u: 2, slot: 2, policy: Some(PolicyShape { older_than_days: 2733, exclude_flagged: false, exclude_pick: None, only_primary: false }) }",
+    " 17: Purge { u: 3, slot: 1, wait: true }",
+    " 18: Purge { u: 2, slot: 2, wait: false }",
+    " 19: Repair { u: 2, wait: true }",
+    " 20: AddDestination { u: 0, kind: SharedS3, name: Some(\"?%2e%2ecafe\\u{301}\"), root: Some(\"Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧Straße👨\\u{200d}👩\\u{200d}👧\"), encrypt: Some(true), deep: Some(0) }",
+    " 21: ImapKick { m: 2 }",
+    " 22: Purge { u: 1, slot: 0, wait: false }",
+    " 23: Faults { site: StoreMeta, fault: NoSpace, per_mille: 793, target: AnyDestination, count: 11 }",
+    " 24: ImapKick { m: 1 }",
+    " 25: Login { u: 3 }",
+    " 26: ReadOnlyPrimary { u: 3, ms: 534 }",
+    " 27: Faults { site: Spool, fault: Error, per_mille: 297, target: Local, count: 3 }",
+    " 28: Register { u: 0 }",
+    " 29: AddDestination { u: 0, kind: SharedS3, name: Some(\"\\n$HOMEcafe\\u{301}\"), root: None, encrypt: Some(false), deep: Some(1) }",
+    " 30: Login { u: 1 }",
+    " 31: Login { u: 0 }",
+    " 32: Login { u: 1 }",
+    " 33: Restart",
+    " 34: LoginB { u: 3 }",
+    " 35: Probe { u: 1, v: 2 }",
+    " 36: ImapDelete { m: 2 }",
+    " 37: Register { u: 0 }",
+    " 38: ArmPurge { u: 0, slot: 0, policy: Some(PolicyShape { older_than_days: 0, exclude_flagged: true, exclude_pick: Some(1637817849), only_primary: false }) }",
+    " 39: Sleep { ms: 501 }",
+    " 40: Rebuild { u: 0, slot: 0, wait: false }",
+    " 41: AddAccount { u: 0, mailbox: 0, name: None, opts: Some(AccOpts { starttls: false, idle: false }) }",
+    " 42: Register { u: 1 }",
+    " 43: StaleEdit { u: 0, slot: 0 }",
+    " 44: Probe { u: 0, v: 1 }",
+    "final check",
+    "  converge backup acc0-0-0-a22158: Done None {\"bytes\":0,\"discovered\":0,\"downloaded\":0,\"errors\":[\"manifest on ?%2e%2ecafé: write fuzz-f460c6b0861/Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧/22ec0d852e1cb5e6102cd94efc676bfe/account.json.enc: Unexpected (persistent) at write, context: { uri: http://127.0.0.1:19001/malo-b/fuzz-f460c6b0861/Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7Stra%C3%9Fe%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7/22ec0d852e1cb5e6102cd94efc676bfe/account.json.enc, response: Parts { status: 400, version: HTTP/1.1, headers: {\\\"content-type\\\": \\\"application/xml\\\", \\\"x-request-id\\\": \\\"ad9e12e9-3a83-4755-a93e-f6e64b6d5be4\\\", \\\"x-amz-request-id\\\": \\\"ad9e12e9-3a83-4755-a93e-f6e64b6d5be4\\\", \\\"content-length\\\": \\\"116\\\", \\\"date\\\": \\\"Sat, 24 Oct 2026 23:05:09 GMT\\\"} }, service: s3, path: fuzz-f460c6b0861/Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧Straße👨‍👩‍👧/22ec0d852e1cb5e6102cd94efc676bfe/account.json.enc, written: 211 } => S3Error { code: \\\"InvalidArgument\\\", message: \\\"Invalid argument\\\", resource: \\\"\\\", request_id: \\\"\\\" }\"],\"mailboxes\":5,\"verified\":0}",
+    "  diag: hung job Some((Check { scope: All, deep: true }, Running, JobProgress { done: 0, total: 0, message: \"\" }, Some(2026-10-24T23:05:34.658841514Z))); unfinished jobs []",
+    "summary: 3 users registered (0 deleted), 1 accounts, 2 messages created, 0 purged by Malo, 14 jobs, 1 I/O faults injected"
+  ]
+}

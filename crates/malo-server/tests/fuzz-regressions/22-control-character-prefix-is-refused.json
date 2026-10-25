@@ -1,0 +1,369 @@
+{
+  "seed": 1000565,
+  "violation": {
+    "kind": "not_converged",
+    "detail": "user 2: message 1 (fztmp5Zjq5lx3 subject) stuck as Error (1/2 copies): Some(\"%2e%2e\\u{2066}COM1: Unexpected (persistent) at stat, context: { uri: http://127.0.0.1:19001/malo-b/fuzz-f447510378d/%0A%7CSTRASSE/6cbee7a5d1bb0f6b3511054df1468795/objects/be/bed335c13eda5c0d12f8351a43c6a9e6637f6fd25e2c41ffa7ace824b84072c0.enc, response: Parts { status: 400, version: HTTP/1.1, headers: {\\\"content-type\\\": \\\"application/xml\\\", \\\"x-request-id\\\": \\\"76bd0b1c-d686-44c3-b1a1-2d5459b85966\\\", \\\"x-amz-request-id\\\": \\\"76bd0b1c-d686-44c3-b1a1-2d5459b85966\\\", \\\"date\\\": \\\"Sat, 24 Oct 2026 15:01:47 GMT\\\"} }, service: s3, path: fuzz-f447510378d/\\n|STRASSE/6cbee7a5d1bb0f6b3511054df1468795/objects/be/bed335c13eda5c0d12f8351a43c6a9e6637f6fd25e2c41ffa7ace824b84072c0.enc }\")",
+    "step": 45
+  },
+  "ops": [
+    {
+      "Net": {
+        "kind": "CutUpload",
+        "ms": 1153
+      }
+    },
+    {
+      "ArmPurge": {
+        "u": 0,
+        "slot": 0,
+        "policy": {
+          "older_than_days": 7958,
+          "exclude_flagged": true,
+          "exclude_pick": null,
+          "only_primary": false
+        }
+      }
+    },
+    {
+      "Backup": {
+        "u": 0,
+        "slot": 1,
+        "wait": true
+      }
+    },
+    "Restart",
+    {
+      "Purge": {
+        "u": 3,
+        "slot": 1,
+        "wait": false
+      }
+    },
+    {
+      "Probe": {
+        "u": 1,
+        "v": 3
+      }
+    },
+    {
+      "Backup": {
+        "u": 3,
+        "slot": 1,
+        "wait": true
+      }
+    },
+    {
+      "Login": {
+        "u": 2
+      }
+    },
+    {
+      "Sleep": {
+        "ms": 1179
+      }
+    },
+    {
+      "Register": {
+        "u": 2
+      }
+    },
+    {
+      "Register": {
+        "u": 2
+      }
+    },
+    {
+      "Faults": {
+        "site": "Spool",
+        "fault": "NoSpace",
+        "per_mille": 778,
+        "target": "Local",
+        "count": 7
+      }
+    },
+    {
+      "Register": {
+        "u": 1
+      }
+    },
+    {
+      "AddAccount": {
+        "u": 0,
+        "mailbox": 1,
+        "name": ".git&-Ä",
+        "opts": null
+      }
+    },
+    {
+      "Faults": {
+        "site": "StoreRead",
+        "fault": "Slow",
+        "per_mille": 840,
+        "target": "AnyDestination",
+        "count": 7
+      }
+    },
+    {
+      "Register": {
+        "u": 1
+      }
+    },
+    {
+      "AddAccount": {
+        "u": 2,
+        "mailbox": 1,
+        "name": "~%2e%2é",
+        "opts": null
+      }
+    },
+    {
+      "Register": {
+        "u": 2
+      }
+    },
+    {
+      "Login": {
+        "u": 3
+      }
+    },
+    {
+      "Login": {
+        "u": 1
+      }
+    },
+    {
+      "Logout": {
+        "u": 2
+      }
+    },
+    {
+      "ImapDelete": {
+        "m": 1
+      }
+    },
+    "Restart",
+    {
+      "Lock": {
+        "u": 0
+      }
+    },
+    {
+      "Probe": {
+        "u": 2,
+        "v": 0
+      }
+    },
+    "Restart",
+    {
+      "ImapAppend": {
+        "m": 2,
+        "to_box": false,
+        "folder": null,
+        "shape": null
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 0,
+        "to_box": false,
+        "folder": null,
+        "shape": null
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 1,
+        "to_box": true,
+        "folder": null,
+        "shape": null
+      }
+    },
+    {
+      "Backup": {
+        "u": 3,
+        "slot": 1,
+        "wait": false
+      }
+    },
+    "Restart",
+    {
+      "AddAccount": {
+        "u": 1,
+        "mailbox": 0,
+        "name": "~аpple‍#",
+        "opts": {
+          "starttls": true,
+          "idle": false
+        }
+      }
+    },
+    {
+      "Login": {
+        "u": 1
+      }
+    },
+    {
+      "ImapKick": {
+        "m": 1
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 0,
+        "to_box": false,
+        "folder": null,
+        "shape": null
+      }
+    },
+    {
+      "Probe": {
+        "u": 1,
+        "v": 1
+      }
+    },
+    {
+      "Repair": {
+        "u": 1,
+        "wait": false
+      }
+    },
+    {
+      "Backup": {
+        "u": 2,
+        "slot": 2,
+        "wait": true
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 2,
+        "to_box": false,
+        "folder": null,
+        "shape": {
+          "kind": 6,
+          "size": 2361740,
+          "flags": [
+            "\\Seen",
+            "$Junk",
+            "fuzzkw"
+          ],
+          "date": "17-Apr-2022 08:57:55 +1400",
+          "dup_id": false,
+          "name": "⁄．． &"
+        }
+      }
+    },
+    {
+      "Lock": {
+        "u": 3
+      }
+    },
+    {
+      "AddDestination": {
+        "u": 2,
+        "kind": "SharedS3",
+        "name": "%2e%2e⁦COM1",
+        "root": "\n|STRASSE",
+        "encrypt": false,
+        "deep": 0
+      }
+    },
+    {
+      "Probe": {
+        "u": 3,
+        "v": 2
+      }
+    },
+    {
+      "StaleEdit": {
+        "u": 2,
+        "slot": 2
+      }
+    },
+    {
+      "ImapFolder": {
+        "m": 0,
+        "action": {
+          "Rename": {
+            "pick": 1765952802,
+            "to": "­&-"
+          }
+        }
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 0,
+        "to_box": true,
+        "folder": null,
+        "shape": {
+          "kind": 5,
+          "size": 1105820,
+          "flags": [
+            "\\Draft",
+            "$Junk"
+          ],
+          "date": "23-Apr-2008 00:40:16 +1400",
+          "dup_id": false,
+          "name": "/﻿"
+        }
+      }
+    }
+  ],
+  "trace": [
+    "  0: Net { kind: CutUpload, ms: 1153 }",
+    "  1: ArmPurge { u: 0, slot: 0, policy: Some(PolicyShape { older_than_days: 7958, exclude_flagged: true, exclude_pick: None, only_primary: false }) }",
+    "  2: Backup { u: 0, slot: 1, wait: true }",
+    "  3: Restart",
+    "  4: Purge { u: 3, slot: 1, wait: false }",
+    "  5: Probe { u: 1, v: 3 }",
+    "  6: Backup { u: 3, slot: 1, wait: true }",
+    "  7: Login { u: 2 }",
+    "  8: Sleep { ms: 1179 }",
+    "  9: Register { u: 2 }",
+    " 10: Register { u: 2 }",
+    " 11: Faults { site: Spool, fault: NoSpace, per_mille: 778, target: Local, count: 7 }",
+    " 12: Register { u: 1 }",
+    " 13: AddAccount { u: 0, mailbox: 1, name: Some(\".git&-A\\u{308}\"), opts: None }",
+    " 14: Faults { site: StoreRead, fault: Slow, per_mille: 840, target: AnyDestination, count: 7 }",
+    " 15: Register { u: 1 }",
+    " 16: AddAccount { u: 2, mailbox: 1, name: Some(\"~%2e%2e\\u{301}\"), opts: None }",
+    " 17: Register { u: 2 }",
+    " 18: Login { u: 3 }",
+    " 19: Login { u: 1 }",
+    " 20: Logout { u: 2 }",
+    " 21: ImapDelete { m: 1 }",
+    " 22: Restart",
+    " 23: Lock { u: 0 }",
+    " 24: Probe { u: 2, v: 0 }",
+    " 25: Restart",
+    " 26: ImapAppend { m: 2, to_box: false, folder: None, shape: None }",
+    " 27: ImapAppend { m: 0, to_box: false, folder: None, shape: None }",
+    " 28: ImapAppend { m: 1, to_box: true, folder: None, shape: None }",
+    " 29: Backup { u: 3, slot: 1, wait: false }",
+    " 30: Restart",
+    " 31: AddAccount { u: 1, mailbox: 0, name: Some(\"~аpple\\u{200d}#\"), opts: Some(AccOpts { starttls: true, idle: false }) }",
+    " 32: Login { u: 1 }",
+    " 33: ImapKick { m: 1 }",
+    " 34: ImapAppend { m: 0, to_box: false, folder: None, shape: None }",
+    " 35: Probe { u: 1, v: 1 }",
+    " 36: Repair { u: 1, wait: false }",
+    " 37: Backup { u: 2, slot: 2, wait: true }",
+    " 38: ImapAppend { m: 2, to_box: false, folder: None, shape: Some(MsgShape { kind: 6, size: 2361740, flags: [\"\\\\Seen\", \"$Junk\", \"fuzzkw\"], date: \"17-Apr-2022 08:57:55 +1400\", dup_id: false, name: \"⁄．． &\" }) }",
+    " 39: Lock { u: 3 }",
+    " 40: AddDestination { u: 2, kind: SharedS3, name: Some(\"%2e%2e\\u{2066}COM1\"), root: Some(\"\\n|STRASSE\"), encrypt: Some(false), deep: Some(0) }",
+    " 41: Probe { u: 3, v: 2 }",
+    " 42: StaleEdit { u: 2, slot: 2 }",
+    " 43: ImapFolder { m: 0, action: Rename { pick: 1765952802, to: \"\\u{ad}&-\" } }",
+    " 44: ImapAppend { m: 0, to_box: true, folder: None, shape: Some(MsgShape { kind: 5, size: 1105820, flags: [\"\\\\Draft\", \"$Junk\"], date: \"23-Apr-2008 00:40:16 +1400\", dup_id: false, name: \"/\\u{feff}\" }) }",
+    "final check",
+    "  converge repair: Some(Done) None {\"accounts\":[],\"created_at\":\"2026-10-24T15:01:46.828742899Z\",\"deep\":true,\"destinations\":[{\"checked_deep\":0,\"corrupt\":0,\"destination_id\":\"e3d86979-b19f-4bb2-9617-0a3b05b2517f\",\"error\":null,\"healthy\":0,\"missing\":0,\"name\":\"primary\",\"ok\":true,\"orphaned\":0,\"pending\":0}],\"id\":6,\"ok\":true,\"repaired\":0,\"scope\":{\"scope\":\"all\"}}",
+    "  converge backup ~%2e%2é-a19114: Done None {\"bytes\":0,\"discovered\":0,\"downloaded\":0,\"errors\":[\"Box uid 1: %2e%2e⁦COM1: Unexpected (persistent) at stat, context: { uri: http://127.0.0.1:19001/malo-b/fuzz-f447510378d/%0A%7CSTRASSE/6cbee7a5d1bb0f6b3511054df1468795/objects/be/bed335c13eda5c0d12f8351a43c6a9e6637f6fd25e2c41ffa7ace824b84072c0.enc, response: Parts { status: 400, version: HTTP/1.1, headers: {\\\"content-type\\\": \\\"application/xml\\\", \\\"x-request-id\\\": \\\"76bd0b1c-d686-44c3-b1a1-2d5459b85966\\\", \\\"x-amz-request-id\\\": \\\"76bd0b1c-d686-44c3-b1a1-2d5459b85966\\\", \\\"date\\\": \\\"Sat, 24 Oct 2026 15:01:47 GMT\\\"} }, service: s3, path: fuzz-f447510378d/\\n|STRASSE/6cbee7a5d1bb0f6b3511054df1468795/objects/be/bed335c13eda5c0d12f8351a43c6a9e6637f6fd25e2c41ffa7ace824b84072c0.enc }\",\"manifest on %2e%2e⁦COM1: write fuzz-f447510378d/\\n|STRASSE/6cbee7a5d1bb0f6b3511054df1468795/account.json.enc: Unexpected (persistent) at write, context: { uri: http://127.0.0.1:19001/malo-b/fuzz-f447510378d/%0A%7CSTRASSE/6cbee7a5d1bb0f6b3511054df1468795/account.json.enc, response: Parts { status: 400, version: HTTP/1.1, headers: {\\\"content-type\\\": \\\"application/xml\\\", \\\"connection\\\": \\\"close\\\", \\\"x-request-id\\\": \\\"06b6b112-9b03-44ee-839b-14994eb5b32f\\\", \\\"x-amz-request-id\\\": \\\"06b6b112-9b03-44ee-839b-14994eb5b32f\\\", \\\"content-length\\\": \\\"237\\\", \\\"date\\\": \\\"Sat, 24 Oct 2026 15:01:47 GMT\\\"} }, service: s3, path: fuzz-f447510378d/\\n|STRASSE/6cbee7a5d1bb0f6b3511054df1468795/account.json.enc, written: 212 } => S3Error { code: \\\"InvalidArgument\\\", message: \\\"Object key contains invalid control characters: \\\\\\\"fuzz-f447510378d/\\\\\\\\n|STRASSE/6cbee7a5d1bb0f6b3511054df1468795/account.json.enc\\\\\\\"\\\", resource: \\\"\\\", request_id: \\\"\\\" }\"],\"mailboxes\":6,\"verified\":0}",
+    "  converge repair: Some(Done) None {\"accounts\":[{\"account_id\":\"4306c0c1-b091-4e53-958b-4e701ec21de6\",\"backlog\":1,\"error\":null,\"name\":\"~%2e%2é-a19114\",\"on_server\":1,\"vanished\":0}],\"created_at\":\"2026-10-24T15:01:47.912004726Z\",\"deep\":true,\"destinations\":[{\"checked_deep\":1,\"corrupt\":0,\"destination_id\":\"f2ba8e80-7293-4b3f-b115-a53ea1c96adb\",\"error\":null,\"healthy\":1,\"missing\":0,\"name\":\"primary\",\"ok\":true,\"orphaned\":0,\"pending\":0},{\"checked_deep\":0,\"corrupt\":0,\"destination_id\":\"c82e66eb-892b-4aad-ac21-759e185fcce9\",\"error\":null,\"healthy\":0,\"missing\":0,\"name\":\"%2e%2e⁦COM1\",\"ok\":true,\"orphaned\":0,\"pending\":1}],\"id\":5,\"ok\":true,\"repaired\":0,\"scope\":{\"scope\":\"all\"}}",
+    "  converge user 2 account ~%2e%2é-a19114: 1 messages",
+    "  diag: membership mailbox=1 uid=1 deleted=false | Some((\"Box\", 1792854105, true, 1))",
+    "  diag: sha=Some(\"a3e1d9f2415c2be72387cc4dd89948d3c8b7152901870b0bbc04ad7ea13c1770\") replicas=[(\"c82e66eb-892b-4aad-ac21-759e185fcce9\", \"Pending\"), (\"f2ba8e80-7293-4b3f-b115-a53ea1c96adb\", \"Verified\")]",
+    "  diag: row attempts=Some(2) state=Some(Error); last backup Some(Done) None Some(Object {\"bytes\": Number(0), \"discovered\": Number(0), \"downloaded\": Number(0), \"errors\": Array [String(\"Box uid 1: %2e%2e\\u{2066}COM1: Unexpected (persistent) at stat, context: { uri: http://127.0.0.1:19001/malo-b/fuzz-f447510378d/%0A%7CSTRASSE/6cbee7a5d1bb0f6b3511054df1468795/objects/be/bed335c13eda5c0d12f8351a43c6a9e6637f6fd25e2c41ffa7ace824b84072c0.enc, response: Parts { status: 400, version: HTTP/1.1, headers: {\\\"content-type\\\": \\\"application/xml\\\", \\\"x-request-id\\\": \\\"76bd0b1c-d686-44c3-b1a1-2d5459b85966\\\", \\\"x-amz-request-id\\\": \\\"76bd0b1c-d686-44c3-b1a1-2d5459b85966\\\", \\\"date\\\": \\\"Sat, 24 Oct 2026 15:01:47 GMT\\\"} }, service: s3, path: fuzz-f447510378d/\\n|STRASSE/6cbee7a5d1bb0f6b3511054df1468795/objects/be/bed335c13eda5c0d12f8351a43c6a9e6637f6fd25e2c41ffa7ace824b84072c0.enc }\"), String(\"manifest on %2e%2e\\u{2066}COM1: write fuzz-f447510378d/\\n|STRASSE/6cbee7a5d1bb0f6b3511054df1468795/account.json.enc: Unexpected (persistent) at write, context: { uri: http://127.0.0.1:19001/malo-b/fuzz-f447510378d/%0A%7CSTRASSE/6cbee7a5d1bb0f6b3511054df1468795/account.json.enc, response: Parts { status: 400, version: HTTP/1.1, headers: {\\\"content-type\\\": \\\"application/xml\\\", \\\"connection\\\": \\\"close\\\", \\\"x-request-id\\\": \\\"06b6b112-9b03-44ee-839b-14994eb5b32f\\\", \\\"x-amz-request-id\\\": \\\"06b6b112-9b03-44ee-839b-14994eb5b32f\\\", \\\"content-length\\\": \\\"237\\\", \\\"date\\\": \\\"Sat, 24 Oct 2026 15:01:47 GMT\\\"} }, service: s3, path: fuzz-f447510378d/\\n|STRASSE/6cbee7a5d1bb0f6b3511054df1468795/account.json.enc, written: 212 } => S3Error { code: \\\"InvalidArgument\\\", message: \\\"Object key contains invalid control characters: \\\\\\\"fuzz-f447510378d/\\\\\\\\n|STRASSE/6cbee7a5d1bb0f6b3511054df1468795/account.json.enc\\\\\\\"\\\", resource: \\\"\\\", request_id: \\\"\\\" }\")], \"mailboxes\": Number(6), \"verified\": Number(0)})",
+    "summary: 2 users registered (0 deleted), 1 accounts, 6 messages created, 0 purged by Malo, 19 jobs, 5 I/O faults injected"
+  ]
+}

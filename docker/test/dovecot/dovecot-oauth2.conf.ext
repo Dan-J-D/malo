@@ -1,0 +1,6 @@
+# Tokens are checked by calling the mock provider's userinfo endpoint with the bearer token.
+# The provider shares this container's network namespace, so "localhost:18080" here is the
+# same issuer the host sees.
+introspection_mode = auth
+introspection_url = http://localhost:18080/default/userinfo
+username_attribute = sub

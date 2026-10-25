@@ -1,0 +1,126 @@
+{
+  "seed": 7332,
+  "violation": {
+    "kind": "not_converged",
+    "detail": "user 1: message 2 (fztmpbMVDf3x2 subject) stuck as Error (0/1 copies): Some(\"Input/output error (injected)\")",
+    "step": 15
+  },
+  "ops": [
+    {
+      "Register": {
+        "u": 0
+      }
+    },
+    {
+      "Register": {
+        "u": 1
+      }
+    },
+    {
+      "AddAccount": {
+        "u": 0,
+        "mailbox": 0
+      }
+    },
+    {
+      "AddAccount": {
+        "u": 1,
+        "mailbox": 0
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 0,
+        "to_box": false
+      }
+    },
+    {
+      "Backup": {
+        "u": 0,
+        "slot": 1,
+        "wait": false
+      }
+    },
+    {
+      "Faults": {
+        "site": "Spool",
+        "fault": "Error",
+        "per_mille": 226,
+        "target": "Local",
+        "count": 2
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 0,
+        "to_box": false
+      }
+    },
+    {
+      "Backup": {
+        "u": 1,
+        "slot": 0,
+        "wait": true
+      }
+    },
+    {
+      "Probe": {
+        "u": 3,
+        "v": 2
+      }
+    },
+    {
+      "Purge": {
+        "u": 2,
+        "slot": 2,
+        "wait": true
+      }
+    },
+    {
+      "Purge": {
+        "u": 3,
+        "slot": 2,
+        "wait": true
+      }
+    },
+    {
+      "LoginB": {
+        "u": 1
+      }
+    },
+    {
+      "Login": {
+        "u": 1
+      }
+    },
+    {
+      "ImapDelete": {
+        "m": 0
+      }
+    }
+  ],
+  "trace": [
+    "  0: Register { u: 0 }",
+    "  1: Register { u: 1 }",
+    "  2: AddAccount { u: 0, mailbox: 0 }",
+    "  3: AddAccount { u: 1, mailbox: 0 }",
+    "  4: ImapAppend { m: 0, to_box: false }",
+    "  5: Backup { u: 0, slot: 1, wait: false }",
+    "  6: Faults { site: Spool, fault: Error, per_mille: 226, target: Local, count: 2 }",
+    "  7: ImapAppend { m: 0, to_box: false }",
+    "  8: Backup { u: 1, slot: 0, wait: true }",
+    "  9: Probe { u: 3, v: 2 }",
+    " 10: Purge { u: 2, slot: 2, wait: true }",
+    " 11: Purge { u: 3, slot: 2, wait: true }",
+    " 12: LoginB { u: 1 }",
+    " 13: Login { u: 1 }",
+    " 14: ImapDelete { m: 0 }",
+    "final check",
+    "  converge backup acc0-0-0: Done None {\"bytes\":0,\"discovered\":0,\"downloaded\":0,\"errors\":[],\"mailboxes\":5,\"verified\":0}",
+    "  converge user 0 account acc0-0-0: 1 messages",
+    "  converge backup acc1-0-0: Done None {\"bytes\":0,\"discovered\":0,\"downloaded\":0,\"errors\":[],\"mailboxes\":5,\"verified\":0}",
+    "  converge user 1 account acc1-0-0: 2 messages",
+    "  diag: row attempts=Some(1) state=Some(Error); last backup Some(Done) None Some(Object {\"bytes\": Number(0), \"discovered\": Number(0), \"downloaded\": Number(0), \"errors\": Array [], \"mailboxes\": Number(5), \"verified\": Number(0)})",
+    "summary: 2 users registered (0 deleted), 2 accounts, 2 messages created, 0 purged by Malo, 14 jobs, 1 I/O faults injected"
+  ]
+}

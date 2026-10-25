@@ -1,0 +1,96 @@
+{
+ "seed": 0,
+ "violation": {
+  "kind": "scenario",
+  "detail": "",
+  "step": 0
+ },
+ "ops": [
+  {
+   "Register": {
+    "u": 0
+   }
+  },
+  {
+   "AddAccount": {
+    "u": 0,
+    "mailbox": 0
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "Faults": {
+    "site": "StoreWrite",
+    "fault": "Error",
+    "per_mille": 1000,
+    "target": {
+     "Primary": {
+      "u": 0
+     }
+    },
+    "count": 200
+   }
+  },
+  {
+   "Backup": {
+    "u": 0,
+    "slot": 0,
+    "wait": true
+   }
+  },
+  {
+   "Backup": {
+    "u": 0,
+    "slot": 0,
+    "wait": true
+   }
+  },
+  {
+   "Backup": {
+    "u": 0,
+    "slot": 0,
+    "wait": true
+   }
+  },
+  {
+   "Backup": {
+    "u": 0,
+    "slot": 0,
+    "wait": true
+   }
+  },
+  {
+   "Backup": {
+    "u": 0,
+    "slot": 0,
+    "wait": true
+   }
+  },
+  {
+   "Backup": {
+    "u": 0,
+    "slot": 0,
+    "wait": true
+   }
+  },
+  {
+   "Backup": {
+    "u": 0,
+    "slot": 0,
+    "wait": true
+   }
+  }
+ ],
+ "trace": []
+}

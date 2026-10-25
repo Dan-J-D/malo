@@ -1,0 +1,78 @@
+{
+ "seed": 0,
+ "violation": {
+  "kind": "scenario",
+  "detail": "",
+  "step": 0
+ },
+ "ops": [
+  {
+   "Register": {
+    "u": 0
+   }
+  },
+  {
+   "Register": {
+    "u": 1
+   }
+  },
+  {
+   "AddDestination": {
+    "u": 0,
+    "kind": "SharedS3"
+   }
+  },
+  {
+   "AddDestination": {
+    "u": 1,
+    "kind": "SharedS3"
+   }
+  },
+  {
+   "AddAccount": {
+    "u": 0,
+    "mailbox": 0
+   }
+  },
+  {
+   "AddAccount": {
+    "u": 1,
+    "mailbox": 1
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 1,
+    "to_box": false
+   }
+  },
+  {
+   "Backup": {
+    "u": 0,
+    "slot": 0,
+    "wait": true
+   }
+  },
+  {
+   "Backup": {
+    "u": 1,
+    "slot": 0,
+    "wait": true
+   }
+  },
+  {
+   "Rebuild": {
+    "u": 0,
+    "slot": 1,
+    "wait": true
+   }
+  }
+ ],
+ "trace": []
+}

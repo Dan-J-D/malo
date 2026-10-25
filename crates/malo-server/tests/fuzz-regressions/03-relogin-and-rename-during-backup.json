@@ -1,0 +1,106 @@
+{
+ "seed": 0,
+ "violation": {
+  "kind": "scenario",
+  "detail": "",
+  "step": 0
+ },
+ "ops": [
+  {
+   "Register": {
+    "u": 0
+   }
+  },
+  {
+   "AddAccount": {
+    "u": 0,
+    "mailbox": 0
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "Backup": {
+    "u": 0,
+    "slot": 0,
+    "wait": false
+   }
+  },
+  {
+   "Logout": {
+    "u": 0
+   }
+  },
+  {
+   "Login": {
+    "u": 0
+   }
+  },
+  {
+   "RenameAccount": {
+    "u": 0,
+    "slot": 0
+   }
+  },
+  {
+   "Login": {
+    "u": 0
+   }
+  },
+  {
+   "RenameAccount": {
+    "u": 0,
+    "slot": 0
+   }
+  },
+  {
+   "Rebuild": {
+    "u": 0,
+    "slot": 0,
+    "wait": true
+   }
+  },
+  {
+   "Backup": {
+    "u": 0,
+    "slot": 0,
+    "wait": true
+   }
+  }
+ ],
+ "trace": []
+}

@@ -1,0 +1,133 @@
+{
+ "seed": 0,
+ "violation": {
+  "kind": "scenario",
+  "detail": "",
+  "step": 0
+ },
+ "ops": [
+  {
+   "Register": {
+    "u": 0
+   }
+  },
+  {
+   "Register": {
+    "u": 1
+   }
+  },
+  {
+   "AddDestination": {
+    "u": 0,
+    "kind": "SharedMount"
+   }
+  },
+  {
+   "AddDestination": {
+    "u": 1,
+    "kind": "SharedMount"
+   }
+  },
+  {
+   "AddDestination": {
+    "u": 0,
+    "kind": "SharedS3"
+   }
+  },
+  {
+   "AddDestination": {
+    "u": 1,
+    "kind": "SharedS3"
+   }
+  },
+  {
+   "AddAccount": {
+    "u": 0,
+    "mailbox": 0
+   }
+  },
+  {
+   "AddAccount": {
+    "u": 1,
+    "mailbox": 0
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "Burst": {
+    "ops": [
+     {
+      "Backup": {
+       "u": 0,
+       "slot": 0,
+       "wait": false
+      }
+     },
+     {
+      "Backup": {
+       "u": 1,
+       "slot": 0,
+       "wait": false
+      }
+     }
+    ]
+   }
+  },
+  {
+   "DeleteSelf": {
+    "u": 0
+   }
+  },
+  {
+   "Backup": {
+    "u": 1,
+    "slot": 0,
+    "wait": true
+   }
+  },
+  {
+   "Check": {
+    "u": 1,
+    "deep": true,
+    "wait": true
+   }
+  },
+  {
+   "Rebuild": {
+    "u": 1,
+    "slot": 2,
+    "wait": true
+   }
+  }
+ ],
+ "trace": []
+}

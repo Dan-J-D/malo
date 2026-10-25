@@ -1,0 +1,36 @@
+{
+  "seed": 7100,
+  "violation": {
+    "kind": "isolation_list",
+    "detail": "user 0 sees destination a9f10512-997b-478c-bd6a-a346f36141ef",
+    "step": 2
+  },
+  "ops": [
+    {
+      "Faults": {
+        "site": "Index",
+        "fault": "NoSpace",
+        "per_mille": 345,
+        "target": "Local",
+        "count": 6
+      }
+    },
+    {
+      "Register": {
+        "u": 0
+      }
+    },
+    {
+      "Probe": {
+        "u": 3,
+        "v": 0
+      }
+    }
+  ],
+  "trace": [
+    "  0: Faults { site: Index, fault: NoSpace, per_mille: 345, target: Local, count: 6 }",
+    "  1: Register { u: 0 }",
+    "  2: Probe { u: 3, v: 0 }",
+    "summary: 1 users registered (0 deleted), 0 accounts, 0 messages created, 0 purged by Malo, 0 jobs, 2 I/O faults injected"
+  ]
+}

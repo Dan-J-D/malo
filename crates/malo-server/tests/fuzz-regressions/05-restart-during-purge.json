@@ -1,0 +1,116 @@
+{
+ "seed": 0,
+ "violation": {
+  "kind": "scenario",
+  "detail": "",
+  "step": 0
+ },
+ "ops": [
+  {
+   "Register": {
+    "u": 0
+   }
+  },
+  {
+   "AddDestination": {
+    "u": 0,
+    "kind": "SharedS3"
+   }
+  },
+  {
+   "AddAccount": {
+    "u": 0,
+    "mailbox": 0
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "Backup": {
+    "u": 0,
+    "slot": 0,
+    "wait": true
+   }
+  },
+  {
+   "ArmPurge": {
+    "u": 0,
+    "slot": 0
+   }
+  },
+  {
+   "Purge": {
+    "u": 0,
+    "slot": 0,
+    "wait": false
+   }
+  },
+  "Restart",
+  {
+   "Login": {
+    "u": 0
+   }
+  },
+  {
+   "Purge": {
+    "u": 0,
+    "slot": 0,
+    "wait": true
+   }
+  },
+  {
+   "ImapAppend": {
+    "m": 0,
+    "to_box": false
+   }
+  },
+  {
+   "Backup": {
+    "u": 0,
+    "slot": 0,
+    "wait": true
+   }
+  }
+ ],
+ "trace": []
+}

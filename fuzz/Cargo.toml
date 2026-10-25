@@ -1,0 +1,77 @@
+[package]
+name = "malo-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+malo-core = { path = "../crates/malo-core" }
+malo-api = { path = "../crates/malo-api" }
+serde_json = "1"
+imap-proto = "0.16"
+zeroize = "1"
+
+# Keep the fuzz crate out of the main workspace (it needs nightly).
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "stream_decrypt"
+path = "fuzz_targets/stream_decrypt.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "vault_parse"
+path = "fuzz_targets/vault_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "manifest_entry"
+path = "fuzz_targets/manifest_entry.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "email_viewer"
+path = "fuzz_targets/email_viewer.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "html_sanitizer"
+path = "fuzz_targets/html_sanitizer.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "imap_response"
+path = "fuzz_targets/imap_response.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "names_and_paths"
+path = "fuzz_targets/names_and_paths.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "api_inputs"
+path = "fuzz_targets/api_inputs.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "config_blob"
+path = "fuzz_targets/config_blob.rs"
+test = false
+doc = false

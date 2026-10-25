@@ -1,0 +1,454 @@
+{
+  "seed": 1000205,
+  "violation": {
+    "kind": "mail_lost",
+    "detail": "user 0 purged fztmp4JFviAx1 from mailbox 0 but can't give it back",
+    "step": 60
+  },
+  "ops": [
+    {
+      "Register": {
+        "u": 0
+      }
+    },
+    {
+      "Register": {
+        "u": 1
+      }
+    },
+    {
+      "AddAccount": {
+        "u": 0,
+        "mailbox": 0
+      }
+    },
+    {
+      "AddAccount": {
+        "u": 1,
+        "mailbox": 0
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 0,
+        "to_box": false
+      }
+    },
+    {
+      "Check": {
+        "u": 2,
+        "deep": false,
+        "wait": false
+      }
+    },
+    {
+      "Backup": {
+        "u": 3,
+        "slot": 2,
+        "wait": false
+      }
+    },
+    {
+      "ImapDelete": {
+        "m": 2
+      }
+    },
+    {
+      "Register": {
+        "u": 1
+      }
+    },
+    {
+      "LoginB": {
+        "u": 0
+      }
+    },
+    {
+      "Lock": {
+        "u": 1
+      }
+    },
+    {
+      "Backup": {
+        "u": 3,
+        "slot": 0,
+        "wait": false
+      }
+    },
+    {
+      "Register": {
+        "u": 1
+      }
+    },
+    {
+      "Lock": {
+        "u": 0
+      }
+    },
+    {
+      "ChangePassword": {
+        "u": 1
+      }
+    },
+    {
+      "Backup": {
+        "u": 3,
+        "slot": 0,
+        "wait": false
+      }
+    },
+    {
+      "Sleep": {
+        "ms": 471
+      }
+    },
+    {
+      "AdminSetDisabled": {
+        "u": 1,
+        "disabled": false
+      }
+    },
+    {
+      "AddDestination": {
+        "u": 1,
+        "kind": "SharedMount"
+      }
+    },
+    {
+      "Faults": {
+        "site": "Cache",
+        "fault": "NoSpace",
+        "per_mille": 145,
+        "target": "Local",
+        "count": 1
+      }
+    },
+    {
+      "Probe": {
+        "u": 2,
+        "v": 1
+      }
+    },
+    {
+      "ArmPurge": {
+        "u": 2,
+        "slot": 2
+      }
+    },
+    {
+      "AddDestination": {
+        "u": 2,
+        "kind": "SharedMount"
+      }
+    },
+    {
+      "Check": {
+        "u": 2,
+        "deep": true,
+        "wait": false
+      }
+    },
+    {
+      "Repair": {
+        "u": 3,
+        "wait": true
+      }
+    },
+    {
+      "ArmPurge": {
+        "u": 2,
+        "slot": 2
+      }
+    },
+    {
+      "Check": {
+        "u": 2,
+        "deep": false,
+        "wait": false
+      }
+    },
+    {
+      "Check": {
+        "u": 2,
+        "deep": false,
+        "wait": false
+      }
+    },
+    {
+      "Lock": {
+        "u": 2
+      }
+    },
+    {
+      "AddDestination": {
+        "u": 3,
+        "kind": "SharedS3"
+      }
+    },
+    {
+      "Register": {
+        "u": 0
+      }
+    },
+    {
+      "AdminDelete": {
+        "u": 3
+      }
+    },
+    {
+      "CorruptSharedObject": {
+        "pick": 1637828725
+      }
+    },
+    {
+      "Backup": {
+        "u": 2,
+        "slot": 2,
+        "wait": true
+      }
+    },
+    {
+      "Backup": {
+        "u": 3,
+        "slot": 0,
+        "wait": false
+      }
+    },
+    {
+      "Rebuild": {
+        "u": 2,
+        "slot": 1,
+        "wait": true
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 2,
+        "to_box": true
+      }
+    },
+    {
+      "Purge": {
+        "u": 0,
+        "slot": 0,
+        "wait": true
+      }
+    },
+    {
+      "Login": {
+        "u": 0
+      }
+    },
+    {
+      "Faults": {
+        "site": "StoreMeta",
+        "fault": "NoSpace",
+        "per_mille": 443,
+        "target": {
+          "Shared": {
+            "u": 2
+          }
+        },
+        "count": 6
+      }
+    },
+    {
+      "LoginB": {
+        "u": 2
+      }
+    },
+    {
+      "Repair": {
+        "u": 2,
+        "wait": true
+      }
+    },
+    {
+      "ImapKick": {
+        "m": 0
+      }
+    },
+    {
+      "ImapAppend": {
+        "m": 0,
+        "to_box": true
+      }
+    },
+    {
+      "Rebuild": {
+        "u": 1,
+        "slot": 0,
+        "wait": true
+      }
+    },
+    {
+      "RenameAccount": {
+        "u": 1,
+        "slot": 2
+      }
+    },
+    {
+      "Purge": {
+        "u": 2,
+        "slot": 2,
+        "wait": true
+      }
+    },
+    {
+      "Backup": {
+        "u": 1,
+        "slot": 1,
+        "wait": false
+      }
+    },
+    {
+      "ArmPurge": {
+        "u": 1,
+        "slot": 0
+      }
+    },
+    {
+      "Backup": {
+        "u": 2,
+        "slot": 0,
+        "wait": true
+      }
+    },
+    {
+      "Backup": {
+        "u": 0,
+        "slot": 2,
+        "wait": false
+      }
+    },
+    {
+      "RemoveAccount": {
+        "u": 0,
+        "slot": 1
+      }
+    },
+    {
+      "RenameAccount": {
+        "u": 3,
+        "slot": 1
+      }
+    },
+    {
+      "Backup": {
+        "u": 0,
+        "slot": 0,
+        "wait": false
+      }
+    },
+    {
+      "ArmPurge": {
+        "u": 2,
+        "slot": 2
+      }
+    },
+    {
+      "DeleteSharedObject": {
+        "pick": 3996971214
+      }
+    },
+    {
+      "Check": {
+        "u": 2,
+        "deep": true,
+        "wait": false
+      }
+    },
+    {
+      "DeleteSelf": {
+        "u": 3
+      }
+    },
+    {
+      "Repair": {
+        "u": 3,
+        "wait": false
+      }
+    },
+    {
+      "Register": {
+        "u": 3
+      }
+    }
+  ],
+  "trace": [
+    "  0: Register { u: 0 }",
+    "  1: Register { u: 1 }",
+    "  2: AddAccount { u: 0, mailbox: 0 }",
+    "  3: AddAccount { u: 1, mailbox: 0 }",
+    "  4: ImapAppend { m: 0, to_box: false }",
+    "  5: Check { u: 2, deep: false, wait: false }",
+    "  6: Backup { u: 3, slot: 2, wait: false }",
+    "  7: ImapDelete { m: 2 }",
+    "  8: Register { u: 1 }",
+    "  9: LoginB { u: 0 }",
+    " 10: Lock { u: 1 }",
+    " 11: Backup { u: 3, slot: 0, wait: false }",
+    " 12: Register { u: 1 }",
+    " 13: Lock { u: 0 }",
+    " 14: ChangePassword { u: 1 }",
+    " 15: Backup { u: 3, slot: 0, wait: false }",
+    " 16: Sleep { ms: 471 }",
+    " 17: AdminSetDisabled { u: 1, disabled: false }",
+    " 18: AddDestination { u: 1, kind: SharedMount }",
+    " 19: Faults { site: Cache, fault: NoSpace, per_mille: 145, target: Local, count: 1 }",
+    " 20: Probe { u: 2, v: 1 }",
+    " 21: ArmPurge { u: 2, slot: 2 }",
+    " 22: AddDestination { u: 2, kind: SharedMount }",
+    " 23: Check { u: 2, deep: true, wait: false }",
+    " 24: Repair { u: 3, wait: true }",
+    " 25: ArmPurge { u: 2, slot: 2 }",
+    " 26: Check { u: 2, deep: false, wait: false }",
+    " 27: Check { u: 2, deep: false, wait: false }",
+    " 28: Lock { u: 2 }",
+    " 29: AddDestination { u: 3, kind: SharedS3 }",
+    " 30: Register { u: 0 }",
+    " 31: AdminDelete { u: 3 }",
+    " 32: CorruptSharedObject { pick: 1637828725 }",
+    " 33: Backup { u: 2, slot: 2, wait: true }",
+    " 34: Backup { u: 3, slot: 0, wait: false }",
+    " 35: Rebuild { u: 2, slot: 1, wait: true }",
+    " 36: ImapAppend { m: 2, to_box: true }",
+    " 37: Purge { u: 0, slot: 0, wait: true }",
+    " 38: Login { u: 0 }",
+    " 39: Faults { site: StoreMeta, fault: NoSpace, per_mille: 443, target: Shared { u: 2 }, count: 6 }",
+    " 40: LoginB { u: 2 }",
+    " 41: Repair { u: 2, wait: true }",
+    " 42: ImapKick { m: 0 }",
+    " 43: ImapAppend { m: 0, to_box: true }",
+    " 44: Rebuild { u: 1, slot: 0, wait: true }",
+    " 45: RenameAccount { u: 1, slot: 2 }",
+    " 46: Purge { u: 2, slot: 2, wait: true }",
+    " 47: Backup { u: 1, slot: 1, wait: false }",
+    " 48: ArmPurge { u: 1, slot: 0 }",
+    " 49: Backup { u: 2, slot: 0, wait: true }",
+    " 50: Backup { u: 0, slot: 2, wait: false }",
+    " 51: RemoveAccount { u: 0, slot: 1 }",
+    " 52: RenameAccount { u: 3, slot: 1 }",
+    " 53: Backup { u: 0, slot: 0, wait: false }",
+    " 54: ArmPurge { u: 2, slot: 2 }",
+    " 55: DeleteSharedObject { pick: 3996971214 }",
+    " 56: Check { u: 2, deep: true, wait: false }",
+    " 57: DeleteSelf { u: 3 }",
+    " 58: Repair { u: 3, wait: false }",
+    " 59: Register { u: 3 }",
+    "final check",
+    "  converge repair: Some(Done) None {\"accounts\":[],\"created_at\":\"2026-10-24T08:48:40.568518502Z\",\"deep\":true,\"destinations\":[{\"checked_deep\":1,\"corrupt\":0,\"destination_id\":\"948acdc4-6d95-40cb-a1fb-be6c3423e075\",\"error\":null,\"healthy\":1,\"missing\":0,\"name\":\"primary\",\"ok\":true,\"orphaned\":0,\"pending\":0}],\"id\":3,\"ok\":true,\"repaired\":0,\"scope\":{\"scope\":\"all\"}}",
+    "  converge backup acc1-0-0-r8864: Done None {\"bytes\":0,\"discovered\":0,\"downloaded\":0,\"errors\":[],\"mailboxes\":6,\"verified\":0}",
+    "  converge repair: Some(Done) None {\"accounts\":[{\"account_id\":\"2d6dd6ab-0e90-49f6-8316-b89dd014d986\",\"backlog\":0,\"error\":null,\"name\":\"acc1-0-0-r8864\",\"on_server\":1,\"vanished\":0}],\"created_at\":\"2026-10-24T08:48:41.189405365Z\",\"deep\":true,\"destinations\":[{\"checked_deep\":2,\"corrupt\":0,\"destination_id\":\"e6d55f5d-c64f-491f-8815-2dc9e049feeb\",\"error\":null,\"healthy\":2,\"missing\":0,\"name\":\"primary\",\"ok\":true,\"orphaned\":0,\"pending\":0},{\"checked_deep\":2,\"corrupt\":0,\"destination_id\":\"12f444d6-78ba-4bdf-93cd-a94f2ed4693f\",\"error\":null,\"healthy\":2,\"missing\":0,\"name\":\"shared-mount\",\"ok\":true,\"orphaned\":0,\"pending\":0}],\"id\":3,\"ok\":true,\"repaired\":0,\"scope\":{\"scope\":\"all\"}}",
+    "  converge user 1 account acc1-0-0-r8864: 2 messages",
+    "  converge repair: Some(Done) None {\"accounts\":[],\"created_at\":\"2026-10-24T08:48:41.657718864Z\",\"deep\":true,\"destinations\":[{\"checked_deep\":0,\"corrupt\":0,\"destination_id\":\"eb20b494-521a-4f23-9ba9-a924402deaf6\",\"error\":null,\"healthy\":0,\"missing\":0,\"name\":\"primary\",\"ok\":true,\"orphaned\":0,\"pending\":0}],\"id\":3,\"ok\":true,\"repaired\":0,\"scope\":{\"scope\":\"all\"}}",
+    "final: 3 verified backups across surviving users",
+    "  diag: 0 search hits for fztmp4JFviAx1 (truth 358 bytes): ",
+    "  diag: audit 2026-10-24 08:48:39.365608504 UTC \"index_rebuilt\" None {\"destination\":\"948acdc4-6d95-40cb-a1fb-be6c3423e075\",\"messages\":1}",
+    "  diag: audit 2026-10-24 08:48:39.012896912 UTC \"account_deleted\" Some(\"29e0f9a4-94d3-4a82-94fb-0a810d4315ef\") {}",
+    "  diag: purged row 1: Some((\"29e0f9a4-94d3-4a82-94fb-0a810d4315ef\", Verified, Some(\"61988b644e64320f4b3fa7fcdf373c9ae22a78b40aa0a90ac0b7fceb983a743e\"), \"fztmp4JFviAx3 subject\")); memberships [(1, 1, false)]; replicas [(\"948acdc4-6d95-40cb-a1fb-be6c3423e075\", \"Verified\")]",
+    "  diag: audit 2026-10-24 08:48:38.260566693 UTC \"purged\" Some(\"29e0f9a4-94d3-4a82-94fb-0a810d4315ef\") {\"from\":\"sender@example.com\",\"mailbox\":\"INBOX\",\"message\":1,\"sha256\":\"b3177644146ebd7598ad85fdc8f4d577525774f5241f79fc72f9c39e8e6a508d\",\"size\":358,\"subject\":\"fztmp4JFviAx1 subject\",\"uid\":1,\"uidvalidity\":1792831716}",
+    "  diag: current accounts []",
+    "summary: 3 users registered (0 deleted), 2 accounts, 3 messages created, 1 purged by Malo, 24 jobs, 0 I/O faults injected"
+  ]
+}

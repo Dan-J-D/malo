@@ -1,0 +1,57 @@
+[package]
+name = "malo-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "malo-server"
+path = "src/main.rs"
+
+[dependencies]
+malo-core.workspace = true
+malo-api.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+rand.workspace = true
+hex.workspace = true
+sha2.workspace = true
+zeroize.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+axum = { version = "0.8", features = ["ws", "macros"] }
+axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "limit"] }
+tower_governor = "0.7"
+rcgen = "0.13"
+rusqlite = { version = "0.37", features = ["bundled-sqlcipher-vendored-openssl"] }
+toml = "0.8"
+libc = "0.2"
+memsec = "0.7"
+reqwest.workspace = true
+
+[features]
+fault-injection = ["malo-core/fault-injection"]
+
+[dev-dependencies]
+# Tests get the fault injector; release builds never contain it.
+malo-core = { workspace = true, features = ["fault-injection"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tempfile = "3"
+base64.workspace = true
+sha2.workspace = true
+opendal = { version = "0.54", default-features = false, features = ["services-s3"] }
