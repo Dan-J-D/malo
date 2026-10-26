@@ -5,7 +5,7 @@
 //! (see `malo_core::mailview`); moving to Trash hides a message from its folder. APPEND goes to
 //! the account's own server (and comes back with the next backup); drafts aren't kept.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -1289,12 +1289,26 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
             .messages
             .iter()
             .position(|m| !m.flags.iter().any(|f| f.eq_ignore_ascii_case("\\Seen")));
+        // Keywords in use (tags such as $label1 or a server's categories) are announced too:
+        // mail apps only show keywords listed here.
+        let keywords: BTreeSet<&str> = view
+            .messages
+            .iter()
+            .flat_map(|m| &m.flags)
+            .map(String::as_str)
+            .filter(|f| !f.starts_with('\\'))
+            .collect();
+        let mut flags = String::from("\\Answered \\Flagged \\Deleted \\Seen \\Draft");
+        for k in &keywords {
+            flags.push(' ');
+            flags.push_str(k);
+        }
         let mut out = String::new();
-        out.push_str("* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n");
+        out.push_str(&format!("* FLAGS ({flags})\r\n"));
         if readonly {
             out.push_str("* OK [PERMANENTFLAGS ()] Read-only\r\n");
         } else {
-            out.push_str("* OK [PERMANENTFLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft \\*)] Flags are kept in Malo, not on the mail server\r\n");
+            out.push_str(&format!("* OK [PERMANENTFLAGS ({flags} \\*)] Flags are kept in Malo, not on the mail server\r\n"));
         }
         out.push_str(&format!(
             "* {} EXISTS\r\n* 0 RECENT\r\n",

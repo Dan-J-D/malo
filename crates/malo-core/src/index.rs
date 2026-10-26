@@ -345,6 +345,40 @@ fn now() -> String {
     Utc::now().to_rfc3339()
 }
 
+/// Gmail labels used to be stored still escaped (`\\Inbox`), so INBOX, Sent, Drafts and
+/// Starred were empty for mail apps. Repaired once.
+fn unescape_stored_labels(conn: &Connection) -> anyhow::Result<()> {
+    const DONE: &str = "labels_unescaped";
+    if conn
+        .query_row("SELECT 1 FROM kv WHERE k=?1", [DONE], |_| Ok(()))
+        .optional()?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    let rows: Vec<(i64, String)> = tx
+        .prepare("SELECT id, gm_labels FROM memberships WHERE instr(gm_labels, '\\')>0")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    {
+        let mut update = tx.prepare("UPDATE memberships SET gm_labels=?2 WHERE id=?1")?;
+        for (id, labels) in rows {
+            let fixed: Vec<String> = split_list(labels.clone())
+                .iter()
+                .map(|l| crate::imap::unescape_quoted(l))
+                .collect();
+            let fixed = join_list(&fixed);
+            if fixed != labels {
+                update.execute(params![id, fixed])?;
+            }
+        }
+    }
+    tx.execute("INSERT INTO kv(k,v) VALUES(?1,'1')", [DONE])?;
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn split_list(s: String) -> Vec<String> {
     if s.is_empty() {
         vec![]
@@ -395,6 +429,7 @@ impl Index {
         {
             conn.execute_batch("UPDATE messages SET indexed_sha=NULL")?;
         }
+        unescape_stored_labels(&conn)?;
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS messages_thread ON messages(account, thread) WHERE thread IS NOT NULL",
         )?;
@@ -1960,6 +1995,58 @@ mod tests {
         assert_eq!(hits("%"), 1, "% is literal, not a wildcard");
         assert_eq!(hits("_"), 0);
         assert_eq!(hits("😀\u{202E}"), 0);
+    }
+
+    #[test]
+    fn escaped_gmail_labels_are_repaired_once() {
+        let idx = Index::open_in_memory().unwrap();
+        let all = idx
+            .upsert_mailbox(
+                "acc",
+                "[Gmail]/All Mail",
+                "All Mail",
+                "All",
+                Some("/"),
+                Some("\\All"),
+                1,
+            )
+            .unwrap();
+        let d = crate::imap::Discovered {
+            uid: 1,
+            flags: vec![],
+            internaldate: None,
+            size: 1,
+            envelope: empty_envelope(),
+            gm_msgid: Some(1),
+            gm_labels: vec![],
+        };
+        idx.record_discovered("acc", all.id, 1, &[d], 1).unwrap();
+        let stored = "\\\\Inbox\u{1f}\\\\Important\u{1f}Say \\\"hi\\\"\u{1f}Work";
+        let labels = || {
+            idx.with(|c| {
+                c.query_row("SELECT gm_labels FROM memberships", [], |r| {
+                    r.get::<_, String>(0)
+                })
+            })
+            .unwrap()
+        };
+        idx.with(|c| {
+            c.execute("UPDATE memberships SET gm_labels=?1", [stored])?;
+            c.execute("DELETE FROM kv WHERE k='labels_unescaped'", [])
+        })
+        .unwrap();
+        idx.with(|c| unescape_stored_labels(c).map_err(|_| rusqlite::Error::InvalidQuery))
+            .unwrap();
+        assert_eq!(
+            labels(),
+            "\\Inbox\u{1f}\\Important\u{1f}Say \"hi\"\u{1f}Work"
+        );
+        // Only once: labels stored correctly since then are left alone.
+        idx.with(|c| c.execute("UPDATE memberships SET gm_labels=?1", [stored]))
+            .unwrap();
+        idx.with(|c| unescape_stored_labels(c).map_err(|_| rusqlite::Error::InvalidQuery))
+            .unwrap();
+        assert_eq!(labels(), stored);
     }
 
     #[test]

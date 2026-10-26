@@ -118,6 +118,70 @@ fn label_folder(label: &str) -> Option<(String, Option<&'static str>)> {
     })
 }
 
+/// Folder roles by the names servers without SPECIAL-USE give them (Outlook and Exchange,
+/// iCloud, Yahoo, older Dovecot setups), so mail apps still find Sent, Trash and the others.
+const ROLE_NAMES: &[(&str, &[&str])] = &[
+    (
+        "\\Sent",
+        &["sent", "sent items", "sent messages", "sent mail"],
+    ),
+    ("\\Drafts", &["drafts", "draft"]),
+    (
+        "\\Trash",
+        &[
+            "trash",
+            "deleted items",
+            "deleted messages",
+            "deleted",
+            "bin",
+        ],
+    ),
+    (
+        "\\Junk",
+        &[
+            "junk",
+            "junk email",
+            "junk e-mail",
+            "spam",
+            "bulk mail",
+            "bulk",
+        ],
+    ),
+    ("\\Archive", &["archive", "archives"]),
+];
+
+/// Gives top-level folders (or ones right under INBOX, as some servers keep them) the role their
+/// name implies, unless the server marked one already.
+fn guess_special_use(folders: &mut [Folder]) {
+    for (role, names) in ROLE_NAMES {
+        if folders
+            .iter()
+            .any(|f| f.special_use.as_deref() == Some(*role))
+        {
+            continue;
+        }
+        let hit = folders.iter().position(|f| {
+            let name = crate::layout::decode_utf7(&f.name);
+            let leaf = match f.delimiter.as_deref().filter(|d| !d.is_empty()) {
+                Some(d) => match name.split_once(d) {
+                    Some((parent, leaf)) if parent.eq_ignore_ascii_case("INBOX") => {
+                        leaf.to_string()
+                    }
+                    Some(_) => return false,
+                    None => name,
+                },
+                None => name,
+            };
+            f.source == FolderSource::Mailbox
+                && f.special_use.is_none()
+                && names.contains(&leaf.to_lowercase().as_str())
+        });
+        if let Some(i) = hit {
+            folders[i].special_use = Some(role.to_string());
+        }
+    }
+}
+
 /// The folder of a Gmail category.
 pub fn category_folder(category: &str) -> String {
     let mut name = category.to_string();
@@ -222,6 +286,8 @@ impl Index {
                     source: FolderSource::Mailbox,
                 });
             }
+            // Gmail labels live on All Mail. Other servers with an All Mail (Proton Bridge, some
+            // archives) have none, and get neither label nor category folders.
             if let Some(delimiter) = all_delimiter {
                 let mut stmt = c.prepare(
                     "SELECT DISTINCT m.gm_labels FROM memberships m JOIN mailboxes mb ON mb.id=m.mailbox
@@ -231,7 +297,8 @@ impl Index {
                 for l in stmt.query_map([account], |r| r.get::<_, String>(0))? {
                     labels.extend(split_list(l?));
                 }
-                if settings.split_categories {
+                let gmail = !labels.is_empty();
+                if gmail && settings.split_categories {
                     labels.insert("\\Inbox".into());
                 }
                 for label in labels {
@@ -253,7 +320,7 @@ impl Index {
                         source,
                     });
                 }
-                if settings.split_categories {
+                if gmail && settings.split_categories {
                     for c in GMAIL_CATEGORIES {
                         out.push(Folder {
                             name: category_folder(c),
@@ -264,6 +331,7 @@ impl Index {
                     }
                 }
             }
+            guess_special_use(&mut out);
             if !out.iter().any(|f| f.name.eq_ignore_ascii_case("INBOX")) {
                 out.push(Folder {
                     name: "INBOX".into(),
@@ -540,6 +608,84 @@ mod tests {
         ix.add_membership(id, mailbox, uid, &["\\Seen".into()], &labels)
             .unwrap();
         id
+    }
+
+    #[test]
+    fn folders_of_other_servers_get_their_roles() {
+        // Outlook / Exchange without SPECIAL-USE.
+        let ix = Index::open_in_memory().unwrap();
+        for name in [
+            "INBOX",
+            "Sent Items",
+            "Deleted Items",
+            "Junk Email",
+            "Drafts",
+            "Archive",
+            "Work/Sent",
+        ] {
+            ix.upsert_mailbox("a", name, name, name, Some("/"), None, 1)
+                .unwrap();
+        }
+        // A role the server marked itself is kept, and not given to a second folder.
+        ix.upsert_mailbox(
+            "a",
+            "Old Mail",
+            "Old Mail",
+            "o",
+            Some("/"),
+            Some("\\Archive"),
+            1,
+        )
+        .unwrap();
+        let roles: Vec<(String, Option<String>)> = ix
+            .imap_folders("a")
+            .unwrap()
+            .into_iter()
+            .map(|f| (f.name, f.special_use))
+            .collect();
+        let role = |n: &str| roles.iter().find(|r| r.0 == n).unwrap().1.clone();
+        assert_eq!(role("Sent Items").as_deref(), Some("\\Sent"));
+        assert_eq!(role("Deleted Items").as_deref(), Some("\\Trash"));
+        assert_eq!(role("Junk Email").as_deref(), Some("\\Junk"));
+        assert_eq!(role("Drafts").as_deref(), Some("\\Drafts"));
+        assert_eq!(role("Old Mail").as_deref(), Some("\\Archive"));
+        assert_eq!(role("Archive"), None);
+        assert_eq!(role("Work/Sent"), None, "only top-level folders");
+        assert_eq!(role("INBOX"), None);
+
+        // Dovecot keeping folders under INBOX.
+        let ix = Index::open_in_memory().unwrap();
+        ix.upsert_mailbox("a", "INBOX.Sent", "Sent", "s", Some("."), None, 1)
+            .unwrap();
+        assert_eq!(
+            ix.imap_folders("a").unwrap()[1].special_use.as_deref(),
+            Some("\\Sent")
+        );
+
+        // Proton Bridge has an All Mail but no Gmail labels: no Gmail folders appear.
+        let ix = Index::open_in_memory().unwrap();
+        let inbox = ix
+            .upsert_mailbox("a", "INBOX", "INBOX", "i", Some("/"), None, 1)
+            .unwrap();
+        let all = ix
+            .upsert_mailbox(
+                "a",
+                "All Mail",
+                "All Mail",
+                "x",
+                Some("/"),
+                Some("\\All"),
+                1,
+            )
+            .unwrap();
+        ix.upsert_mailbox("a", "Labels/Work", "Work", "w", Some("/"), None, 1)
+            .unwrap();
+        add(&ix, inbox.id, 1, "s1", &[]);
+        add(&ix, all.id, 1, "s1", &[]);
+        let folders = ix.imap_folders("a").unwrap();
+        let names: Vec<&str> = folders.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["INBOX", "All Mail", "Labels/Work"]);
+        assert_eq!(ix.imap_view("a", &folders[0]).unwrap().messages.len(), 1);
     }
 
     #[test]

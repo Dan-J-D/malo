@@ -355,9 +355,7 @@ impl ImapConn {
         Ok(fetches
             .iter()
             .filter_map(|f| {
-                let labels = f
-                    .gmail_labels()
-                    .map(|l| l.iter().map(|s| s.to_string()).collect());
+                let labels = f.gmail_labels().map(|l| gmail_labels(l));
                 Some((f.uid?, flags_of(f), labels))
             })
             .collect())
@@ -602,6 +600,12 @@ fn flags_of(f: &Fetch) -> Vec<String> {
         .collect()
 }
 
+/// Gmail sends system labels quoted (`"\\Inbox"`), which [unescape_quoted] undoes (atoms
+/// hold neither escape, so it leaves them alone).
+fn gmail_labels(labels: &[std::borrow::Cow<'_, str>]) -> Vec<String> {
+    labels.iter().map(|l| unescape_quoted(l)).collect()
+}
+
 impl Discovered {
     fn from_fetch(f: &Fetch) -> Option<Discovered> {
         let uid = f.uid?;
@@ -619,7 +623,7 @@ impl Discovered {
             gm_msgid: f.gmail_msg_id().copied(),
             gm_labels: f
                 .gmail_labels()
-                .map(|l| l.iter().map(|s| s.to_string()).collect())
+                .map(|l| gmail_labels(l))
                 .unwrap_or_default(),
         })
     }
@@ -745,6 +749,19 @@ pub fn uid_set(uids: &[u32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gmail_labels_are_unescaped() {
+        // Gmail: X-GM-LABELS ("\\Inbox" "\\Important" Work "Say \"hi\"")
+        assert_eq!(unescape_quoted(r"\\Inbox"), r"\Inbox");
+        assert_eq!(unescape_quoted(r#"Say \"hi\""#), r#"Say "hi""#);
+        assert_eq!(
+            unescape_quoted(r"\Inbox"),
+            r"\Inbox",
+            "atoms are left alone"
+        );
+        assert_eq!(unescape_quoted(r"a\b"), r"a\b");
+    }
 
     #[test]
     fn uid_sets() {
