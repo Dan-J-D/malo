@@ -126,6 +126,39 @@ CREATE TABLE IF NOT EXISTS audit_log (
     detail TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS imap_mailboxes (
+    account TEXT NOT NULL,
+    name TEXT NOT NULL,
+    uidvalidity INTEGER NOT NULL,
+    uidnext INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY(account, name)
+);
+CREATE TABLE IF NOT EXISTS imap_uids (
+    account TEXT NOT NULL,
+    mailbox TEXT NOT NULL,
+    uid INTEGER NOT NULL,
+    membership INTEGER NOT NULL REFERENCES memberships(id) ON DELETE CASCADE,
+    flags TEXT,
+    hidden INTEGER NOT NULL DEFAULT 0,
+    moved INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(account, mailbox, uid),
+    UNIQUE(account, mailbox, membership)
+);
+CREATE INDEX IF NOT EXISTS imap_uids_membership ON imap_uids(membership);
+CREATE TABLE IF NOT EXISTS imap_meta (
+    sha256 TEXT PRIMARY KEY,
+    header BLOB NOT NULL,
+    envelope BLOB NOT NULL,
+    bodystructure BLOB NOT NULL,
+    body BLOB NOT NULL
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(
+    subject, sender, recipients, attachments, body,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER IF NOT EXISTS search_forget AFTER DELETE ON messages BEGIN
+    DELETE FROM search WHERE rowid = old.id;
+END;
 CREATE TABLE IF NOT EXISTS tombstones (
     account TEXT NOT NULL,
     mailbox TEXT NOT NULL,
@@ -238,6 +271,8 @@ pub struct MessageQuery {
     /// arriving meanwhile doesn't shift the offsets of the pages it loads later.
     pub max_id: Option<i64>,
     pub sort: MessageSort,
+    /// Search column for words of `text` without one (see [`crate::search::COLUMNS`]).
+    pub field: Option<String>,
 }
 
 /// Order of a message list. Ties (and messages without a date) fall back to discovery order.
@@ -250,6 +285,8 @@ pub enum MessageSort {
     /// Sender name (or address) A–Z, case- and accent-insensitive.
     Sender,
     Largest,
+    /// Best full-text match first (only with a search; otherwise newest first).
+    Relevance,
 }
 
 impl MessageSort {
@@ -258,13 +295,14 @@ impl MessageSort {
             "oldest" => MessageSort::Oldest,
             "sender" => MessageSort::Sender,
             "largest" => MessageSort::Largest,
+            "relevance" => MessageSort::Relevance,
             _ => MessageSort::Newest,
         }
     }
 
     fn order_by(self) -> &'static str {
         match self {
-            MessageSort::Newest => "g.internaldate IS NULL, g.internaldate DESC, g.id DESC",
+            MessageSort::Newest | MessageSort::Relevance => "g.internaldate IS NULL, g.internaldate DESC, g.id DESC",
             MessageSort::Oldest => "g.internaldate IS NULL, g.internaldate ASC, g.id ASC",
             MessageSort::Sender => {
                 "malo_fold(coalesce(json_extract(g.envelope, '$.from_name'), json_extract(g.envelope, '$.from'), '')) ASC, g.id DESC"
@@ -299,7 +337,7 @@ fn now() -> String {
     Utc::now().to_rfc3339()
 }
 
-fn split_list(s: String) -> Vec<String> {
+pub fn split_list(s: String) -> Vec<String> {
     if s.is_empty() {
         vec![]
     } else {
@@ -335,12 +373,30 @@ impl Index {
         conn.execute_batch(SCHEMA)?;
         // Older indexes: add columns introduced later (ignored when already present).
         let _ = conn.execute_batch("ALTER TABLE messages ADD COLUMN last_attempt_at TEXT");
+        // Gmail category (social, promotions, updates, forums); NULL is Primary or not Gmail.
+        let _ = conn.execute_batch("ALTER TABLE messages ADD COLUMN category TEXT");
+        let _ =
+            conn.execute_batch("ALTER TABLE imap_uids ADD COLUMN moved INTEGER NOT NULL DEFAULT 0");
+        // The content hash whose text is in `search` (see crate::search).
+        let _ = conn.execute_batch("ALTER TABLE messages ADD COLUMN indexed_sha TEXT");
         conn.create_scalar_function(
             "malo_fold",
             1,
             rusqlite::functions::FunctionFlags::SQLITE_UTF8
                 | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
             |ctx| Ok(fold(&ctx.get::<String>(0)?)),
+        )?;
+        conn.create_scalar_function(
+            "malo_contains",
+            2,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| {
+                Ok(crate::search::contains(
+                    &fold(&ctx.get::<String>(0)?),
+                    &ctx.get::<String>(1)?,
+                ))
+            },
         )?;
         Ok(Index {
             conn: Mutex::new(conn),
@@ -612,6 +668,44 @@ impl Index {
         Ok(())
     }
 
+    /// Stores the Gmail categories of a mailbox's messages from UID `from_uid` on: the ones in
+    /// `found`, and Primary (none) for the rest. Returns how many changed.
+    pub fn set_categories(
+        &self,
+        mailbox: i64,
+        from_uid: u32,
+        found: &std::collections::HashMap<u32, &str>,
+    ) -> anyhow::Result<u64> {
+        self.with(|c| {
+            let tx = c.unchecked_transaction()?;
+            let rows: Vec<(u32, i64, Option<String>)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT m.uid, g.id, g.category FROM memberships m JOIN messages g ON g.id=m.message
+                     WHERE m.mailbox=?1 AND m.uid>=?2 AND m.deleted_on_server_at IS NULL",
+                )?;
+                let rows = stmt
+                    .query_map(params![mailbox, from_uid], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                    })?
+                    .collect::<Result<_, _>>()?;
+                rows
+            };
+            let mut changed = 0;
+            {
+                let mut update = tx.prepare("UPDATE messages SET category=?2 WHERE id=?1")?;
+                for (uid, id, current) in rows {
+                    let want = found.get(&uid).copied();
+                    if want != current.as_deref() {
+                        update.execute(params![id, want])?;
+                        changed += 1;
+                    }
+                }
+            }
+            tx.commit()?;
+            Ok(changed)
+        })
+    }
+
     pub fn update_labels_for_message(&self, message: i64, labels: &[String]) -> anyhow::Result<()> {
         self.with(|c| update_labels_on(c, message, labels))
     }
@@ -765,6 +859,7 @@ impl Index {
                 tx.execute("DELETE FROM replicas WHERE message=?1", [id])?;
                 tx.execute("DELETE FROM messages WHERE id=?1", [id])?;
             }
+            tx.execute(IMAP_META_CLEANUP, [])?;
             objects.sort();
             objects.dedup();
             let mut unused = Vec::new();
@@ -906,6 +1001,8 @@ impl Index {
             tx.execute("DELETE FROM replicas WHERE message IN (SELECT id FROM messages WHERE account=?1)", [account])?;
             tx.execute("DELETE FROM messages WHERE account=?1", [account])?;
             tx.execute("DELETE FROM mailboxes WHERE account=?1", [account])?;
+            tx.execute("DELETE FROM imap_mailboxes WHERE account=?1", [account])?;
+            tx.execute(IMAP_META_CLEANUP, [])?;
             tx.commit()
         })
     }
@@ -1252,17 +1349,11 @@ pub fn fold(s: &str) -> String {
         .collect()
 }
 
-/// `%` and `_` in a search are literal characters, not wildcards.
-fn like_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if matches!(c, '%' | '_' | '\\') {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
-}
+/// The text of a message's envelope that searches fall back to before it's indexed.
+const ENVELOPE_TEXT: &str = "coalesce(json_extract(g.envelope, '$.subject'), '') || ' ' ||
+    coalesce(json_extract(g.envelope, '$.from_name'), '') || ' ' ||
+    coalesce(json_extract(g.envelope, '$.from'), '') || ' ' ||
+    coalesce(json_extract(g.envelope, '$.to'), '')";
 
 /// Wait before retrying a message that failed `attempts` times (≥ 5): 30 min, doubling, max 24 h.
 pub fn retry_backoff(attempts: u32) -> chrono::Duration {
@@ -1281,6 +1372,10 @@ pub fn empty_envelope() -> Envelope {
         attachment_count: 0,
     }
 }
+
+/// Drops cached IMAP header data of content no message has any more.
+const IMAP_META_CLEANUP: &str =
+    "DELETE FROM imap_meta WHERE sha256 NOT IN (SELECT sha256 FROM messages WHERE sha256 IS NOT NULL)";
 
 const MAILBOX_SELECT: &str = "SELECT id, account, name, display, path, delimiter, special_use, uidvalidity, highest_uid, highestmodseq, current FROM mailboxes";
 
@@ -1408,11 +1503,9 @@ fn query_messages_on(
                 .join(","),
         )
     };
-    let text = q
-        .text
-        .as_ref()
-        .filter(|t| !t.trim().is_empty())
-        .map(|t| format!("%{}%", like_escape(&fold(t.trim()))));
+    // Indexed messages are searched by their full text, the others by envelope (see crate::search).
+    let search = crate::search::parse(q.text.as_deref().unwrap_or(""), q.field.as_deref());
+    let fts = search.fts.clone();
     // A single message is a rowid lookup: written as `?6 IS NULL OR g.id=?6` SQLite can't use
     // the key and scans the table, which made discovering n messages cost n² row reads.
     let by_id = if id.is_some() {
@@ -1425,23 +1518,38 @@ fn query_messages_on(
           AND (?1 IS NULL OR g.account=?1)
           AND (?2 IS NULL OR EXISTS(SELECT 1 FROM memberships m WHERE m.message=g.id AND m.mailbox=?2))
           AND (?3=0 OR g.reviewed=0)
-          AND (?4 IS NULL OR malo_fold(
-                coalesce(json_extract(g.envelope, '$.subject'), '') || ' ' ||
-                coalesce(json_extract(g.envelope, '$.from_name'), '') || ' ' ||
-                coalesce(json_extract(g.envelope, '$.from'), '') || ' ' ||
-                coalesce(json_extract(g.envelope, '$.to'), '')) LIKE ?4 ESCAPE '\\')
+          AND (?10 IS NULL
+            OR g.id IN (SELECT rowid FROM search WHERE search MATCH ?10)
+            OR (?4 IS NOT NULL AND (g.sha256 IS NULL OR g.indexed_sha IS NOT g.sha256)
+                AND malo_contains({ENVELOPE_TEXT}, ?4)))
+          AND (?11 IS NULL OR malo_contains({ENVELOPE_TEXT}, ?11))
+          AND (?12 IS NULL OR g.internaldate >= ?12)
+          AND (?13 IS NULL OR g.internaldate < ?13)
+          AND (?14 IS NULL OR (coalesce(json_extract(g.envelope, '$.attachment_count'), 0) > 0) = ?14)
+          AND (?15 IS NULL OR coalesce((SELECT COUNT(*)=SUM(m.deleted_on_server_at IS NOT NULL) FROM memberships m WHERE m.message=g.id), 0) = ?15)
+          AND (?16 IS NULL OR g.reviewed = 1 - ?16)
           AND (?5 IS NULL OR instr(',' || ?5 || ',', ',' || g.state || ',') > 0)
           AND (?7 IS NULL OR g.id<=?7)"
     );
     {
+        let limit = if q.limit == 0 { 100 } else { q.limit.min(1000) };
         let p = params![
             q.account,
             q.mailbox,
             q.new_only as i32,
-            text,
+            search.envelope,
             states,
             id,
-            q.max_id
+            q.max_id,
+            limit,
+            q.offset,
+            fts,
+            search.literal,
+            search.after,
+            search.before,
+            search.has_attachment,
+            search.purged,
+            search.unread
         ];
         // The total only matters for paging a list; counting is a full scan.
         let total: i64 = match id {
@@ -1458,46 +1566,48 @@ fn query_messages_on(
                 (SELECT group_concat(mb.display, char(31)) FROM memberships m JOIN mailboxes mb ON mb.id=m.mailbox WHERE m.message=g.id),
                 (SELECT m.gm_labels FROM memberships m WHERE m.message=g.id LIMIT 1),
                 (SELECT m.flags FROM memberships m WHERE m.message=g.id LIMIT 1),
-                (SELECT COUNT(*)=SUM(m.deleted_on_server_at IS NOT NULL) FROM memberships m WHERE m.message=g.id)
+                (SELECT COUNT(*)=SUM(m.deleted_on_server_at IS NOT NULL) FROM memberships m WHERE m.message=g.id),
+                {snippet}
              FROM messages g {filter} ORDER BY {order} LIMIT ?8 OFFSET ?9",
-            order = q.sort.order_by()
+            // Matches are marked with STX/ETX (U+0002, U+0003) for the app to highlight.
+            snippet = if fts.is_some() {
+                "(SELECT snippet(search, -1, char(2), char(3), '…', 12) FROM search WHERE search MATCH ?10 AND rowid=g.id)"
+            } else {
+                "NULL"
+            },
+            order = match (q.sort, &fts) {
+                // bm25 is lower for better matches; subject and sender count most.
+                (MessageSort::Relevance, Some(_)) => {
+                    "(SELECT bm25(search, 10.0, 5.0, 3.0, 4.0, 1.0) FROM search WHERE search MATCH ?10 AND rowid=g.id) IS NULL,
+                     (SELECT bm25(search, 10.0, 5.0, 3.0, 4.0, 1.0) FROM search WHERE search MATCH ?10 AND rowid=g.id),
+                     g.internaldate IS NULL, g.internaldate DESC, g.id DESC"
+                }
+                (sort, _) => sort.order_by(),
+            }
         );
-        let limit = if q.limit == 0 { 100 } else { q.limit.min(1000) };
         let mut stmt = c.prepare(&sql)?;
         let rows = stmt
-            .query_map(
-                params![
-                    q.account,
-                    q.mailbox,
-                    q.new_only as i32,
-                    text,
-                    states,
-                    id,
-                    q.max_id,
-                    limit,
-                    q.offset
-                ],
-                |r| {
-                    Ok(MessageSummary {
-                        id: r.get(0)?,
-                        account_id: r.get(1)?,
-                        envelope: serde_json::from_str(&r.get::<_, String>(2)?)
-                            .unwrap_or_else(|_| empty_envelope()),
-                        size: r.get::<_, i64>(3)? as u64,
-                        internal_date: ts(r.get(4)?),
-                        state: MessageState::parse(&r.get::<_, String>(5)?),
-                        error: r.get(6)?,
-                        reviewed: r.get::<_, i32>(7)? != 0,
-                        first_seen_at: ts(r.get(8)?).unwrap_or_default(),
-                        stored: r.get::<_, i64>(9)? as u32,
-                        destinations,
-                        mailboxes: split_list(r.get::<_, Option<String>>(10)?.unwrap_or_default()),
-                        labels: split_list(r.get::<_, Option<String>>(11)?.unwrap_or_default()),
-                        flags: split_list(r.get::<_, Option<String>>(12)?.unwrap_or_default()),
-                        deleted_on_server: r.get::<_, Option<bool>>(13)?.unwrap_or(false),
-                    })
-                },
-            )?
+            .query_map(p, |r| {
+                Ok(MessageSummary {
+                    id: r.get(0)?,
+                    account_id: r.get(1)?,
+                    envelope: serde_json::from_str(&r.get::<_, String>(2)?)
+                        .unwrap_or_else(|_| empty_envelope()),
+                    size: r.get::<_, i64>(3)? as u64,
+                    internal_date: ts(r.get(4)?),
+                    state: MessageState::parse(&r.get::<_, String>(5)?),
+                    error: r.get(6)?,
+                    reviewed: r.get::<_, i32>(7)? != 0,
+                    first_seen_at: ts(r.get(8)?).unwrap_or_default(),
+                    stored: r.get::<_, i64>(9)? as u32,
+                    destinations,
+                    mailboxes: split_list(r.get::<_, Option<String>>(10)?.unwrap_or_default()),
+                    labels: split_list(r.get::<_, Option<String>>(11)?.unwrap_or_default()),
+                    flags: split_list(r.get::<_, Option<String>>(12)?.unwrap_or_default()),
+                    deleted_on_server: r.get::<_, Option<bool>>(13)?.unwrap_or(false),
+                    snippet: r.get(14)?,
+                })
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok((total as u64, rows))
     }

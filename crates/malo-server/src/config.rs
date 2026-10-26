@@ -33,6 +33,12 @@ pub struct ServerConfig {
     /// (set by the reverse proxy) for rate limits. Only behind a proxy that sets these headers:
     /// otherwise clients could pick their own address.
     pub trust_proxy_headers: bool,
+    /// `MALO_IMAP_LISTEN`: address of the IMAP service (implicit TLS) that serves the backed-up
+    /// mail to mail apps. Off when unset.
+    pub imap_listen: Option<SocketAddr>,
+    /// `MALO_SMTP_LISTEN`: address of the SMTP submission service (implicit TLS) that sends mail
+    /// through each account's own SMTP server. Off when unset.
+    pub smtp_listen: Option<SocketAddr>,
 }
 
 impl Default for ServerConfig {
@@ -50,6 +56,8 @@ impl Default for ServerConfig {
             session_idle_minutes: 12 * 60,
             auto_lock_seconds: None,
             trust_proxy_headers: false,
+            imap_listen: None,
+            smtp_listen: None,
         }
     }
 }
@@ -94,6 +102,13 @@ impl ServerConfig {
         }
         if let Some(v) = env("MALO_TRUST_PROXY_HEADERS") {
             cfg.trust_proxy_headers = matches!(v.as_str(), "1" | "true" | "on" | "yes");
+        }
+        let off = |v: &str| matches!(v, "off" | "0" | "false" | "no");
+        if let Some(v) = env("MALO_IMAP_LISTEN") {
+            cfg.imap_listen = if off(&v) { None } else { Some(v.parse()?) };
+        }
+        if let Some(v) = env("MALO_SMTP_LISTEN") {
+            cfg.smtp_listen = if off(&v) { None } else { Some(v.parse()?) };
         }
         if let Some(v) = env("MALO_SIDECAR_SECRET") {
             cfg.sidecar_secret = Some(v);

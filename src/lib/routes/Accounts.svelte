@@ -7,6 +7,7 @@
   import { commands } from '../commands.svelte';
   import { contextMenu } from '../menu.svelte';
   import { accountMenu, removeAccount } from '../actions';
+  import MailAccess from '../components/MailAccess.svelte';
 
   let presets: T.AccountPreset[] = $state([]);
   onMount(async () => {
@@ -15,6 +16,7 @@
 
   // Wizard: preset → auth → test → policy hint
   const editingId = $derived(route.path.startsWith('/accounts/edit/') ? route.path.split('/')[3] : null);
+  const mailFor = $derived(route.path.startsWith('/accounts/mail/') ? live.accounts.find((a) => a.id === route.path.split('/')[3]) ?? null : null);
   const wizard = $derived(route.path === '/accounts/new' || !!editingId);
   let step = $state(1);
   let preset: T.AccountPreset | null = $state(null);
@@ -22,6 +24,9 @@
   let form: T.AccountInput = $state(blank());
   let oauth = $state({ provider: 'custom' as T.OAuthProvider, auth_url: '', token_url: '', client_id: '', client_secret: '', scopes: '', refresh_token: '' });
   let password = $state('');
+  // Outgoing server for mail sent from mail apps through Malo (same sign-in as IMAP).
+  let sending = $state(false);
+  let smtp: T.SmtpSettings = $state({ host: '', port: 465, tls: 'implicit' });
   let test: T.ConnectionTest | null = $state(null);
   let busy = $state(false);
   let error = $state('');
@@ -42,6 +47,7 @@
   function movedFrom(a: T.AccountView): boolean {
     if (form.host.trim() !== a.host || form.port !== a.port || form.username.trim() !== a.username || form.tls !== a.tls) return true;
     if (form.accept_invalid_certs && !a.accept_invalid_certs) return true;
+    if (sending && (!a.smtp || smtp.host.trim() !== a.smtp.host || smtp.port !== a.smtp.port || smtp.tls !== a.smtp.tls)) return true;
     const o = a.auth;
     return o.kind === 'oauth2' && authKind === 'oauth2'
       && (oauth.provider !== o.provider || oauth.auth_url !== o.auth_url || oauth.token_url !== o.token_url || oauth.client_id !== o.client_id);
@@ -63,6 +69,8 @@
       if (a) {
         loadedFor = editingId;
         form = { revision: a.revision, name: a.name, host: a.host, port: a.port, tls: a.tls, accept_invalid_certs: a.accept_invalid_certs, username: a.username, auth: a.auth, backup_interval_minutes: a.backup_interval_minutes, idle: a.idle, enabled: a.enabled };
+        sending = !!a.smtp;
+        smtp = a.smtp ? { ...a.smtp } : { host: '', port: 465, tls: 'implicit' };
         authKind = a.auth.kind;
         if (a.auth.kind === 'password') password = a.auth.password;
         else oauth = { provider: a.auth.provider, auth_url: a.auth.auth_url, token_url: a.auth.token_url, client_id: a.auth.client_id, client_secret: a.auth.client_secret ?? '', scopes: a.auth.scopes.join(' '), refresh_token: a.auth.refresh_token };
@@ -80,6 +88,8 @@
       oauth = { ...oauth, provider: p.oauth.provider, auth_url: p.oauth.auth_url, token_url: p.oauth.token_url, scopes: p.oauth.scopes.join(' ') };
     }
     authKind = p.id === 'outlook' ? 'oauth2' : 'password';
+    sending = !!p.smtp;
+    smtp = p.smtp ? { ...p.smtp } : { host: '', port: 465, tls: 'implicit' };
     step = 2;
   }
 
@@ -87,7 +97,7 @@
     const auth: T.AccountAuth = authKind === 'password'
       ? { kind: 'password', password }
       : { kind: 'oauth2', provider: oauth.provider, auth_url: oauth.auth_url, token_url: oauth.token_url, client_id: oauth.client_id, client_secret: oauth.client_secret || null, scopes: oauth.scopes.split(/\s+/).filter(Boolean), refresh_token: oauth.refresh_token };
-    return { ...form, auth };
+    return { ...form, auth, smtp: sending && smtp.host.trim() ? { ...smtp, host: smtp.host.trim() } : undefined };
   }
 
   async function signIn() {
@@ -145,6 +155,8 @@
     preset = null;
     form = blank();
     password = '';
+    sending = false;
+    smtp = { host: '', port: 465, tls: 'implicit' };
     test = null;
     loadedFor = loadedKey = testedKey = null;
     go('/accounts');
@@ -161,8 +173,13 @@
     : [
         { id: 'account-new', group: 'Accounts', label: 'Add account', keys: 'n', run: () => go('/accounts/new') },
         ...live.accounts.map((a) => ({ id: `edit-${a.id}`, group: 'Accounts', label: `Edit ${a.name}`, run: () => go(`/accounts/edit/${a.id}`) })),
+        ...live.accounts.map((a) => ({ id: `mail-${a.id}`, group: 'Accounts', label: `Mail app access for ${a.name}`, run: () => go(`/accounts/mail/${a.id}`) })),
       ]);
 </script>
+
+{#if mailFor}
+  <MailAccess account={mailFor} onclose={() => go('/accounts')} />
+{/if}
 
 {#if !wizard}
   <div class="row"><h1 class="grow">Accounts</h1><button class="primary" onclick={() => go('/accounts/new')}>Add account</button></div>
@@ -181,6 +198,7 @@
             <td class="small">{Number(a.message_count).toLocaleString()} · {bytes(a.stored_bytes)}</td>
             <td class="right">
               <button onclick={() => go(`/accounts/edit/${a.id}`)}>{a.imported ? 'Set up sign-in' : 'Edit'}</button>
+              <button onclick={() => go(`/accounts/mail/${a.id}`)} title="Read and send this account's mail in Apple Mail or another IMAP app">Mail app</button>
               <button onclick={() => removeAccount(a)}>Remove</button>
             </td>
           </tr>
@@ -220,6 +238,19 @@
       <label class="check"><input type="checkbox" bind:checked={form.idle} /> Watch INBOX with IMAP IDLE for near-real-time backups</label>
       <label class="check"><input type="checkbox" bind:checked={form.enabled} /> Scheduled backups enabled</label>
       <label class="check"><input type="checkbox" bind:checked={form.accept_invalid_certs} /> Accept invalid server certificates <span class="muted">(test servers only — unsafe)</span></label>
+
+      <h3>Outgoing mail</h3>
+      <label class="check"><input type="checkbox" bind:checked={sending} /> Send mail from mail apps through this account's SMTP server <span class="muted">(signs in like IMAP)</span></label>
+      {#if sending}
+        <div class="cards">
+          <label>SMTP host <input bind:value={smtp.host} placeholder="smtp.example.com" /></label>
+          <label>Port <input type="number" bind:value={smtp.port} /></label>
+          <label>Security
+            <select bind:value={smtp.tls} onchange={() => (smtp.port = smtp.tls === 'implicit' ? 465 : 587)}><option value="implicit">TLS (port 465)</option><option value="starttls">STARTTLS (port 587)</option></select>
+          </label>
+        </div>
+        {#if authKind === 'oauth2' && oauth.provider === 'microsoft'}<p class="muted small">Microsoft needs the <code>https://outlook.office.com/SMTP.Send</code> scope as well: add it to the scopes and sign in again.</p>{/if}
+      {/if}
 
       <h3>Authentication</h3>
       <div class="row">

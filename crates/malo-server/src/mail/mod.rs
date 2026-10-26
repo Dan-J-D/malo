@@ -1,0 +1,340 @@
+//! IMAP and SMTP services for mail apps (Apple Mail, Thunderbird…): read an account's backed-up
+//! mail, including mail already purged from its server, and send through the account's own SMTP
+//! server.
+//!
+//! Each account gets its own login with a server-generated password, so the Malo password (which
+//! unlocks every key) never goes into a mail app. Mail is readable only while its owner is
+//! unlocked: the keys stay in RAM only for as long as the auto-lock allows, and a mail login
+//! doesn't change that.
+
+pub mod imap;
+pub mod mime;
+pub mod smtp;
+
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
+
+use rand::Rng;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt};
+use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
+use tokio_rustls::TlsAcceptor;
+use tokio_util::sync::CancellationToken;
+
+use crate::keyring::UnlockedUser;
+use crate::state::{AppState, SharedState};
+
+/// What the API tells the app about the mail services.
+#[derive(Debug, Clone, Default)]
+pub struct MailInfo {
+    pub imap_port: Option<u16>,
+    pub smtp_port: Option<u16>,
+    pub fingerprint: Option<String>,
+}
+
+/// Simultaneous IMAP and SMTP connections across all users.
+const MAX_CONNECTIONS: usize = 512;
+pub const DEFAULT_PASSWORD_LENGTH: u32 = 24;
+
+/// A random password of letters and digits (≈5.95 bits per character).
+pub fn generate_password(len: u32) -> String {
+    let mut rng = rand::rngs::OsRng;
+    (0..len.clamp(16, 128))
+        .map(|_| rng.sample(rand::distributions::Alphanumeric) as char)
+        .collect()
+}
+
+/// Mail login names: lower-case letters, digits and `. _ - + @`, 3–64 characters.
+pub fn normalize_username(name: &str) -> Result<String, String> {
+    let n = name.trim().to_lowercase();
+    if !(3..=64).contains(&n.len()) {
+        return Err("the username must be 3–64 characters long".into());
+    }
+    if !n.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+        return Err("the username must start with a letter or digit".into());
+    }
+    if !n
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '@'))
+    {
+        return Err("the username may only contain letters, digits and . _ - + @".into());
+    }
+    Ok(n)
+}
+
+pub fn hash_password(password: &str) -> String {
+    // Generated passwords carry ~143 bits of entropy: a fast hash is enough.
+    malo_core::crypto::sha256_hex(format!("malo-mail-login:{password}").as_bytes())
+}
+
+fn same(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
+}
+
+/// A signed-in mail session.
+#[derive(Clone)]
+pub struct MailUser {
+    pub user_id: String,
+    pub account_id: String,
+    pub username: String,
+    password_hash: String,
+    /// Cancelled when the user is locked.
+    pub sealed: CancellationToken,
+}
+
+#[derive(Debug)]
+pub enum LoginError {
+    Invalid,
+    /// Right password, but the user's keys are locked.
+    Locked,
+    Throttled(String),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Gone {
+    Locked,
+    Revoked,
+}
+
+impl Gone {
+    pub fn message(&self) -> &'static str {
+        match self {
+            Gone::Locked => "Malo is locked: log in to the Malo app to unlock your mail",
+            Gone::Revoked => "this mail login was changed or removed in Malo",
+        }
+    }
+}
+
+impl MailUser {
+    /// The unlocked user while this login is valid. Callers use it for one step and drop it, so
+    /// a session never keeps keys in memory after a lock.
+    pub fn unlocked(&self, state: &AppState) -> Result<Arc<UnlockedUser>, Gone> {
+        let row = state.db.mail_login(&self.username).ok().flatten();
+        let valid = row.is_some_and(|r| {
+            r.user_id == self.user_id
+                && r.account_id == self.account_id
+                && same(&r.password_hash, &self.password_hash)
+        });
+        if !valid {
+            return Err(Gone::Revoked);
+        }
+        if self.sealed.is_cancelled() {
+            return Err(Gone::Locked);
+        }
+        let user = state.keyring.get(&self.user_id).ok_or(Gone::Locked)?;
+        if user.config().account(&self.account_id).is_none() {
+            return Err(Gone::Revoked);
+        }
+        Ok(user)
+    }
+}
+
+/// Checks a mail login. Failures share the backoff of the app login, under their own names.
+pub async fn authenticate(
+    state: &SharedState,
+    username: &str,
+    password: &str,
+    ip: IpAddr,
+) -> Result<MailUser, LoginError> {
+    let key = format!("mail:{}", username.to_lowercase());
+    if let Err(e) = crate::auth::check_failures(state, &key, ip) {
+        return Err(LoginError::Throttled(e.message));
+    }
+    let hash = hash_password(password);
+    let row = state.db.mail_login(username).ok().flatten();
+    let user_row = row
+        .as_ref()
+        .and_then(|r| state.db.user(&r.user_id).ok().flatten());
+    let ok = match (&row, &user_row) {
+        (Some(r), Some(u)) => same(&r.password_hash, &hash) && !u.disabled,
+        _ => false,
+    };
+    if !ok {
+        crate::auth::record_failure(state, &key, ip);
+        // Slow down guessing a little on every miss, before the backoff starts.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        return Err(LoginError::Invalid);
+    }
+    crate::auth::clear_failures(state, &key, ip);
+    let row = row.unwrap();
+    let Some(user) = state.keyring.get(&row.user_id) else {
+        return Err(LoginError::Locked);
+    };
+    if user.config().account(&row.account_id).is_none() {
+        return Err(LoginError::Invalid);
+    }
+    let _ = state.db.touch_mail_login(&row.username);
+    Ok(MailUser {
+        user_id: row.user_id,
+        account_id: row.account_id,
+        username: row.username,
+        password_hash: row.password_hash,
+        sealed: user.cancel.clone(),
+    })
+}
+
+/// Reads one line (up to and including LF) of at most `max` bytes. None at end of stream.
+pub async fn read_line<R: AsyncBufRead + Unpin>(
+    r: &mut R,
+    max: usize,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let mut line = Vec::new();
+    loop {
+        let buf = r.fill_buf().await?;
+        if buf.is_empty() {
+            return Ok((!line.is_empty()).then_some(line));
+        }
+        let (chunk, done) = match buf.iter().position(|b| *b == b'\n') {
+            Some(i) => (&buf[..=i], true),
+            None => (buf, false),
+        };
+        if line.len() + chunk.len() > max {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "line too long",
+            ));
+        }
+        line.extend_from_slice(chunk);
+        let n = chunk.len();
+        r.consume(n);
+        if done {
+            return Ok(Some(line));
+        }
+    }
+}
+
+pub struct Listeners {
+    imap: Option<std::net::TcpListener>,
+    smtp: Option<std::net::TcpListener>,
+}
+
+impl Listeners {
+    /// Binds the configured mail ports (before the server state exists, so it can report them).
+    pub fn bind(cfg: &crate::config::ServerConfig) -> anyhow::Result<Listeners> {
+        let bind = |a: Option<SocketAddr>| -> anyhow::Result<Option<std::net::TcpListener>> {
+            a.map(|a| {
+                let l = std::net::TcpListener::bind(a)
+                    .map_err(|e| anyhow::anyhow!("cannot listen on {a}: {e}"))?;
+                l.set_nonblocking(true)?;
+                Ok(l)
+            })
+            .transpose()
+        };
+        Ok(Listeners {
+            imap: bind(cfg.imap_listen)?,
+            smtp: bind(cfg.smtp_listen)?,
+        })
+    }
+
+    pub fn any(&self) -> bool {
+        self.imap.is_some() || self.smtp.is_some()
+    }
+
+    pub fn addrs(&self) -> (Option<SocketAddr>, Option<SocketAddr>) {
+        let a = |l: &Option<std::net::TcpListener>| l.as_ref().and_then(|l| l.local_addr().ok());
+        (a(&self.imap), a(&self.smtp))
+    }
+
+    /// Starts accepting connections (implicit TLS) until shutdown.
+    pub fn spawn(self, state: SharedState, tls: Arc<rustls::ServerConfig>) -> anyhow::Result<()> {
+        let mut config = (*tls).clone();
+        config.alpn_protocols = vec![];
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+        if let Some(l) = self.imap {
+            serve(
+                TcpListener::from_std(l)?,
+                state.clone(),
+                acceptor.clone(),
+                slots.clone(),
+                Service::Imap,
+            );
+        }
+        if let Some(l) = self.smtp {
+            serve(
+                TcpListener::from_std(l)?,
+                state,
+                acceptor,
+                slots,
+                Service::Smtp,
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Service {
+    Imap,
+    Smtp,
+}
+
+fn serve(
+    listener: TcpListener,
+    state: SharedState,
+    acceptor: TlsAcceptor,
+    slots: Arc<Semaphore>,
+    service: Service,
+) {
+    tokio::spawn(async move {
+        loop {
+            let accepted = tokio::select! {
+                a = listener.accept() => a,
+                _ = state.shutdown.cancelled() => return,
+            };
+            let (tcp, peer) = match accepted {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::debug!("mail accept: {e}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
+            let Ok(permit) = slots.clone().try_acquire_owned() else {
+                drop(tcp);
+                continue;
+            };
+            let (state, acceptor) = (state.clone(), acceptor.clone());
+            tokio::spawn(async move {
+                let _permit = permit;
+                tcp.set_nodelay(true).ok();
+                let stream =
+                    match tokio::time::timeout(Duration::from_secs(30), acceptor.accept(tcp)).await
+                    {
+                        Ok(Ok(s)) => s,
+                        _ => return,
+                    };
+                let res = match service {
+                    Service::Imap => imap::session(state, stream, peer.ip()).await,
+                    Service::Smtp => smtp::session(state, stream, peer.ip()).await,
+                };
+                if let Err(e) = res {
+                    tracing::debug!("mail session from {peer}: {e:#}");
+                }
+            });
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn passwords_and_usernames() {
+        let p = generate_password(24);
+        assert_eq!(p.len(), 24);
+        assert!(p.chars().all(|c| c.is_ascii_alphanumeric()));
+        assert_ne!(p, generate_password(24));
+        assert_eq!(generate_password(4).len(), 16);
+        assert_eq!(normalize_username(" Test-Email ").unwrap(), "test-email");
+        for bad in ["ab", "-x1", "a b c", "ünï", &"x".repeat(65)] {
+            assert!(normalize_username(bad).is_err(), "{bad}");
+        }
+    }
+}

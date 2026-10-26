@@ -44,6 +44,7 @@ export function accountMenu(a: T.AccountView): Entry[] {
     { label: 'Deep verify', icon: 'shield', run: () => verifyAccount(a, true) },
     '-',
     { label: a.imported ? 'Set up sign-in…' : 'Edit account…', icon: 'pencil', run: () => go(`/accounts/edit/${a.id}`) },
+    { label: 'Mail app access…', icon: 'mail', run: () => go(`/accounts/mail/${a.id}`) },
     !a.imported && { label: 'Purge settings', icon: 'trash', run: () => go(`/purge?account=${a.id}`) },
     { label: 'Copy address', icon: 'copy', run: () => copy(a.username, 'Address copied') },
     '-',

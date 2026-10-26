@@ -240,7 +240,7 @@ fn failure_keys(name: &str, ip: IpAddr) -> [(String, Backoff); 2] {
     ]
 }
 
-fn check_failures(state: &AppState, name: &str, ip: IpAddr) -> ApiResult<()> {
+pub(crate) fn check_failures(state: &AppState, name: &str, ip: IpAddr) -> ApiResult<()> {
     let map = state.login_failures.lock().unwrap();
     for (key, delay) in failure_keys(name, ip) {
         if let Some((n, at)) = map.get(&key) {
@@ -259,7 +259,7 @@ fn check_failures(state: &AppState, name: &str, ip: IpAddr) -> ApiResult<()> {
 /// Most entries are for names that don't exist; old ones are dropped so the map stays small.
 const FAILURES_KEPT: usize = 10_000;
 
-fn record_failure(state: &AppState, name: &str, ip: IpAddr) {
+pub(crate) fn record_failure(state: &AppState, name: &str, ip: IpAddr) {
     let mut map = state.login_failures.lock().unwrap();
     if map.len() >= FAILURES_KEPT {
         map.retain(|_, (_, at)| at.elapsed() < Duration::from_secs(3600));
@@ -274,7 +274,7 @@ fn record_failure(state: &AppState, name: &str, ip: IpAddr) {
     }
 }
 
-fn clear_failures(state: &AppState, name: &str, ip: IpAddr) {
+pub(crate) fn clear_failures(state: &AppState, name: &str, ip: IpAddr) {
     let mut map = state.login_failures.lock().unwrap();
     for (key, _) in failure_keys(name, ip) {
         map.remove(&key);

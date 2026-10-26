@@ -3,6 +3,7 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
+use malo_api::SmtpSettings;
 use malo_core::config::{Account, Destination};
 
 use crate::error::{ApiErr, ApiResult};
@@ -66,7 +67,19 @@ pub async fn check_account(state: &AppState, a: &Account) -> ApiResult<()> {
     if !blocking(state) {
         return Ok(());
     }
-    check_host(&a.host, a.port).await
+    check_host(&a.host, a.port).await?;
+    match &a.smtp {
+        Some(s) => check_host(&s.host, s.port).await,
+        None => Ok(()),
+    }
+}
+
+/// The outgoing server of an account, checked again before each message is relayed.
+pub async fn check_smtp(state: &AppState, s: &SmtpSettings) -> ApiResult<()> {
+    if !blocking(state) {
+        return Ok(());
+    }
+    check_host(&s.host, s.port).await
 }
 
 /// Endpoint-like options of a destination (`endpoint`, `*_endpoint`, URLs).

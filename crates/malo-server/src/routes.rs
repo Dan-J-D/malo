@@ -234,6 +234,7 @@ pub async fn update_account(
         let mut probe = prev.clone();
         probe.host = input.host.trim().to_string();
         probe.port = input.port;
+        probe.smtp = input.smtp.clone();
         crate::net::check_account(&state, &probe).await?;
     }
     let updated = u
@@ -289,6 +290,10 @@ pub async fn delete_account(
         })
         .await?;
     best_effort(u.user.index.delete_account(&id), "index cleanup");
+    best_effort(
+        state.db.delete_mail_login(&u.user.user_id, &id),
+        "mail login removal",
+    );
     // A settings copy written before the removal must not bring the account back in a rebuild.
     best_effort(
         u.user.index.kv_set(&format!("removed:{id}"), "1"),
@@ -741,7 +746,7 @@ pub async fn create_job(
             }
             CheckScope::All => {}
         },
-        JobKind::RebuildIndexAll => {}
+        JobKind::RebuildIndexAll | JobKind::SearchIndex => {}
         JobKind::DeleteMessages {
             account_id,
             message_ids,
@@ -839,8 +844,32 @@ pub struct MessagesQuery {
     pub limit: Option<u32>,
     pub offset: Option<u32>,
     pub max_id: Option<i64>,
-    /// newest (default), oldest, sender, largest
+    /// newest (default), oldest, sender, largest, relevance (with `q`)
     pub sort: Option<String>,
+    /// Search column for words of `q` without one: subject, sender, recipients, body, attachments.
+    pub field: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SuggestQuery {
+    /// from, to or file
+    pub field: String,
+    #[serde(default)]
+    pub prefix: String,
+    pub account: Option<String>,
+}
+
+/// Values for a search operator, as the user types it.
+pub async fn search_suggest(
+    u: Unlocked,
+    Query(q): Query<SuggestQuery>,
+) -> ApiResult<Json<Vec<malo_api::SearchSuggestion>>> {
+    Ok(Json(u.user.index.search_suggest(
+        &q.field,
+        &q.prefix,
+        q.account.as_deref(),
+        8,
+    )?))
 }
 
 pub async fn list_mailboxes(
@@ -872,6 +901,10 @@ pub async fn list_messages(
         .map(|s| s.split(',').map(MessageState::parse).collect())
         .unwrap_or_default();
     let dests = u.user.config().destinations.len() as u32;
+    let unindexed = match q.q.as_deref().map(str::trim) {
+        Some(t) if !t.is_empty() => u.user.index.search_pending_count(q.account.as_deref())?,
+        _ => 0,
+    };
     let (total, messages) = u.user.index.list_messages(
         &MessageQuery {
             account: q.account,
@@ -887,10 +920,15 @@ pub async fn list_messages(
                 .as_deref()
                 .map(MessageSort::parse)
                 .unwrap_or_default(),
+            field: q.field,
         },
         dests,
     )?;
-    Ok(Json(MessageList { total, messages }))
+    Ok(Json(MessageList {
+        total,
+        messages,
+        unindexed,
+    }))
 }
 
 pub async fn mark_reviewed(u: Unlocked, Json(req): Json<ReviewedRequest>) -> ApiResult<Json<u64>> {
@@ -917,7 +955,11 @@ pub async fn get_message(u: Unlocked, Path(id): Path<i64>) -> ApiResult<Json<Mes
 const VIEWER_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Loads the raw message: encrypted spool and viewer cache first, then any verified replica (hash-checked).
-async fn load_raw(state: &SharedState, user: &Arc<UnlockedUser>, id: i64) -> ApiResult<Vec<u8>> {
+pub(crate) async fn load_raw(
+    state: &SharedState,
+    user: &Arc<UnlockedUser>,
+    id: i64,
+) -> ApiResult<Vec<u8>> {
     let msg = user
         .index
         .message(id)?
@@ -1064,6 +1106,161 @@ pub async fn attachment(
         viewer::attachment(&raw, n).map_err(|e| ApiErr::not_found(e.to_string()))?;
     // Always an opaque download: never rendered inline.
     Ok(download(bytes, &name, "application/octet-stream"))
+}
+
+// ───────────────────────────── mail access (IMAP / SMTP) ─────────────────────────────
+
+pub async fn mail_access(
+    State(state): State<SharedState>,
+    u: Unlocked,
+) -> ApiResult<Json<MailAccessInfo>> {
+    let cfg = u.user.config();
+    let logins = state
+        .db
+        .mail_logins(&u.user.user_id)?
+        .into_iter()
+        .filter(|l| cfg.account(&l.account_id).is_some())
+        .map(|l| l.view())
+        .collect();
+    Ok(Json(MailAccessInfo {
+        imap_port: state.mail.imap_port,
+        smtp_port: state.mail.smtp_port,
+        fingerprint: state.mail.fingerprint.clone(),
+        logins,
+    }))
+}
+
+/// Creates or replaces the mail login of an account. The password is generated here and shown
+/// once; only its hash is kept.
+pub async fn put_mail_login(
+    State(state): State<SharedState>,
+    u: Unlocked,
+    Path(id): Path<String>,
+    Json(req): Json<MailLoginRequest>,
+) -> ApiResult<Json<MailLoginCreated>> {
+    if u.user.config().account(&id).is_none() {
+        return Err(ApiErr::not_found("account"));
+    }
+    let username = crate::mail::normalize_username(&req.username).map_err(ApiErr::bad_request)?;
+    let password = crate::mail::generate_password(
+        req.password_length
+            .unwrap_or(crate::mail::DEFAULT_PASSWORD_LENGTH),
+    );
+    let hash = crate::mail::hash_password(&password);
+    if !state
+        .db
+        .set_mail_login(&u.user.user_id, &id, &username, &hash)?
+    {
+        return Err(ApiErr::conflict(format!(
+            "the username '{username}' is already taken"
+        )));
+    }
+    best_effort(
+        u.user.index.audit(
+            "mail_login_set",
+            Some(&id),
+            &serde_json::json!({ "username": username }),
+        ),
+        "audit",
+    );
+    let login = state
+        .db
+        .mail_login(&username)?
+        .ok_or_else(|| anyhow::anyhow!("mail login vanished"))?;
+    Ok(Json(MailLoginCreated {
+        login: login.view(),
+        password,
+    }))
+}
+
+pub async fn delete_mail_login(
+    State(state): State<SharedState>,
+    u: Unlocked,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    if !state.db.delete_mail_login(&u.user.user_id, &id)? {
+        return Err(ApiErr::not_found("mail login"));
+    }
+    best_effort(
+        u.user
+            .index
+            .audit("mail_login_removed", Some(&id), &serde_json::json!({})),
+        "audit",
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn mail_view_info(user: &UnlockedUser, account: &str) -> anyhow::Result<MailViewInfo> {
+    use malo_core::mailview::FolderSource;
+    let settings = user.index.imap_settings(account)?;
+    let folders = user.index.imap_all_folders(account, &settings)?;
+    let gmail = folders
+        .iter()
+        .any(|f| f.special_use.as_deref() == Some("\\All") && f.source == FolderSource::Mailbox);
+    let mut out = Vec::new();
+    for f in folders {
+        let inbox = f.name.eq_ignore_ascii_case("INBOX");
+        out.push(MailFolderInfo {
+            display_name: malo_core::layout::decode_utf7(&f.name),
+            messages: user.index.imap_view(account, &f)?.messages.len() as u64,
+            special_use: f.special_use.clone(),
+            kind: match f.source {
+                FolderSource::Mailbox => MailFolderKind::Mailbox,
+                FolderSource::Label(_) => MailFolderKind::Label,
+                FolderSource::Primary => MailFolderKind::Primary,
+                FolderSource::Category(_) => MailFolderKind::Category,
+            },
+            shown: inbox || !settings.hidden.contains(&f.name),
+            name: f.name,
+        });
+    }
+    Ok(MailViewInfo {
+        gmail,
+        split_categories: settings.split_categories,
+        folders: out,
+    })
+}
+
+pub async fn get_mail_view(u: Unlocked, Path(id): Path<String>) -> ApiResult<Json<MailViewInfo>> {
+    if u.user.config().account(&id).is_none() {
+        return Err(ApiErr::not_found("account"));
+    }
+    Ok(Json(mail_view_info(&u.user, &id)?))
+}
+
+/// Chooses the folders mail apps see; they pick up the change at their next sync.
+pub async fn put_mail_view(
+    u: Unlocked,
+    Path(id): Path<String>,
+    Json(req): Json<MailViewSettings>,
+) -> ApiResult<Json<MailViewInfo>> {
+    if u.user.config().account(&id).is_none() {
+        return Err(ApiErr::not_found("account"));
+    }
+    let mut hidden: Vec<String> = req
+        .hidden
+        .into_iter()
+        .filter(|n| !n.eq_ignore_ascii_case("INBOX"))
+        .collect();
+    hidden.sort();
+    hidden.dedup();
+    u.user.index.set_imap_settings(
+        &id,
+        &malo_core::mailview::ViewSettings {
+            split_categories: req.split_categories,
+            hidden,
+        },
+    )?;
+    Ok(Json(mail_view_info(&u.user, &id)?))
+}
+
+/// Shows every backed-up message to mail apps again (undoes their deletions and flag changes).
+pub async fn reset_mail_view(u: Unlocked, Path(id): Path<String>) -> ApiResult<StatusCode> {
+    if u.user.config().account(&id).is_none() {
+        return Err(ApiErr::not_found("account"));
+    }
+    u.user.index.imap_reset(&id)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ───────────────────────────── integrity / audit ─────────────────────────────

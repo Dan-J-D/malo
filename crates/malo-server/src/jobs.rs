@@ -337,6 +337,7 @@ async fn run_job(
         Ok(value) => {
             job.result = Some(value);
             finish(&mut job, JobState::Done, None);
+            index_for_search_after(state, &user, &job.kind);
         }
         Err(e) if is_cancelled(&e) || cancel.is_cancelled() => {
             let reason = if user.cancel.is_cancelled() {
@@ -408,6 +409,7 @@ async fn execute(
         JobKind::Purge { account_id } => {
             serde_json::to_value(purge::run_purge(ctx, account_id).await?)?
         }
+        JobKind::SearchIndex => serde_json::to_value(malo_core::search::run_index(ctx).await?)?,
         JobKind::DeleteMessages {
             account_id,
             message_ids,
@@ -457,6 +459,7 @@ async fn execute(
                                 backup_interval_minutes: 60,
                                 idle: false,
                                 enabled: false,
+                                smtp: None,
                                 imported: true,
                                 policy: Default::default(),
                             });
@@ -473,6 +476,36 @@ async fn execute(
             v
         }
     })
+}
+
+/// Queues the search-index job when a job left mail that isn't indexed for full-text search: mail
+/// backed up before search existed, mail a backup only found already stored, or a rebuilt index.
+fn index_for_search_after(state: &SharedState, user: &UnlockedUser, kind: &JobKind) {
+    if !matches!(
+        kind,
+        JobKind::Backup { .. } | JobKind::RebuildIndex { .. } | JobKind::RebuildIndexAll
+    ) {
+        return;
+    }
+    // Messages the last run couldn't read (no destination reachable) don't queue it again by
+    // themselves; new ones do, and that run retries them too.
+    let unavailable = user
+        .index
+        .kv_get(malo_core::search::UNAVAILABLE_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0u64);
+    if user.index.search_pending_count(None).unwrap_or(0) > unavailable {
+        if let Err(e) = submit(
+            state,
+            &user.user_id,
+            JobKind::SearchIndex,
+            JobTrigger::Scheduled,
+        ) {
+            tracing::warn!("queueing the search index: {e:#}");
+        }
+    }
 }
 
 /// Keeps the encrypted settings copy on every destination current (best effort, after backups

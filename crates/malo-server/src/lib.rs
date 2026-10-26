@@ -7,6 +7,7 @@ pub mod error;
 pub mod jobs;
 pub mod keyring;
 pub mod kit;
+pub mod mail;
 pub mod net;
 pub mod routes;
 pub mod scheduler;
@@ -117,6 +118,16 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/accounts/{id}/test", post(test_saved_account))
         .route("/accounts/{id}/policy", put(put_policy))
+        .route("/mail-access", get(mail_access))
+        .route(
+            "/accounts/{id}/mail-login",
+            put(put_mail_login).delete(delete_mail_login),
+        )
+        .route("/accounts/{id}/mail-view/reset", post(reset_mail_view))
+        .route(
+            "/accounts/{id}/mail-view",
+            get(get_mail_view).put(put_mail_view),
+        )
         .route("/accounts/{id}/policy/arm", post(arm_policy))
         .route("/accounts/{id}/policy/disarm", post(disarm_policy))
         .route(
@@ -134,6 +145,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/schedules", get(list_schedules))
         .route("/mailboxes", get(list_mailboxes))
         .route("/messages", get(list_messages))
+        .route("/search/suggest", get(search_suggest))
         .route("/messages/reviewed", post(mark_reviewed))
         .route("/messages/{id}", get(get_message))
         .route("/messages/{id}/view", get(view_message))
@@ -169,6 +181,9 @@ pub fn router(state: SharedState) -> Router {
 
 pub struct Running {
     pub addr: SocketAddr,
+    /// Addresses of the IMAP and SMTP services, when configured.
+    pub imap_addr: Option<SocketAddr>,
+    pub smtp_addr: Option<SocketAddr>,
     pub fingerprint: Option<String>,
     pub setup_token: Option<String>,
     pub state: SharedState,
@@ -222,6 +237,17 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<Running> {
     } else {
         None
     };
+    let mail_listeners = mail::Listeners::bind(&cfg)?;
+    let (imap_addr, smtp_addr) = mail_listeners.addrs();
+    // Mail apps always get TLS, also when the API sits behind a TLS-terminating proxy.
+    let mail_tls = match (&tls, mail_listeners.any()) {
+        (_, false) => None,
+        (Some(t), true) => Some((t.config.clone(), t.fingerprint.clone())),
+        (None, true) => {
+            let t = tlsgen::load_or_create(&cfg)?;
+            Some((t.config, t.fingerprint))
+        }
+    };
     let state: SharedState = Arc::new(AppState {
         db,
         keyring: KeyRing::default(),
@@ -230,11 +256,25 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<Running> {
         kdf_slots: tokio::sync::Semaphore::new(2),
         login_failures: Mutex::new(HashMap::new()),
         cert_fingerprint: tls.as_ref().map(|t| t.fingerprint.clone()),
+        mail: mail::MailInfo {
+            imap_port: imap_addr.map(|a| a.port()),
+            smtp_port: smtp_addr.map(|a| a.port()),
+            fingerprint: mail_tls.as_ref().map(|t| t.1.clone()),
+        },
         idle_watchers: Mutex::new(HashMap::new()),
         shutdown: tokio_util::sync::CancellationToken::new(),
         cfg: cfg.clone(),
     });
     scheduler::spawn(state.clone());
+    if let Some((config, _)) = mail_tls {
+        mail_listeners.spawn(state.clone(), config)?;
+        if let Some(a) = imap_addr {
+            tracing::info!("IMAP service on {a} (TLS)");
+        }
+        if let Some(a) = smtp_addr {
+            tracing::info!("SMTP submission service on {a} (TLS)");
+        }
+    }
     let app = router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
     let listener = std::net::TcpListener::bind(cfg.listen)?;
     listener.set_nonblocking(true)?;
@@ -252,6 +292,8 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<Running> {
     };
     Ok(Running {
         addr,
+        imap_addr,
+        smtp_addr,
         fingerprint: tls.map(|t| t.fingerprint),
         setup_token,
         state,

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use malo_api::{
     AccountAuth, AccountInput, AccountView, DeepCheckMode, DestinationInput, DestinationView,
-    PurgePolicy, TlsMode, UserSettings, REDACTED,
+    PurgePolicy, SmtpSettings, TlsMode, UserSettings, REDACTED,
 };
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -25,6 +25,9 @@ pub struct Account {
     pub backup_interval_minutes: u32,
     pub idle: bool,
     pub enabled: bool,
+    /// Upstream SMTP server for mail sent through Malo (same username and credentials).
+    #[serde(default)]
+    pub smtp: Option<SmtpSettings>,
     #[serde(default)]
     pub imported: bool,
     #[serde(default)]
@@ -208,6 +211,11 @@ pub fn validate_name(what: &str, name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn is_host_name(h: &str) -> bool {
+    h.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'))
+}
+
 fn keep(new: String, old: Option<&String>) -> String {
     match (new.as_str(), old) {
         (REDACTED, Some(o)) => o.clone(),
@@ -221,14 +229,23 @@ impl Account {
         input: AccountInput,
         previous: Option<&Account>,
     ) -> anyhow::Result<Account> {
-        // A saved secret only fills in a redacted field while it goes to the same server, user
-        // and kind of connection; otherwise anyone with a session could send it to their own server.
+        let smtp = input
+            .smtp
+            .map(|s| SmtpSettings {
+                host: s.host.trim().to_string(),
+                ..s
+            })
+            .filter(|s| !s.host.is_empty());
+        // A saved secret only fills in a redacted field while it goes to the same servers (IMAP
+        // and SMTP), user and kind of connection; otherwise anyone with a session could send it
+        // to their own server.
         let same_server = previous.is_some_and(|p| {
             p.host == input.host.trim()
                 && p.port == input.port
                 && p.username == input.username
                 && p.tls == input.tls
                 && (p.accept_invalid_certs || !input.accept_invalid_certs)
+                && (smtp.is_none() || p.smtp == smtp)
         });
         let saved = previous.filter(|_| same_server).map(|p| &p.auth);
         let auth = match (input.auth, saved) {
@@ -294,10 +311,17 @@ impl Account {
         validate_name("name", &input.name)?;
         anyhow::ensure!(!input.host.trim().is_empty(), "host is required");
         anyhow::ensure!(
-            input.host.trim().chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']')),
+            is_host_name(input.host.trim()),
             "host must be an ASCII host name or IP address (use the xn-- form for international domains)"
         );
         anyhow::ensure!(input.port != 0, "port is required");
+        if let Some(s) = &smtp {
+            anyhow::ensure!(
+                is_host_name(&s.host),
+                "SMTP host must be an ASCII host name or IP address (use the xn-- form for international domains)"
+            );
+            anyhow::ensure!(s.port != 0, "SMTP port is required");
+        }
         Ok(Account {
             id,
             name: input.name.trim().to_string(),
@@ -310,6 +334,7 @@ impl Account {
             backup_interval_minutes: input.backup_interval_minutes.max(1),
             idle: input.idle,
             enabled: input.enabled,
+            smtp,
             imported: previous.map(|p| p.imported).unwrap_or(false),
             policy: previous.map(|p| p.policy.clone()).unwrap_or_default(),
             revision: previous.map(|p| p.revision + 1).unwrap_or(1),
@@ -356,6 +381,7 @@ impl Account {
             backup_interval_minutes: self.backup_interval_minutes,
             idle: self.idle,
             enabled: self.enabled,
+            smtp: self.smtp.clone(),
             imported: self.imported,
             policy: self.policy.clone(),
             last_backup: None,
@@ -477,6 +503,7 @@ mod tests {
             backup_interval_minutes: 30,
             idle: false,
             enabled: true,
+            smtp: None,
         }
     }
 
@@ -489,6 +516,25 @@ mod tests {
         let b = Account::from_input("a".into(), input(REDACTED), Some(&a)).unwrap();
         assert!(matches!(b.auth, AccountAuth::Password { ref password } if password == "s3cret"));
         assert!(Account::from_input("a".into(), input(REDACTED), None).is_err());
+    }
+
+    #[test]
+    fn redacted_secret_never_follows_a_new_smtp_server() {
+        let mut i = input("s3cret");
+        i.smtp = Some(SmtpSettings {
+            host: "smtp.example.com".into(),
+            port: 465,
+            tls: TlsMode::Implicit,
+        });
+        let a = Account::from_input("a".into(), i.clone(), None).unwrap();
+        let mut same = i.clone();
+        same.auth = AccountAuth::Password {
+            password: REDACTED.into(),
+        };
+        assert!(Account::from_input("a".into(), same.clone(), Some(&a)).is_ok());
+        let mut moved = same;
+        moved.smtp.as_mut().unwrap().host = "smtp.attacker.example".into();
+        assert!(Account::from_input("a".into(), moved, Some(&a)).is_err());
     }
 
     #[test]

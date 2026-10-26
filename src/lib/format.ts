@@ -54,6 +54,7 @@ export function jobLabel(kind: import('./api/types').JobKind, accountName: (id: 
     case 'repair': return `Repair · ${scope(kind.scope)}`;
     case 'rebuild_index': return `Rebuild index · ${destName(kind.destination_id)}`;
     case 'rebuild_index_all': return 'Rebuild index · all destinations';
+    case 'search_index': return 'Index mail for search';
     case 'delete_messages': {
       const n = `${kind.message_ids.length} message${kind.message_ids.length === 1 ? '' : 's'}`;
       return `Delete ${n} from ${kind.scope === 'server' ? 'mail server' : 'backup'} · ${accountName(kind.account_id)}`;
@@ -64,6 +65,14 @@ export function jobLabel(kind: import('./api/types').JobKind, accountName: (id: 
 // Zero-width, bidi-override and other invisible characters (same set as the server's).
 const INVISIBLE =
   /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180F\u200B-\u200F\u2028-\u202F\u205F-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0\uFFF0-\uFFFB]|\uDB40[\uDC00-\uDFFF]|\uD834[\uDD73-\uDD7A]/g;
+
+/** A search snippet from the server (matches between U+0002 and U+0003) as revealed pieces. */
+export function highlights(s: string): { text: string; hit: boolean }[] {
+  return s.split('\u0002').flatMap((chunk, i) => {
+    const [hit, rest] = i === 0 ? ['', chunk] : chunk.split('\u0003', 2).concat('').slice(0, 2);
+    return [{ text: reveal(hit), hit: true }, { text: reveal(rest.replace(/\s+/g, ' ')), hit: false }].filter((p) => p.text);
+  });
+}
 
 /** Untrusted text with hidden characters made visible, e.g. "invoice⟨U+202E⟩fdp.exe". */
 export function reveal(s: string | null | undefined): string {

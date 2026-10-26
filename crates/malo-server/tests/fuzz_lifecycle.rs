@@ -3819,6 +3819,7 @@ impl World {
                         let list: MessageList = serde_json::from_value(v).unwrap_or(MessageList {
                             total: 0,
                             messages: vec![],
+                            unindexed: 0,
                         });
                         for msg in list.messages {
                             if raw_bytes(&api, msg.id).await.as_deref()
@@ -3871,6 +3872,7 @@ impl World {
                     let list: MessageList = serde_json::from_value(v).unwrap_or(MessageList {
                         total: 0,
                         messages: vec![],
+                        unindexed: 0,
                     });
                     let mut found = false;
                     let mut seen = vec![];

@@ -130,6 +130,7 @@
             {:else if (j.kind.type === 'check' || j.kind.type === 'repair') && j.result}{j.result.ok ? 'in sync' : 'problems found'}{j.result.repaired ? ` · ${j.result.repaired} repaired` : ''}
             {:else if j.kind.type === 'purge_dry_run' && j.result}{j.result.total_count} would be deleted
             {:else if j.kind.type === 'delete_messages' && j.result}{deleteText(j.result)}
+            {:else if j.kind.type === 'search_index' && j.result}{j.result.indexed.toLocaleString()} indexed{#if j.result.unavailable} · <span class="text-bad">{j.result.unavailable.toLocaleString()} unreadable</span>{/if}
             {/if}
           </td>
         </tr>

@@ -98,7 +98,12 @@ accept_invalid_certs: boolean, username: string,
 /**
  * Secret fields equal to [`REDACTED`] keep their stored value.
  */
-auth: AccountAuth, backup_interval_minutes: number, idle: boolean, enabled: boolean, };
+auth: AccountAuth, backup_interval_minutes: number, idle: boolean, enabled: boolean, 
+/**
+ * Outgoing server for mail sent through Malo's SMTP submission service. It signs in with
+ * the same username and credentials as the IMAP server. None: sending is not set up.
+ */
+smtp?: SmtpSettings, };
 
 export type AccountView = { 
 /**
@@ -108,13 +113,71 @@ revision: number, id: string, name: string, host: string, port: number, tls: Tls
 /**
  * Same shape as the input, with secrets replaced by [`REDACTED`].
  */
-auth: AccountAuth, backup_interval_minutes: number, idle: boolean, enabled: boolean, imported: boolean, policy: PurgePolicy, last_backup: string | null, last_backup_ok: boolean | null, next_backup: string | null, next_purge: string | null, purge_blocked: string | null, message_count: number, stored_bytes: number, };
+auth: AccountAuth, backup_interval_minutes: number, idle: boolean, enabled: boolean, smtp: SmtpSettings | null, imported: boolean, policy: PurgePolicy, last_backup: string | null, last_backup_ok: boolean | null, next_backup: string | null, next_purge: string | null, purge_blocked: string | null, message_count: number, stored_bytes: number, };
 
 export type ConnectionTest = { ok: boolean, error: string | null, capabilities: Array<string>, warnings: Array<string>, mailboxes: Array<string>, gmail: boolean, uidplus: boolean, };
 
-export type AccountPreset = { id: string, name: string, host: string, port: number, tls: TlsMode, oauth: OAuthPreset | null, app_password_hint: string | null, };
+export type AccountPreset = { id: string, name: string, host: string, port: number, tls: TlsMode, oauth: OAuthPreset | null, app_password_hint: string | null, smtp: SmtpSettings | null, };
 
 export type OAuthPreset = { provider: OAuthProvider, auth_url: string, token_url: string, scopes: Array<string>, guide_url: string, };
+
+export type SmtpSettings = { host: string, port: number, 
+/**
+ * Implicit TLS (port 465) or STARTTLS (port 587).
+ */
+tls: TlsMode, };
+
+export type MailAccessInfo = { 
+/**
+ * Port of the IMAP service (implicit TLS); None when the server doesn't run it.
+ */
+imap_port: number | null, 
+/**
+ * Port of the SMTP submission service (implicit TLS); None when the server doesn't run it.
+ */
+smtp_port: number | null, 
+/**
+ * SHA-256 fingerprint of the certificate both services present.
+ */
+fingerprint: string | null, logins: Array<MailLoginView>, };
+
+export type MailLoginView = { account_id: string, username: string, created_at: string, last_used: string | null, };
+
+export type MailLoginRequest = { username: string, 
+/**
+ * Length of the generated password (16–128, default 24).
+ */
+password_length?: number, };
+
+export type MailLoginCreated = { login: MailLoginView, password: string, };
+
+export type MailViewInfo = { 
+/**
+ * A Gmail account: it has labels and inbox categories.
+ */
+gmail: boolean, split_categories: boolean, folders: Array<MailFolderInfo>, };
+
+export type MailFolderInfo = { 
+/**
+ * Raw (modified UTF-7) name, as mail apps see it.
+ */
+name: string, display_name: string, 
+/**
+ * `\Sent`, `\Drafts`, `\Junk`, `\Trash`, `\All`…
+ */
+special_use: string | null, kind: MailFolderKind, shown: boolean, messages: number, };
+
+export type MailFolderKind = "mailbox" | "label" | "primary" | "category";
+
+export type MailViewSettings = { 
+/**
+ * Gmail: INBOX shows Primary only; Social, Promotions, Updates and Forums get folders.
+ */
+split_categories: boolean, 
+/**
+ * Raw names of the folders to leave out (INBOX is always shown).
+ */
+hidden: Array<string>, };
 
 export type DeepCheckMode = { "mode": "full" } | { "mode": "rotating", slices: number, } | { "mode": "off" };
 
@@ -181,7 +244,7 @@ export type DeleteSummary = { account_id: string, deleted_from_server: number, d
 
 export type CheckScope = { "scope": "all" } | { "scope": "account", account_id: string, } | { "scope": "destination", destination_id: string, };
 
-export type JobKind = { "type": "backup", account_id: string, } | { "type": "check", scope: CheckScope, deep: boolean, } | { "type": "purge_dry_run", account_id: string, } | { "type": "purge", account_id: string, } | { "type": "repair", scope: CheckScope, } | { "type": "rebuild_index", destination_id: string, } | { "type": "rebuild_index_all" } | { "type": "delete_messages", account_id: string, message_ids: Array<number>, scope: DeleteScope, };
+export type JobKind = { "type": "backup", account_id: string, } | { "type": "check", scope: CheckScope, deep: boolean, } | { "type": "purge_dry_run", account_id: string, } | { "type": "purge", account_id: string, } | { "type": "repair", scope: CheckScope, } | { "type": "rebuild_index", destination_id: string, } | { "type": "rebuild_index_all" } | { "type": "search_index" } | { "type": "delete_messages", account_id: string, message_ids: Array<number>, scope: DeleteScope, };
 
 export type JobState = "queued" | "running" | "done" | "failed" | "cancelled" | "skipped_locked";
 
@@ -203,9 +266,24 @@ export type MessageState = "discovered" | "downloading" | "stored" | "verified" 
 
 export type Envelope = { from: string, from_name: string | null, to: Array<string>, subject: string, date: string | null, message_id: string | null, attachment_count: number, };
 
-export type MessageSummary = { id: number, account_id: string, mailboxes: Array<string>, labels: Array<string>, envelope: Envelope, size: number, internal_date: string | null, state: MessageState, stored: number, destinations: number, error: string | null, reviewed: boolean, first_seen_at: string, flags: Array<string>, deleted_on_server: boolean, };
+export type MessageSummary = { id: number, account_id: string, mailboxes: Array<string>, labels: Array<string>, envelope: Envelope, size: number, internal_date: string | null, state: MessageState, stored: number, destinations: number, error: string | null, reviewed: boolean, first_seen_at: string, flags: Array<string>, deleted_on_server: boolean, 
+/**
+ * With a full-text search: the best-matching text, matches between U+0002 and U+0003.
+ */
+snippet?: string | null, };
 
-export type MessageList = { total: number, messages: Array<MessageSummary>, };
+export type MessageList = { total: number, messages: Array<MessageSummary>, 
+/**
+ * With a search: messages not indexed for full-text search yet (matched by sender,
+ * recipients and subject only).
+ */
+unindexed: number, };
+
+export type SearchSuggestion = { value: string, 
+/**
+ * The sender's display name, for `from:`.
+ */
+name: string | null, count: number, };
 
 export type MailboxInfo = { account_id: string, name: string, display_name: string, special_use: string | null, uidvalidity: number, message_count: number, new_count: number, };
 

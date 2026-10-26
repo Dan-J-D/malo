@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Multi-stage build: Rust builder → distroless/cc, non-root, volume /data, port 8443.
+# Multi-stage build: Rust builder → distroless/cc, non-root, volume /data, ports 8443 (API), 1993/1465 (IMAP/SMTP when enabled).
 
 FROM rust:1.92-bookworm AS builder
 WORKDIR /src
@@ -21,6 +21,6 @@ ENV MALO_LISTEN=0.0.0.0:8443 \
     MALO_DATA_DIR=/data \
     RUST_LOG=info
 VOLUME ["/data"]
-EXPOSE 8443
+EXPOSE 8443 1993 1465
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/malo-server", "--healthcheck"]
 ENTRYPOINT ["/malo-server"]

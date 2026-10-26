@@ -6,12 +6,13 @@
   import { live, route, scope, go, attempt, accountName, setReviewed, notify } from '../state.svelte';
   import { commands, type Command } from '../commands.svelte';
   import { contextMenu, menuUnder, copy, type Entry } from '../menu.svelte';
-  import { reveal, shortDate } from '../format';
+  import { reveal, shortDate, highlights } from '../format';
   import { panes, savePanes, LIST_MIN, LIST_MAX, LIST_DEFAULT } from '../layout.svelte';
   import Viewer from '../components/Viewer.svelte';
   import Avatar from '../components/Avatar.svelte';
   import Icon from '../components/Icon.svelte';
   import Resizer from '../components/Resizer.svelte';
+  import SearchBox from '../components/SearchBox.svelte';
   import DeleteMessages from '../components/DeleteMessages.svelte';
   import { fade } from 'svelte/transition';
   import { ms } from '../motion';
@@ -27,7 +28,9 @@
   let mailbox = $state('');
   let newOnly = $state(false);
   let q = $state('');
-  const sorts = [['newest', 'Newest'], ['oldest', 'Oldest'], ['sender', 'Sender A–Z'], ['largest', 'Largest']];
+  /** Search column for words without an operator ("Search in"). */
+  let field = $state('');
+  const sorts = [['newest', 'Newest'], ['oldest', 'Oldest'], ['sender', 'Sender A–Z'], ['largest', 'Largest'], ['relevance', 'Best match']];
   let sort = $state(readSort());
   function readSort() {
     try {
@@ -42,7 +45,7 @@
     try { localStorage.setItem('malo.sort', v); } catch { /* not remembered */ }
   }
   let boxes: T.MailboxInfo[] = $state([]);
-  let searchEl: HTMLInputElement | undefined = $state();
+  let searchBox: SearchBox | undefined = $state();
   let selBar: HTMLElement | undefined = $state();
 
   $effect(() => {
@@ -77,6 +80,8 @@
   const OVERSCAN = 10;
 
   let total = $state(0);
+  /** With a search: messages only searched by sender, recipients and subject (not indexed yet). */
+  let unindexed = $state(0);
   let pages: Record<number, T.MessageSummary[]> = $state.raw({});
   let maxId: number | null = null;
   let gen = $state(0);
@@ -93,7 +98,7 @@
   const at = (i: number) => pages[Math.floor(i / PAGE)]?.[i % PAGE];
 
   const query = (p: number) =>
-    `/messages${qs({ account, mailbox: account ? mailbox : '', new: newOnly, q, sort, limit: PAGE, offset: p * PAGE, max_id: maxId })}`;
+    `/messages${qs({ account, mailbox: account ? mailbox : '', new: newOnly, q, field: q.trim() ? field : '', sort, limit: PAGE, offset: p * PAGE, max_id: maxId })}`;
 
   async function fetchPage(p: number) {
     if (pages[p] || inflight.has(p)) return;
@@ -119,6 +124,7 @@
     if (!r) return;
     maxId = r.messages[0]?.id ?? null;
     total = r.total;
+    unindexed = q.trim() ? r.unindexed : 0;
     pages = { 0: r.messages };
     baseFound = live.foundCount;
     if (scroller) scroller.scrollTop = 0;
@@ -157,10 +163,15 @@
   });
   $effect(() => stopWaiting);
 
+  async function indexNow() {
+    if (await attempt(() => api.post('/jobs', { kind: { type: 'search_index' } }))) notify('Indexing mail for search', 'success');
+  }
+
   let searchTimer: ReturnType<typeof setTimeout>;
-  function onSearch() {
+  /** Typing waits for a pause; chips, filters and Enter search right away. */
+  function onSearch(now: boolean) {
     clearTimeout(searchTimer);
-    searchTimer = setTimeout(reset, 300);
+    searchTimer = setTimeout(reset, now ? 0 : 300);
   }
 
   // ── Selection ──
@@ -321,8 +332,7 @@
   }
 
   function fromSender(m: T.MessageSummary) {
-    q = m.envelope.from;
-    reset();
+    searchBox?.set(`from:${m.envelope.from}`);
   }
 
   function cycleSort() {
@@ -414,8 +424,8 @@
       { id: 'first', group: 'Mail', label: 'First message', keys: 'home', run: () => openAt(0) },
       { id: 'last', group: 'Mail', label: 'Last message', keys: 'end', run: () => openAt(total - 1) },
       { id: 'close', group: 'Mail', label: 'Close message', keys: 'escape', disabled: openId === null || sel, run: () => go('/browse') },
-      { id: 'search', group: 'Mail', label: 'Search', keys: '/', run: () => searchEl?.focus() },
-      { id: 'search-f', group: 'Mail', label: 'Search', keys: 'mod+f', anywhere: true, hidden: true, run: () => searchEl?.focus() },
+      { id: 'search', group: 'Mail', label: 'Search', keys: '/', run: () => searchBox?.focus() },
+      { id: 'search-f', group: 'Mail', label: 'Search', keys: 'mod+f', anywhere: true, hidden: true, run: () => searchBox?.focus() },
       { id: 'actions', group: 'Mail', label: sel ? 'Selection actions…' : 'Message actions…', keys: '.', disabled: !m && !sel,
         run: () => (sel ? menuUnder(selBar ?? scroller, selectionMenu()) : m && menuUnder(rowAt(index) ?? scroller, messageMenu(m, index))) },
       { id: 'mark-unread', group: 'Mail', label: 'Mark as unread', keys: 'shift+u', disabled: sel || !m?.reviewed, run: () => m && mark(m, false) },
@@ -479,12 +489,7 @@
     {/if}
 
     <div class="flex flex-col gap-2.5 px-3 pt-3 pb-2">
-      <label class="relative m-0 block">
-        <span class="sr-only">Search sender or subject</span>
-        <span class="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-faint"><Icon name="search" size={15} /></span>
-        <input bind:this={searchEl} class="w-full border-transparent bg-raised py-2 pr-12 pl-9" placeholder="Search" bind:value={q} oninput={onSearch} />
-        <kbd class="absolute top-1/2 right-2 -translate-y-1/2 rounded-md bg-hover px-1.5 font-sans text-xs text-muted">/</kbd>
-      </label>
+      <SearchBox bind:this={searchBox} bind:value={q} bind:field {account} onchange={onSearch} />
 
       <div class="flex gap-1.5">
         <button class="flex-1 justify-center py-1.5 {newOnly ? 'bg-raised text-muted' : 'bg-accent! text-white'}" onclick={() => (newOnly = false)}>
@@ -524,6 +529,9 @@
         </select>
       </label>
     </div>
+    {#if unindexed > 0}
+      <p class="m-0 px-4 pb-1 text-[0.8rem] text-faint">{unindexed.toLocaleString()} message{unindexed === 1 ? '' : 's'} aren't indexed for full-text search yet, so only their sender, recipients and subject are searched. <button class="link text-[0.8rem]" onclick={indexNow}>Index now</button></p>
+    {/if}
 
     <div bind:this={scroller} bind:clientHeight={viewH} onscroll={() => (scrollTop = scroller?.scrollTop ?? 0)}
       class="min-h-0 flex-1 overflow-y-auto px-2 pb-2 [scroll-behavior:auto] transition-opacity duration-200 {loading ? 'opacity-50' : ''}"
@@ -608,7 +616,11 @@
           {#if st}<span class={st[1]} title={m.state === 'stored' ? `Stored on ${m.stored}/${m.destinations} destinations` : (m.error ?? st[2])}><Icon name={st[0]} size={13} /></span>{/if}
         </span>
       </span>
-      <span class="untrusted truncate text-[0.8rem] text-faint">{meta}</span>
+      {#if m.snippet}
+        <span class="untrusted truncate text-[0.8rem] text-faint">{#each highlights(m.snippet) as p, k (k)}{#if p.hit}<mark class="rounded-sm bg-accent/25 px-0.5 text-fg">{p.text}</mark>{:else}{p.text}{/if}{/each}</span>
+      {:else}
+        <span class="untrusted truncate text-[0.8rem] text-faint">{meta}</span>
+      {/if}
     </span>
   </button>
 {/snippet}

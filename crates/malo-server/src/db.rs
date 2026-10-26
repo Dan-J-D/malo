@@ -57,6 +57,15 @@ CREATE TABLE IF NOT EXISTS schedules (
     PRIMARY KEY(user_id, key)
 );
 CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS mail_logins (
+    username TEXT PRIMARY KEY COLLATE NOCASE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    account_id TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_used TEXT,
+    UNIQUE(user_id, account_id)
+);
 CREATE TABLE IF NOT EXISTS admin_audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     at TEXT NOT NULL,
@@ -717,4 +726,116 @@ impl Db {
         }
         Ok(())
     }
+
+    // ───── IMAP/SMTP logins ─────
+
+    pub fn mail_login(&self, username: &str) -> anyhow::Result<Option<MailLoginRow>> {
+        self.with(|c| {
+            c.query_row(
+                &format!("{MAIL_LOGIN_SELECT} WHERE username=?1"),
+                [username],
+                mail_login_row,
+            )
+            .optional()
+        })
+    }
+
+    pub fn mail_logins(&self, user_id: &str) -> anyhow::Result<Vec<MailLoginRow>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(&format!(
+                "{MAIL_LOGIN_SELECT} WHERE user_id=?1 ORDER BY username"
+            ))?;
+            let rows = stmt.query_map([user_id], mail_login_row)?.collect();
+            rows
+        })
+    }
+
+    /// Sets the login of an account, replacing its previous one. False if another account
+    /// (of any user) already uses the username.
+    pub fn set_mail_login(
+        &self,
+        user_id: &str,
+        account_id: &str,
+        username: &str,
+        password_hash: &str,
+    ) -> anyhow::Result<bool> {
+        self.with(|c| {
+            let tx = c.unchecked_transaction()?;
+            let owner: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT user_id, account_id FROM mail_logins WHERE username=?1",
+                    [username],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if owner.is_some_and(|(u, a)| u != user_id || a != account_id) {
+                return Ok(false);
+            }
+            tx.execute(
+                "DELETE FROM mail_logins WHERE user_id=?1 AND account_id=?2",
+                params![user_id, account_id],
+            )?;
+            tx.execute(
+                "INSERT INTO mail_logins(username, user_id, account_id, password_hash, created_at) VALUES(?1,?2,?3,?4,?5)",
+                params![username, user_id, account_id, password_hash, Utc::now().to_rfc3339()],
+            )?;
+            tx.commit()?;
+            Ok(true)
+        })
+    }
+
+    pub fn delete_mail_login(&self, user_id: &str, account_id: &str) -> anyhow::Result<bool> {
+        let n = self.with(|c| {
+            c.execute(
+                "DELETE FROM mail_logins WHERE user_id=?1 AND account_id=?2",
+                params![user_id, account_id],
+            )
+        })?;
+        Ok(n > 0)
+    }
+
+    pub fn touch_mail_login(&self, username: &str) -> anyhow::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE mail_logins SET last_used=?2 WHERE username=?1",
+                params![username, Utc::now().to_rfc3339()],
+            )
+        })?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MailLoginRow {
+    pub username: String,
+    pub user_id: String,
+    pub account_id: String,
+    pub password_hash: String,
+    pub created_at: DateTime<Utc>,
+    pub last_used: Option<DateTime<Utc>>,
+}
+
+impl MailLoginRow {
+    pub fn view(&self) -> malo_api::MailLoginView {
+        malo_api::MailLoginView {
+            account_id: self.account_id.clone(),
+            username: self.username.clone(),
+            created_at: self.created_at,
+            last_used: self.last_used,
+        }
+    }
+}
+
+const MAIL_LOGIN_SELECT: &str =
+    "SELECT username, user_id, account_id, password_hash, created_at, last_used FROM mail_logins";
+
+fn mail_login_row(r: &rusqlite::Row) -> rusqlite::Result<MailLoginRow> {
+    Ok(MailLoginRow {
+        username: r.get(0)?,
+        user_id: r.get(1)?,
+        account_id: r.get(2)?,
+        password_hash: r.get(3)?,
+        created_at: ts(r.get(4)?).unwrap_or_default(),
+        last_used: ts(r.get(5)?),
+    })
 }

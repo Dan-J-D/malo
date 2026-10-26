@@ -24,6 +24,9 @@ use crate::tls;
 pub type Stream = tokio_rustls::client::TlsStream<TcpStream>;
 pub type Session = async_imap::Session<Stream>;
 
+/// Gmail's inbox categories besides Primary, as `category:` search terms.
+pub const GMAIL_CATEGORIES: [&str; 4] = ["social", "promotions", "updates", "forums"];
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Simultaneous connections per IMAP host across all users (Gmail allows ~15 per account).
 const PER_HOST_CONNECTIONS: usize = 8;
@@ -358,6 +361,28 @@ impl ImapConn {
                 Some((f.uid?, flags_of(f), labels))
             })
             .collect())
+    }
+
+    /// Gmail categories of the selected mailbox's messages from UID `from_uid` on (Primary
+    /// messages are in none of them).
+    pub async fn gmail_categories(
+        &mut self,
+        from_uid: u32,
+    ) -> anyhow::Result<HashMap<u32, &'static str>> {
+        let mut out = HashMap::new();
+        for c in GMAIL_CATEGORIES {
+            let uids = self
+                .session
+                .uid_search(format!(
+                    "UID {}:* X-GM-RAW \"category:{c}\"",
+                    from_uid.max(1)
+                ))
+                .await?;
+            for u in uids.into_iter().filter(|u| *u >= from_uid) {
+                out.insert(u, c);
+            }
+        }
+        Ok(out)
     }
 
     /// Current flags of specific UIDs.

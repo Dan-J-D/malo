@@ -55,6 +55,8 @@ The server is configured with environment variables. They can also go in a TOML 
 | `MALO_MAX_AUTO_LOCK_HOURS` | `24` | Upper limit on any user's auto-lock |
 | `MALO_ALLOWED_FS_MOUNTS` | – | Absolute paths, colon-separated, that `fs` destinations may use besides the user's own directory |
 | `MALO_WORKERS` | `4` | Number of jobs that can run at once across all users |
+| `MALO_IMAP_LISTEN` | off | Address of the IMAP service for mail apps, e.g. `0.0.0.0:1993` (implicit TLS). See [Mail apps](#mail-apps-imap-and-smtp) |
+| `MALO_SMTP_LISTEN` | off | Address of the SMTP submission service for mail apps, e.g. `0.0.0.0:1465` (implicit TLS) |
 | `MALO_TRUST_PROXY_HEADERS` | off | Take the client address for rate limits from `X-Real-IP` / the last `X-Forwarded-For` entry. Turn it on only behind a reverse proxy that sets these headers; otherwise clients pick their own address and every client shares the proxy's limit |
 
 Administrators set the remaining options in the app (*Admin*): self-registration, the default and per-user account limits, the maximum auto-lock, extra `fs` mounts, and **Block private networks**. That last one refuses mail servers and storage endpoints on loopback, private and link-local addresses. It is checked when an account or destination is saved or tested, and again when a job starts. Turn it on when users you don't fully trust share the server, so they can't make it connect to hosts on its own network. It's off by default because a LAN mail server or MinIO is a common setup. The *Admin* page also lists open invites (which can be revoked) and a log of administrative actions: user changes and deletions, invites, settings, password resets with a kit, and settings restored by a rebuild.
@@ -115,7 +117,7 @@ random 256-bit MDK ◄───────────────────�
 - Overlong names are shortened with a hash so they always fit on disk.
 - Plain-layout mailbox folders carry a short tag of the exact name, so `Work` and `work`, or composed and decomposed `é`, never share files on case- or normalization-insensitive filesystems.
 - Passwords are normalized to NFC before key derivation, so composed and decomposed input unlock the same vault.
-- Search ignores case for all scripts and ignores invisible characters. `%` and `_` in a search are matched literally.
+- Search ignores case and accents in all scripts, and ignores invisible characters, so `paypal` finds `Pay<zero-width>Pal`. The full-text index is an FTS5 table inside the encrypted index: searchable text is never written to disk in the clear, and it's deleted together with its message.
 - Before a purge deletes a message, its Message-ID, received date and size must still match the backup; messages without a Message-ID are compared by content hash. UIDs are never trusted alone, because some servers reuse UIDVALIDITY.
 
 **The desktop app's web view is locked down.**
@@ -135,12 +137,34 @@ random 256-bit MDK ◄───────────────────�
 5. **Purge.** Set the retention rule: older than N days (0 means everything), the required destinations, mailboxes to exclude, and whether to skip flagged mail. Run a dry run, then arm the purge by typing the account name. Each run re-verifies every candidate in every required destination, re-selects the mailbox, checks that UIDVALIDITY hasn't changed and that size and Gmail id still match, and only then deletes with `UID STORE +FLAGS.SILENT (\Deleted)` followed by `UID EXPUNGE <set>`. Servers without UIDPLUS are refused. On Gmail, messages are moved to Trash and expunged there, which deletes them permanently. Every deletion is written to the audit log.
 
    Exchange and Microsoft 365 may keep deleted items in *Recoverable Items* for some time; Malo can't control that.
-6. **Selecting mail.** In *Mail*, tick the box on a message's avatar, Ctrl/⌘-click a row, Shift-click for a range, press `x` for the open message, or Ctrl+A for the whole view (up to 10,000). The selection bar and right-click menu then act on all of them:
+6. **Searching.** The search box in *Mail* searches the full text of messages: subject, sender, recipients, attachment names and the body, with HTML mail read as text. Words match their beginnings (`inv` finds `invoice`). Operators:
+   - `from:`, `to:`, `subject:`, `body:` and `file:` (attachment name);
+   - `after:2024-03-01` and `before:2025` (the received date: a day, month or year);
+   - `has:attachment`, `is:unread`, `is:read`, `is:purged` (deleted on the mail server);
+   - `"exact phrase"`, `word OR word`, and `-` in front of a word or operator to leave it out.
+
+   As you type, the search box offers operators, and for `from:`, `to:` and `file:` it suggests the senders, recipients and attachment names in your mail, most used first. Finished operators become chips: click one to change it, or press Backspace to remove the last. The **?** button lists every operator, and the filter button shows *Search in* (one part of the message for plain words), a date range, *Has attachment* and *Deleted on server*. *Best match* sorts by relevance, and each result shows the matching text.
+
+   Mail is indexed when a backup downloads it. Mail backed up before search existed, or restored by an index rebuild, is indexed by the *Index mail for search* job. That job runs on its own after a backup or rebuild, reading from the spool or a destination. Until a message is indexed, only its sender, recipients and subject are searched, and the list says how many messages that applies to. Mail apps' `SEARCH BODY`/`TEXT` use the same index.
+7. **Selecting mail.** In *Mail*, tick the box on a message's avatar, Ctrl/⌘-click a row, Shift-click for a range, press `x` for the open message, or Ctrl+A for the whole view (up to 10,000). The selection bar and right-click menu then act on all of them:
    - mark them read or unread, or save them as `.eml` files into a folder;
    - **Delete from mail server** (`Delete` or `#`): a purge of just these messages, without the age, mailbox and flag rules. Each message must be verified on the purge's required destinations (every destination when none are set). It's re-verified there and identity-checked on the server, like a purge. The backup stays.
    - **Delete from backup** (`Shift+Delete`): removes the messages from Malo's index, rewrites the manifests on every destination without them, and deletes their stored copies. A message still on the mail server is deleted there first, or the next backup would bring it back; if that fails, it stays in the backup too. A destination that can't be reached is cleaned up at its next successful backup, and tombstones in the index keep a rebuild from restoring the messages meanwhile. This can't be undone.
 
    Both deletions ask for two confirmations and run as jobs (at most 1,000 messages each, one per account), listed in *Activity* and the audit log.
+
+## Mail apps (IMAP and SMTP)
+
+With `MALO_IMAP_LISTEN` and `MALO_SMTP_LISTEN` set, Apple Mail, Thunderbird or any IMAP app can read an account's **backed-up** mail, including mail long purged from its server, and reply, reply all and forward through the account's own outgoing server.
+
+- **One login per account, never your Malo password.** In *Accounts → Mail app*, pick a username (unique on the server, e.g. `work-mail`). Malo generates the password (24 random letters and digits by default, up to 128) and shows it once; it keeps only a hash. *New password* replaces it and signs out apps using the old one; *Remove login* ends access. The mail login can only read that one account's backups and send through that account: it can't unlock your vault, see other accounts or change settings.
+- **Readable while you're unlocked.** The backups are encrypted with keys that exist only while you're logged in to Malo, so mail apps get `Malo is locked` after the auto-lock until you log in again. Failed mail logins share the app login's backoff.
+- **Folders** are the account's mailboxes, every UIDVALIDITY they ever had included, so nothing purged is missing: Sent, Drafts, Spam/Junk, Trash, Archive and the rest, marked with their roles so mail apps file them in the right place. On Gmail, labels appear as folders (Sent Mail, Drafts, Starred, Important, your labels) next to *All Mail*, *Spam* and *Trash*. Messages show up once their content is stored. UIDs are Malo's own and stay stable.
+- **Gmail categories.** Each backup records which category (Primary, Social, Promotions, Updates, Forums) Gmail put new mail in, and every message is checked again every 6 hours. By default INBOX shows Primary only and the others get folders under *Categories/*; turn that off to have everything in INBOX. A message Gmail re-categorizes moves folders on its own.
+- **Choosing folders.** *Accounts → Mail app → Folders* lists every folder with its role and message count; untick any (except INBOX) to keep it out of mail apps, e.g. *All Mail* so Gmail mail doesn't show twice.
+- **The archive is read-only.** Flags (read, flagged…), deleting, and moving or copying between folders (*Move to Junk*, into a category, to Trash…) only change what mail apps see; the backups and the mail server stay untouched. Gmail doesn't let other apps set categories, so filing a message into a category stays in Malo. *Show every message again* undoes all of it. Creating, renaming and deleting folders are refused.
+- **Sending.** Add the account's outgoing server (*Edit account → Outgoing mail*; presets fill it in). Each message is relayed unchanged, signed in with the account's IMAP credentials (password or OAuth2; Microsoft also needs the `SMTP.Send` scope), and the recipient list is all-or-nothing: if the server refuses one recipient, nothing is sent and the app gets the server's answer. *Block private networks* applies to SMTP servers too. Saving to *Sent* in the app stores the copy on the account's server, so the next backup picks it up (Gmail keeps sent mail by itself). Drafts aren't kept on the backup server: turn off *Store draft messages on the server* in Apple Mail.
+- **Setup in Apple Mail:** *Other Mail Account…*, account type IMAP, this server as incoming and outgoing server, the mail login for both, the two ports with *Use TLS/SSL*. Both services present the server's certificate; with the self-signed one, compare its SHA-256 fingerprint (shown in the app) before trusting it, or set `MALO_TLS_HOSTNAMES` / your own certificate.
 
 ## Desktop app
 

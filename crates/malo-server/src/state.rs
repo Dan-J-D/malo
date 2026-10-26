@@ -23,6 +23,8 @@ pub struct AppState {
     pub kdf_slots: Semaphore,
     pub login_failures: Mutex<HashMap<String, (u32, Instant)>>,
     pub cert_fingerprint: Option<String>,
+    /// Ports and certificate of the IMAP/SMTP services.
+    pub mail: crate::mail::MailInfo,
     /// Background IMAP IDLE watchers per (user, account).
     pub idle_watchers: Mutex<HashMap<(String, String), tokio_util::sync::CancellationToken>>,
     /// Cancelled on shutdown: stops the scheduler and refuses new jobs.

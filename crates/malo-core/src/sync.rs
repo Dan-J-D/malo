@@ -48,6 +48,9 @@ pub fn backup_targets(list: &[MailboxListing], gmail: bool) -> Vec<MailboxListin
     selectable.cloned().collect()
 }
 
+/// How often every message's Gmail category is read again (users re-categorize old mail too).
+const CATEGORY_REFRESH: chrono::Duration = chrono::Duration::hours(6);
+
 /// Discovered messages recorded per index transaction.
 const DISCOVER_BATCH: usize = 500;
 
@@ -247,6 +250,32 @@ async fn backup_mailbox(
         }
     }
 
+    // Gmail categories (Primary, Social, …): all of them now and then, otherwise only new mail.
+    if conn.caps.gmail() && target.special_use.as_deref() == Some("\\All") {
+        let key = format!("categories_at:{}", mb.id);
+        let full = ctx
+            .index
+            .kv_get(&key)?
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok())
+            .is_none_or(|t| chrono::Utc::now() - t.with_timezone(&chrono::Utc) > CATEGORY_REFRESH);
+        let from = if full {
+            Some(1)
+        } else {
+            new_uids.iter().min().copied()
+        };
+        if let Some(from) = from {
+            match conn.gmail_categories(from).await {
+                Ok(found) => {
+                    ctx.index.set_categories(mb.id, from, &found)?;
+                    if full {
+                        ctx.index.kv_set(&key, &chrono::Utc::now().to_rfc3339())?;
+                    }
+                }
+                Err(e) => tracing::warn!(account = %account.id, "reading Gmail categories: {e:#}"),
+            }
+        }
+    }
+
     // 3+4. Download pass, leftovers first (pending_messages orders them).
     let pending = ctx.index.pending_messages(&account.id, ctx.manual)?;
     let mut work: Vec<(MessageRow, u32)> = Vec::new();
@@ -420,6 +449,7 @@ async fn store_message(
         }
     };
     let sha = crypto::sha256_hex(&raw);
+    index_for_search(ctx, msg.id, &sha, &raw);
     let mut errors = Vec::new();
     for store in missing {
         let path = store.object_path(account, &mb.path, mb.uidvalidity, uid, &sha);
@@ -459,8 +489,23 @@ async fn store_message(
     Ok(downloaded)
 }
 
+/// Indexes a message for full-text search while its content is at hand. A failure only means
+/// the search-index job does it later.
+fn index_for_search(ctx: &JobCtx, id: i64, sha256: &str, raw: &[u8]) {
+    if ctx.index.search_indexed(id, sha256).unwrap_or(false) {
+        return;
+    }
+    if let Err(e) = ctx.index.search_index_raw(id, sha256, raw) {
+        tracing::warn!(message = id, "indexing for search: {e:#}");
+    }
+}
+
 /// Reads a verified copy of `msg` from another destination (hash-checked).
-async fn copy_from_replica(ctx: &JobCtx, msg: &MessageRow, stores: &[Store]) -> Option<Vec<u8>> {
+pub(crate) async fn copy_from_replica(
+    ctx: &JobCtx,
+    msg: &MessageRow,
+    stores: &[Store],
+) -> Option<Vec<u8>> {
     let sha = msg.sha256.as_deref()?;
     for rep in ctx.index.replicas_of(msg.id).ok()? {
         if rep.status != ReplicaStatus::Verified {
@@ -499,6 +544,7 @@ async fn replicate_offline(
         return Ok(false);
     };
     let sha = crypto::sha256_hex(&raw);
+    index_for_search(ctx, msg.id, &sha, &raw);
     let ms = ctx.index.memberships(msg.id)?;
     let Some(first) = ms.first() else {
         return Ok(false);

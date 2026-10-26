@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use futures::future::BoxFuture;
-use malo_api::{AccountAuth, AccountPreset, OAuthPreset, OAuthProvider, TlsMode};
+use malo_api::{AccountAuth, AccountPreset, OAuthPreset, OAuthProvider, SmtpSettings, TlsMode};
 use oauth2::basic::BasicClient;
 use oauth2::{AuthUrl, ClientId, ClientSecret, RefreshToken, Scope, TokenResponse, TokenUrl};
 
@@ -45,6 +45,7 @@ pub fn presets() -> Vec<AccountPreset> {
             tls: TlsMode::Implicit,
             oauth,
             app_password_hint: hint.map(Into::into),
+            smtp: smtp_preset(id),
         }
     };
     vec![
@@ -63,6 +64,26 @@ pub fn presets() -> Vec<AccountPreset> {
         p("aol", "AOL Mail", "imap.aol.com", None, Some("Generate an app password in account security.")),
         p("custom", "Other IMAP server", "", None, None),
     ]
+}
+
+/// Outgoing servers of the presets; they all accept the IMAP username and password (or token).
+fn smtp_preset(id: &str) -> Option<SmtpSettings> {
+    let (host, port, tls) = match id {
+        "gmail" => ("smtp.gmail.com", 465, TlsMode::Implicit),
+        "outlook" => ("smtp.office365.com", 587, TlsMode::Starttls),
+        "yahoo" => ("smtp.mail.yahoo.com", 465, TlsMode::Implicit),
+        "icloud" => ("smtp.mail.me.com", 587, TlsMode::Starttls),
+        "fastmail" => ("smtp.fastmail.com", 465, TlsMode::Implicit),
+        "gmx" => ("mail.gmx.net", 465, TlsMode::Implicit),
+        "zoho" => ("smtp.zoho.com", 465, TlsMode::Implicit),
+        "aol" => ("smtp.aol.com", 465, TlsMode::Implicit),
+        _ => return None,
+    };
+    Some(SmtpSettings {
+        host: host.into(),
+        port,
+        tls,
+    })
 }
 
 /// Supplies IMAP access tokens for OAuth2 accounts.

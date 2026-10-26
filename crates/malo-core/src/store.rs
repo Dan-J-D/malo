@@ -830,6 +830,7 @@ mod tests {
             backup_interval_minutes: 30,
             idle: false,
             enabled: true,
+            smtp: None,
             imported: false,
             policy: Default::default(),
         }

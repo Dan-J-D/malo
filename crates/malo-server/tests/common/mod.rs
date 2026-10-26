@@ -278,6 +278,7 @@ pub fn imap_input(name: &str, imap_user: &str, port: u16) -> AccountInput {
         backup_interval_minutes: 60,
         idle: false,
         enabled: true,
+        smtp: None,
     }
 }
 
@@ -511,6 +512,7 @@ pub fn oauth_input(name: &str, imap_user: &str, refresh_token: &str) -> AccountI
         backup_interval_minutes: 60,
         idle: false,
         enabled: true,
+        smtp: None,
     }
 }
 
