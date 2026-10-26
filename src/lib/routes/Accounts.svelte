@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { api, app, ApiError } from '../api/client';
   import type * as T from '../api/types';
   import { live, route, go, attempt, refreshAccounts, errorText, notify } from '../state.svelte';
@@ -23,19 +23,32 @@
   let busy = $state(false);
   let error = $state('');
 
+  // Only the fields that decide how Malo signs in need a passing connection test before saving;
+  // a new name, schedule or IDLE setting saves as is. Editing a sign-in field after a test
+  // asks for a new one, so a stale test never vouches for different settings.
+  const signInKey = $derived(JSON.stringify([form.host, form.port, form.tls, form.username, form.accept_invalid_certs, authKind,
+    authKind === 'password' ? password : [oauth.provider, oauth.auth_url, oauth.token_url, oauth.client_id, oauth.client_secret, oauth.scopes, oauth.refresh_token]]));
+  let loadedKey = $state<string | null>(null);
+  let testedKey = $state<string | null>(null);
+  const verified = $derived(signInKey === testedKey || (!!editingId && signInKey === loadedKey));
+  let loadedFor = $state<string | null>(null);
+
   function blank(): T.AccountInput {
     return { revision: null, name: '', host: '', port: 993, tls: 'implicit', accept_invalid_certs: false, username: '', auth: { kind: 'password', password: '' }, backup_interval_minutes: 30, idle: true, enabled: true };
   }
 
   $effect(() => {
-    if (editingId) {
+    if (editingId && loadedFor !== editingId) {
       const a = live.accounts.find((x) => x.id === editingId);
-      if (a && form.name === '') {
+      if (a) {
+        loadedFor = editingId;
         form = { revision: a.revision, name: a.name, host: a.host, port: a.port, tls: a.tls, accept_invalid_certs: a.accept_invalid_certs, username: a.username, auth: a.auth, backup_interval_minutes: a.backup_interval_minutes, idle: a.idle, enabled: a.enabled };
         authKind = a.auth.kind;
         if (a.auth.kind === 'password') password = a.auth.password;
         else oauth = { provider: a.auth.provider, auth_url: a.auth.auth_url, token_url: a.auth.token_url, client_id: a.auth.client_id, client_secret: a.auth.client_secret ?? '', scopes: a.auth.scopes.join(' '), refresh_token: a.auth.refresh_token };
         step = 2;
+        // The saved settings already work; changing only the name or schedule needs no test.
+        loadedKey = untrack(() => signInKey);
       }
     }
   });
@@ -78,8 +91,9 @@
     error = '';
     test = null;
     try {
+      const key = signInKey;
       test = await api.post<T.ConnectionTest>(`/accounts/test${editingId ? `?id=${editingId}` : ''}`, input());
-      if (test.ok) step = 3;
+      if (test.ok) testedKey = key;
     } catch (e) {
       error = errorText(e);
     } finally {
@@ -99,8 +113,7 @@
       // Edited on another device meanwhile: reload so the form shows the current values.
       if (e instanceof ApiError && e.status === 409) {
         await refreshAccounts();
-        form = blank();
-        step = 2;
+        loadedFor = null;
       }
     } finally {
       busy = false;
@@ -113,6 +126,7 @@
     form = blank();
     password = '';
     test = null;
+    loadedFor = loadedKey = testedKey = null;
     go('/accounts');
   }
 
@@ -150,7 +164,7 @@
   </div>
 {:else}
   <div class="row"><h1 class="grow">{editingId ? 'Edit account' : 'Add account'}</h1><button onclick={close}>Cancel</button></div>
-  <p class="muted small">Step {step} of 3: {step === 1 ? 'provider' : step === 2 ? 'sign-in' : 'save'}</p>
+  <p class="muted small">Step {step === 1 ? 1 : verified ? 3 : 2} of 3: {step === 1 ? 'provider' : verified ? 'save' : 'sign-in'}</p>
 
   {#if step === 1}
     <div class="cards">
@@ -230,9 +244,10 @@
       {/if}
       <div class="row" style="margin-top: 1rem">
         <button onclick={runTest} disabled={busy}>Test connection</button>
-        <button class="primary" disabled={busy || step < 3} onclick={save}>{editingId ? 'Save changes' : 'Add account'}</button>
+        <button class="primary" disabled={busy || !verified || !form.name.trim()} onclick={save}>{editingId ? 'Save changes' : 'Add account'}</button>
+        {#if !verified}<span class="muted small">{editingId ? 'Sign-in settings changed: test the connection to save.' : 'Test the connection to continue.'}</span>{/if}
       </div>
-      {#if step === 3 && !editingId}<p class="muted small">After adding: set up a retention rule on the Purge page if you want Malo to delete old mail from the server.</p>{/if}
+      {#if verified && !editingId}<p class="muted small">After adding: set up a retention rule on the Purge page if you want Malo to delete old mail from the server.</p>{/if}
     </div>
   {/if}
 {/if}
