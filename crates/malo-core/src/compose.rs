@@ -185,6 +185,15 @@ fn fold(line: &str) -> String {
     out
 }
 
+/// A Message-ID from received mail that can go into our headers as is: printable ASCII without
+/// spaces or angle brackets. Anything else (a CR, say) is left out of the reply.
+fn valid_message_id(id: &str) -> bool {
+    (1..=250).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && b != b'<' && b != b'>')
+}
+
 /// Builds the message: headers, a UTF-8 text body, and attachments (multipart/mixed).
 pub fn build(d: &Draft) -> anyhow::Result<Built> {
     if d.to.is_empty() && d.cc.is_empty() && d.bcc.is_empty() {
@@ -213,11 +222,16 @@ pub fn build(d: &Draft) -> anyhow::Result<Built> {
     h.push_str(&format!("Message-ID: <{message_id}>\r\n"));
     if let Some(raw) = &d.in_reply_to {
         if let Some(orig) = MessageParser::default().parse(raw.as_slice()) {
-            if let Some(id) = orig.message_id() {
+            if let Some(id) = orig.message_id().filter(|id| valid_message_id(id)) {
                 let mut refs: Vec<String> = orig
                     .references()
                     .as_text_list()
-                    .map(|l| l.iter().map(|r| format!("<{r}>")).collect())
+                    .map(|l| {
+                        l.iter()
+                            .filter(|r| valid_message_id(r))
+                            .map(|r| format!("<{r}>"))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 refs.push(format!("<{id}>"));
                 h.push_str(&format!("In-Reply-To: <{id}>\r\n"));
@@ -426,6 +440,42 @@ mod tests {
         assert_eq!(a.contents(), b"%PDF-1");
         assert_eq!(m.message_id(), Some(built.message_id.as_str()));
         assert!(built.message_id.ends_with("@example.org"));
+    }
+
+    #[test]
+    fn hostile_message_ids_are_left_out() {
+        let reply = |original: &[u8]| {
+            let built = build(&Draft {
+                from: mb("me@example.org"),
+                to: vec![mb("a@example.com")],
+                cc: vec![],
+                bcc: vec![],
+                subject: "Re: x".into(),
+                body: "ok".into(),
+                in_reply_to: Some(original.to_vec()),
+                attachments: vec![],
+            })
+            .unwrap();
+            // Every line break is CRLF, so the message can be sent.
+            crate::smtp::dot_stuff(&built.data).unwrap();
+            String::from_utf8(built.data).unwrap()
+        };
+        let text = reply(b"Message-ID: <a\rBcc: victim@example.net>\r\nSubject: x\r\n\r\nhi\r\n");
+        assert!(
+            !text.contains("In-Reply-To") && !text.contains("victim"),
+            "{text}"
+        );
+        let text = reply(
+            b"Message-ID: <ok@example.com>\r\nReferences: <bad\rX-Evil: 1> <root@example.com>\r\n\r\nhi\r\n",
+        );
+        assert!(text.contains("In-Reply-To: <ok@example.com>"));
+        assert!(
+            text.contains("References: <root@example.com> <ok@example.com>"),
+            "{text}"
+        );
+        assert!(!text.contains("X-Evil"));
+        assert!(!valid_message_id("a b@c") && !valid_message_id("a>b") && !valid_message_id(""));
+        assert!(valid_message_id("CAF=x+y@mail.gmail.com"));
     }
 
     #[test]

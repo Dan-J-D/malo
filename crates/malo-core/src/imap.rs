@@ -154,7 +154,7 @@ async fn open(
 ) -> anyhow::Result<ImapConn> {
     let tcp = tokio::time::timeout(
         CONNECT_TIMEOUT,
-        TcpStream::connect((account.host.as_str(), account.port)),
+        crate::netguard::connect_tcp(&account.host, account.port),
     )
     .await
     .map_err(|_| anyhow!("connection to {}:{} timed out", account.host, account.port))?

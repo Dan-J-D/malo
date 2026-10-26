@@ -154,7 +154,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Conn<S> {
         Ok(())
     }
 
-    async fn transfer(&mut self, msg: &Message<'_>) -> Result<(), SendError> {
+    /// Sends `msg`, whose data is `stuffed` (see [`dot_stuff`]).
+    async fn transfer(&mut self, msg: &Message<'_>, stuffed: &[u8]) -> Result<(), SendError> {
         let mut mail = format!("MAIL FROM:<{}>", msg.from);
         if self.has("SIZE") {
             mail.push_str(&format!(" SIZE={}", msg.data.len()));
@@ -181,9 +182,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Conn<S> {
             return Err(SendError::Rejected(r));
         }
         let w = self.io.get_mut();
-        w.write_all(&dot_stuff(msg.data))
-            .await
-            .map_err(anyhow::Error::from)?;
+        w.write_all(stuffed).await.map_err(anyhow::Error::from)?;
         w.flush().await.map_err(anyhow::Error::from)?;
         let r = self.reply(DATA_TIMEOUT).await?;
         if !r.positive() {
@@ -194,22 +193,22 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Conn<S> {
     }
 }
 
-/// Dot-stuffs the message for DATA, normalizes bare LF and CR to CRLF and adds the final dot.
-pub fn dot_stuff(data: &[u8]) -> Vec<u8> {
+/// Dot-stuffs the message for DATA and adds the final dot. Lines must end in CRLF: a bare CR or
+/// LF is refused rather than turned into a line break, which would let text that was one header
+/// line (a Message-ID copied from received mail, say) become two.
+pub fn dot_stuff(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     let mut out = Vec::with_capacity(data.len() + data.len() / 50 + 5);
     let mut line_start = true;
     let mut i = 0;
     while i < data.len() {
-        let b = data[i];
-        match b {
-            b'\r' | b'\n' => {
+        match data[i] {
+            b'\r' if data.get(i + 1) == Some(&b'\n') => {
                 out.extend_from_slice(b"\r\n");
-                if b == b'\r' && data.get(i + 1) == Some(&b'\n') {
-                    i += 1;
-                }
                 line_start = true;
+                i += 1;
             }
-            _ => {
+            b'\r' | b'\n' => anyhow::bail!("the message has a line break that isn't CRLF"),
+            b => {
                 if line_start && b == b'.' {
                     out.push(b'.');
                 }
@@ -223,7 +222,7 @@ pub fn dot_stuff(data: &[u8]) -> Vec<u8> {
         out.extend_from_slice(b"\r\n");
     }
     out.extend_from_slice(b".\r\n");
-    out
+    Ok(out)
 }
 
 async fn tls_wrap(
@@ -250,7 +249,8 @@ pub async fn send(
     tokens: &dyn TokenSource,
     msg: &Message<'_>,
 ) -> Result<(), SendError> {
-    let tcp = tokio::time::timeout(TIMEOUT, TcpStream::connect((smtp.host.as_str(), smtp.port)))
+    let stuffed = dot_stuff(msg.data)?;
+    let tcp = tokio::time::timeout(TIMEOUT, crate::netguard::connect_tcp(&smtp.host, smtp.port))
         .await
         .map_err(|_| anyhow!("connection to {}:{} timed out", smtp.host, smtp.port))?
         .with_context(|| format!("cannot connect to {}:{}", smtp.host, smtp.port))?;
@@ -294,7 +294,7 @@ pub async fn send(
     }
     conn.hello().await?;
     conn.login(account, tokens).await?;
-    conn.transfer(msg).await
+    conn.transfer(msg, &stuffed).await
 }
 
 #[cfg(test)]
@@ -303,9 +303,18 @@ mod tests {
 
     #[test]
     fn dot_stuffing() {
-        assert_eq!(dot_stuff(b"a\r\n.b\r\n"), b"a\r\n..b\r\n.\r\n");
-        assert_eq!(dot_stuff(b".\nx"), b"..\r\nx\r\n.\r\n");
-        assert_eq!(dot_stuff(b""), b".\r\n");
-        assert_eq!(dot_stuff(b"a.b\r\n"), b"a.b\r\n.\r\n");
+        let ok = |d: &[u8]| dot_stuff(d).unwrap();
+        assert_eq!(ok(b"a\r\n.b\r\n"), b"a\r\n..b\r\n.\r\n");
+        assert_eq!(ok(b".\r\nx"), b"..\r\nx\r\n.\r\n");
+        assert_eq!(ok(b""), b".\r\n");
+        assert_eq!(ok(b"a.b\r\n"), b"a.b\r\n.\r\n");
+        for bad in [
+            &b".\nx"[..],
+            b"a\rb\r\n",
+            b"In-Reply-To: <x\rBcc: y>\r\n",
+            b"a\r",
+        ] {
+            assert!(dot_stuff(bad).is_err(), "{bad:?}");
+        }
     }
 }

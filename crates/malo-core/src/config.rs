@@ -270,6 +270,8 @@ impl Account {
                 },
                 prev,
             ) => {
+                // The refresh token and client secret are sent to the token URL.
+                crate::netguard::check_credential_url("the token URL", &token_url)?;
                 // The token and secret also stay with the provider they were issued by.
                 let (old_secret, old_refresh) = match prev {
                     Some(AccountAuth::OAuth2 {

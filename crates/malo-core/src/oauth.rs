@@ -109,8 +109,7 @@ impl TokenCache {
         TokenCache {
             cache: Mutex::new(HashMap::new()),
             on_rotate,
-            http: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
+            http: crate::netguard::http_client()
                 .timeout(Duration::from_secs(30))
                 .build()
                 .expect("http client"),
@@ -130,6 +129,7 @@ impl TokenCache {
         else {
             anyhow::bail!("account does not use OAuth2");
         };
+        crate::netguard::check_credential_url("the token URL", token_url)?;
         let mut client = BasicClient::new(ClientId::new(client_id.clone()))
             .set_auth_uri(AuthUrl::new(auth_url.clone())?)
             .set_token_uri(TokenUrl::new(token_url.clone())?);

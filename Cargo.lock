@@ -2822,6 +2822,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "unicode-normalization",
+ "url",
  "uuid",
  "webpki-roots 0.26.11",
  "zeroize",

@@ -11,6 +11,7 @@ pub mod index;
 pub mod layout;
 pub mod mailview;
 pub mod mime;
+pub mod netguard;
 pub mod oauth;
 pub mod purge;
 pub mod rebuild;

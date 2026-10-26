@@ -33,7 +33,8 @@ reqwest.workspace = true
 oauth2.workspace = true
 async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
 imap-proto = "0.16"
-opendal = { version = "0.54", default-features = false, features = ["services-fs", "services-s3", "services-gcs", "services-azblob", "services-webdav", "services-b2", "services-memory"] }
+opendal = { version = "0.54", default-features = false, features = ["services-fs", "services-s3", "services-gcs", "services-azblob", "services-webdav", "services-b2"] }
+url = "2"
 rusqlite = { version = "0.37", features = ["bundled-sqlcipher-vendored-openssl", "functions"] }
 mail-parser = "0.11"
 ammonia = "4"
@@ -49,3 +50,5 @@ fault-injection = []
 
 [dev-dependencies]
 tempfile = "3"
+# The in-memory service backs unit tests only; destinations can never use it.
+opendal = { version = "0.54", default-features = false, features = ["services-memory"] }

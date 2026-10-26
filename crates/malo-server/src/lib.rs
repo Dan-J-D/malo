@@ -279,6 +279,7 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<Running> {
         shutdown: tokio_util::sync::CancellationToken::new(),
         cfg: cfg.clone(),
     });
+    net::sync_setting(&state);
     scheduler::spawn(state.clone());
     if let Some((config, _, _)) = mail_tls {
         mail_listeners.spawn(state.clone(), config)?;

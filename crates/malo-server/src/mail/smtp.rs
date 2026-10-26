@@ -174,10 +174,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
         Ok(())
     }
 
-    /// Reads the message after DATA (dot-unstuffed). None if it was too large.
-    async fn data(&mut self) -> anyhow::Result<Option<Vec<u8>>> {
+    /// Reads the message after DATA (dot-unstuffed), or the reply refusing it.
+    async fn data(&mut self) -> anyhow::Result<Result<Vec<u8>, &'static str>> {
         let mut msg = Vec::new();
         let mut too_large = false;
+        let mut bare_cr = false;
         loop {
             let line = tokio::time::timeout(IDLE, read_line(&mut self.io, 1 << 20))
                 .await
@@ -189,6 +190,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
                 break;
             }
             let content = bare.strip_prefix(b".").unwrap_or(bare);
+            // RFC 5321 doesn't allow a CR that doesn't end a line.
+            bare_cr |= content.contains(&b'\r');
             if msg.len() + content.len() + 2 > MAX_MESSAGE {
                 too_large = true;
             }
@@ -197,7 +200,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
                 msg.extend_from_slice(b"\r\n");
             }
         }
-        Ok((!too_large).then_some(msg))
+        Ok(if too_large {
+            Err("552 5.3.4 Message too large")
+        } else if bare_cr {
+            Err("554 5.6.0 The message has a bare CR; lines must end in CRLF")
+        } else {
+            Ok(msg)
+        })
     }
 
     async fn relay(&mut self, data: Vec<u8>) -> anyhow::Result<String> {
@@ -332,8 +341,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
                     }
                     self.reply("354 End data with <CR><LF>.<CR><LF>").await?;
                     let reply = match self.data().await? {
-                        Some(data) => self.relay(data).await?,
-                        None => "552 5.3.4 Message too large".to_string(),
+                        Ok(data) => self.relay(data).await?,
+                        Err(refused) => refused.to_string(),
                     };
                     self.from = None;
                     self.to.clear();

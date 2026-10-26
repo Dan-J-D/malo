@@ -197,6 +197,156 @@ pub fn confine_fs_root(requested: Option<&str>, policy: &FsPolicy) -> anyhow::Re
 
 const MAX_PREFIX_BYTES: usize = 512;
 
+/// The OpenDAL options a destination may set, per service (with the aliases OpenDAL accepts).
+/// Everything else is refused: options that make the server use its own identity (an instance
+/// role, a VM service account, `role_arn`), read its own files, or that a future OpenDAL adds.
+fn allowed_options(scheme: Scheme) -> Option<&'static [&'static str]> {
+    Some(match scheme {
+        Scheme::S3 => &[
+            "root",
+            "bucket",
+            "aws_bucket",
+            "aws_bucket_name",
+            "bucket_name",
+            "endpoint",
+            "aws_endpoint",
+            "aws_endpoint_url",
+            "endpoint_url",
+            "region",
+            "aws_region",
+            "access_key_id",
+            "aws_access_key_id",
+            "secret_access_key",
+            "aws_secret_access_key",
+            "session_token",
+            "aws_session_token",
+            "aws_token",
+            "token",
+            "allow_anonymous",
+            "server_side_encryption",
+            "aws_server_side_encryption",
+            "server_side_encryption_aws_kms_key_id",
+            "aws_sse_kms_key_id",
+            "server_side_encryption_customer_algorithm",
+            "server_side_encryption_customer_key",
+            "aws_sse_customer_key_base64",
+            "server_side_encryption_customer_key_md5",
+            "default_storage_class",
+            "enable_virtual_host_style",
+            "aws_virtual_hosted_style_request",
+            "virtual_hosted_style_request",
+            "batch_max_operations",
+            "delete_max_size",
+            "disable_stat_with_override",
+            "checksum_algorithm",
+            "aws_checksum_algorithm",
+            "disable_write_with_if_match",
+            "enable_write_with_append",
+            "disable_list_objects_v2",
+            "enable_request_payer",
+            "aws_request_payer",
+            "request_payer",
+            "enable_versioning",
+            // Forced on anyway.
+            "disable_config_load",
+            "disable_ec2_metadata",
+        ],
+        Scheme::Gcs => &[
+            "root",
+            "bucket",
+            "google_bucket",
+            "google_bucket_name",
+            "bucket_name",
+            "endpoint",
+            "scope",
+            "credential",
+            "google_service_account_key",
+            "service_account_key",
+            "token",
+            "predefined_acl",
+            "default_storage_class",
+            "allow_anonymous",
+            "google_skip_signature",
+            "skip_signature",
+            // Forced on anyway.
+            "disable_config_load",
+            "disable_vm_metadata",
+        ],
+        Scheme::Azblob => &[
+            "root",
+            "container",
+            "azure_container_name",
+            "container_name",
+            "endpoint",
+            "azure_storage_endpoint",
+            "azure_endpoint",
+            "account_name",
+            "azure_storage_account_name",
+            "account_key",
+            "azure_storage_account_key",
+            "azure_storage_access_key",
+            "azure_storage_master_key",
+            "access_key",
+            "master_key",
+            "sas_token",
+            "azure_storage_sas_key",
+            "azure_storage_sas_token",
+            "sas_key",
+            "encryption_key",
+            "encryption_key_sha256",
+            "encryption_algorithm",
+            "batch_max_operations",
+        ],
+        Scheme::Webdav => &[
+            "root",
+            "endpoint",
+            "username",
+            "password",
+            "token",
+            "disable_copy",
+        ],
+        Scheme::B2 => &[
+            "root",
+            "bucket",
+            "bucket_id",
+            "application_key_id",
+            "application_key",
+        ],
+        Scheme::Fs => &["root"],
+        _ => return None,
+    })
+}
+
+/// Azure falls back to credentials from the server's environment and to the VM's managed
+/// identity when a destination has none of its own: it must bring a SAS token or a shared key.
+fn check_azure_credentials(dest: &Destination) -> anyhow::Result<()> {
+    let has = |keys: &[&str]| {
+        dest.options
+            .iter()
+            .any(|(k, v)| keys.contains(&k.to_ascii_lowercase().as_str()) && !v.trim().is_empty())
+    };
+    let sas = has(&[
+        "sas_token",
+        "azure_storage_sas_key",
+        "azure_storage_sas_token",
+        "sas_key",
+    ]);
+    let key = has(&[
+        "account_key",
+        "azure_storage_account_key",
+        "azure_storage_access_key",
+        "azure_storage_master_key",
+        "access_key",
+        "master_key",
+    ]);
+    let name = has(&["account_name", "azure_storage_account_name"]);
+    if sas || (key && name) {
+        Ok(())
+    } else {
+        bail!("an Azure destination needs a SAS token, or an account name and account key")
+    }
+}
+
 /// Rejects destination settings that could reach outside their storage area: `..` in the prefix or
 /// any `*root` option, and options that make the server read one of its own files
 /// (`credential_path`, `config_file`, …).
@@ -210,10 +360,23 @@ pub fn validate_destination(dest: &Destination) -> anyhow::Result<()> {
     if dest.root.split('/').any(|seg| seg.len() > 255) {
         bail!("a folder name in the destination prefix is too long (max. 255 bytes)");
     }
+    let scheme = Scheme::from_str(&dest.scheme)
+        .map_err(|e| anyhow!("unknown scheme {}: {e}", dest.scheme))?;
+    let allowed = allowed_options(scheme)
+        .ok_or_else(|| anyhow!("{} can't be used as a destination", dest.scheme))?;
+    if scheme == Scheme::Azblob {
+        check_azure_credentials(dest)?;
+    }
     for (k, v) in &dest.options {
         let key = k.to_ascii_lowercase();
         if key.ends_with("_path") || key.ends_with("_file") || key == "path" || key == "file" {
             bail!("option '{k}' would read a file on the server; paste its content instead (e.g. 'credential')");
+        }
+        if !allowed.contains(&key.as_str()) {
+            bail!(
+                "option '{k}' isn't supported for {} destinations",
+                dest.scheme
+            );
         }
         if key.ends_with("root") && !dest.scheme.eq_ignore_ascii_case("fs") {
             layout::check_rel_path(v.trim_start_matches('/'))
@@ -223,23 +386,44 @@ pub fn validate_destination(dest: &Destination) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A destination's options as the operator gets them. Never pick up the server's own config
+/// files, environment (~/.aws/config, gcloud ADC…) or the identity of the machine it runs on (EC2
+/// instance role, GCE service account): a destination only uses the credentials its owner entered.
+fn forced_options(
+    scheme: Scheme,
+    options: impl IntoIterator<Item = (String, String)>,
+) -> HashMap<String, String> {
+    let mut opts: HashMap<String, String> = options
+        .into_iter()
+        .map(|(k, v)| (k.to_ascii_lowercase(), v))
+        .collect();
+    match scheme {
+        Scheme::S3 => {
+            opts.insert("disable_config_load".into(), "true".into());
+            opts.insert("disable_ec2_metadata".into(), "true".into());
+        }
+        Scheme::Gcs => {
+            opts.insert("disable_config_load".into(), "true".into());
+            opts.insert("disable_vm_metadata".into(), "true".into());
+        }
+        _ => {}
+    }
+    opts
+}
+
 impl Store {
     pub fn open(dest: &Destination, archive_key: &Key, fs: &FsPolicy) -> anyhow::Result<Store> {
         let scheme = Scheme::from_str(&dest.scheme)
             .map_err(|e| anyhow!("unknown scheme {}: {e}", dest.scheme))?;
         validate_destination(dest)?;
-        let mut opts: HashMap<String, String> = dest.options.clone().into_iter().collect();
-        // Never pick up the server's own config files or environment (~/.aws/config, gcloud ADC…):
-        // a destination only uses the credentials its owner entered.
-        if matches!(scheme, Scheme::S3 | Scheme::Gcs) {
-            opts.insert("disable_config_load".into(), "true".into());
-        }
+        let mut opts = forced_options(scheme, dest.options.clone());
         if scheme == Scheme::Fs {
             let root = confine_fs_root(opts.get("root").map(String::as_str), fs)?;
             opts.insert("root".into(), root.to_string_lossy().into_owned());
         }
-        // Own HTTP client per operator: OpenDAL's global client is bound to the first tokio runtime that used it.
-        let http = reqwest::Client::builder()
+        // Own HTTP client per operator: OpenDAL's global client is bound to the first tokio runtime
+        // that used it. It doesn't follow redirects and checks the addresses it connects to.
+        let http = crate::netguard::http_client()
             .connect_timeout(std::time::Duration::from_secs(30))
             .build()
             .context("http client")?;
@@ -1059,9 +1243,16 @@ mod tests {
         }
     }
 
+    fn s3_dest() -> Destination {
+        Destination {
+            scheme: "s3".into(),
+            ..dest(false)
+        }
+    }
+
     #[test]
     fn destination_validation() {
-        let mut d = dest(false);
+        let mut d = s3_dest();
         for root in ["..", "a/../..", "./x", "C:/x", "a\\b"] {
             d.root = root.into();
             assert!(
@@ -1072,14 +1263,118 @@ mod tests {
         d.root = "malo/backups".into();
         assert!(validate_destination(&d).is_ok());
         for key in ["credential_path", "config_file", "CREDENTIAL_PATH", "path"] {
-            let mut d = dest(false);
+            let mut d = s3_dest();
             d.options.insert(key.into(), "/etc/passwd".into());
             assert!(validate_destination(&d).is_err(), "option {key} accepted");
         }
-        let mut d = dest(false);
-        d.scheme = "s3".into();
+        let mut d = s3_dest();
         d.options.insert("root".into(), "/a/../../b".into());
         assert!(validate_destination(&d).is_err());
+    }
+
+    #[test]
+    fn destination_options_are_allowlisted() {
+        let with = |scheme: &str, opts: &[(&str, &str)]| Destination {
+            scheme: scheme.into(),
+            options: opts
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..dest(false)
+        };
+        let ok = [
+            with(
+                "s3",
+                &[
+                    ("bucket", "b"),
+                    ("endpoint", "https://s3.example.com"),
+                    ("Region", "x"),
+                ],
+            ),
+            with(
+                "s3",
+                &[("aws_access_key_id", "a"), ("aws_secret_access_key", "s")],
+            ),
+            with("gcs", &[("bucket", "b"), ("credential", "e30=")]),
+            with("azblob", &[("container", "c"), ("sas_token", "sv=1")]),
+            with("azblob", &[("account_name", "n"), ("account_key", "a2V5")]),
+            with(
+                "webdav",
+                &[("endpoint", "https://dav.example.com"), ("password", "p")],
+            ),
+            with("b2", &[("bucket", "b"), ("application_key", "k")]),
+            with("fs", &[("root", "/backups")]),
+        ];
+        for d in ok {
+            assert!(
+                validate_destination(&d).is_ok(),
+                "{} {:?}",
+                d.scheme,
+                d.options
+            );
+        }
+        let refused = [
+            // The server's own identity.
+            with("s3", &[("role_arn", "arn:aws:iam::1:role/x")]),
+            with("s3", &[("external_id", "x")]),
+            with("s3", &[("role_session_name", "x")]),
+            with("gcs", &[("service_account", "default")]),
+            with(
+                "gcs",
+                &[("google_application_credentials", "/etc/key.json")],
+            ),
+            with("azblob", &[("container", "c")]),
+            with("azblob", &[("account_key", "a2V5")]),
+            // Unknown options, a server path for fs, unusable services.
+            with("s3", &[("something_new", "x")]),
+            with("fs", &[("atomic_write_dir", "/tmp")]),
+            with("memory", &[]),
+            with("ftp", &[]),
+        ];
+        for d in refused {
+            assert!(
+                validate_destination(&d).is_err(),
+                "{} {:?}",
+                d.scheme,
+                d.options
+            );
+        }
+    }
+
+    #[test]
+    fn store_open_forces_own_credentials_only() {
+        let k = crypto::random_key();
+        let fs = FsPolicy {
+            user_root: std::env::temp_dir(),
+            allowed_mounts: vec![],
+            user_id: "u".into(),
+            owner_dir: None,
+        };
+        let d = Destination {
+            options: [
+                ("bucket".to_string(), "b".to_string()),
+                ("region".to_string(), "us-east-1".to_string()),
+                ("disable_ec2_metadata".to_string(), "false".to_string()),
+                ("disable_config_load".to_string(), "false".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            ..s3_dest()
+        };
+        let store = Store::open(&d, &k, &fs).unwrap();
+        let info = format!("{:?}", store.operator().info());
+        assert!(info.contains("s3"), "{info}");
+        // The forced settings are what the operator was built with, whatever the destination says.
+        let opts = forced_options(Scheme::S3, d.options.clone());
+        assert_eq!(opts["disable_ec2_metadata"], "true");
+        assert_eq!(opts["disable_config_load"], "true");
+        let gcs = forced_options(Scheme::Gcs, Vec::new());
+        assert_eq!(gcs["disable_vm_metadata"], "true");
+        assert_eq!(gcs["disable_config_load"], "true");
+        assert!(
+            Store::open(&dest(false), &k, &fs).is_err(),
+            "memory is refused"
+        );
     }
 
     #[tokio::test]

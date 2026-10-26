@@ -1760,6 +1760,7 @@ pub async fn admin_put_settings(
         }
     }
     state.db.set_admin_settings(&s)?;
+    crate::net::sync_setting(&state);
     auth::admin_audit(
         &state,
         &me.user.username,
