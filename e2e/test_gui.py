@@ -8,7 +8,12 @@ import time
 import uuid
 
 from selenium import webdriver
-from selenium.common.exceptions import NoSuchElementException, StaleElementReferenceException
+from selenium.common.exceptions import (
+    ElementClickInterceptedException,
+    ElementNotInteractableException,
+    NoSuchElementException,
+    StaleElementReferenceException,
+)
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.options import ArgOptions
 
@@ -105,13 +110,40 @@ def xp(d, path):
     return d.find_element(By.XPATH, path)
 
 
+class Clickable:
+    """An element whose click waits out a dialog still animating in, a toast passing over it, or
+    a scroll position that hides it."""
+
+    def __init__(self, el):
+        self.el = el
+
+    def click(self):
+        end = time.time() + 10
+        while True:
+            try:
+                return self.el.click()
+            except (ElementClickInterceptedException, ElementNotInteractableException):
+                if time.time() > end:
+                    raise
+                self.el.parent.execute_script("arguments[0].scrollIntoView({block: 'center'})", self.el)
+                time.sleep(0.2)
+
+    def __getattr__(self, name):
+        return getattr(self.el, name)
+
+
 def button(d, text):
-    return wait(lambda: xp(d, f"//button[normalize-space()='{text}' or contains(normalize-space(), '{text}')][not(@disabled)]"), what=f"button {text}")
+    return Clickable(wait(lambda: xp(d, f"//button[normalize-space()='{text}' or contains(normalize-space(), '{text}')][not(@disabled)]"), what=f"button {text}"))
+
+
+def titled(d, prefix):
+    """An icon button, found by the start of its tooltip."""
+    return Clickable(wait(lambda: xp(d, f"//button[starts-with(@title, '{prefix}')][not(@disabled)]"), what=f"button titled {prefix}"))
 
 
 def field(d, label, exact=False):
     cond = f"normalize-space(text()[1])='{label}'" if exact else f"contains(normalize-space(), '{label}')"
-    return wait(lambda: xp(d, f"//label[{cond}]//*[self::input or self::select or self::textarea]"), what=f"field {label}")
+    return Clickable(wait(lambda: xp(d, f"//label[{cond}]//*[self::input or self::select or self::textarea]"), what=f"field {label}"))
 
 
 def fill(d, label, value, exact=False):
@@ -219,38 +251,42 @@ def main():
 
         # Hidden Unicode is shown, not obeyed: the RLO subject can't pose as ".png".
         wait(lambda: "Invoice ⟨U+202E⟩gnp.exe" in text(d), timeout=90, what="revealed RLO in subject")
-        xp(d, "//tr[contains(., 'U+202E')]/td[2]").click()
+        xp(d, "//button[contains(., 'U+202E')]").click()
         wait(lambda: "text-direction characters" in text(d), what="hidden-character warnings")
         body = text(d)
         assert "invoice⟨U+202E⟩fdp.exe" in body, "attachment name not revealed"
         assert "imitate other domains" in body, "punycode sender not flagged"
         assert "Über 日本 😀" in body, "normal Unicode must render unchanged"
         d.execute_script("window.confirm = () => true")
-        button(d, "Save as").click()
+        titled(d, "Save as").click()
         wait(lambda: os.path.exists(f"{SHOTS}/invoicefdp.exe"), what="saved without the RLO")
         shot(d, "06a-unicode")
         d.execute_script("history.back()")
 
         # Safe viewer: plain text by default, sanitized HTML in a sandboxed iframe on request.
-        xp(d, "//tr[contains(., 'HTML trap')]/td[2]").click()
+        xp(d, "//button[contains(., 'HTML trap')]").click()
         wait(lambda: "Display name" in text(d), what="phishing warning")
         body = text(d)
-        assert "Executable" in body and "invoice.pdf.exe" in body, "attachment warnings missing"
+        assert "invoice.pdf.exe" in body, "attachment missing"
+        assert xp(d, "//button[contains(., 'invoice.pdf.exe')][contains(@class, 'border-bad')]"), "attachment not flagged"
         field(d, "Show HTML").click()
-        frame = wait(lambda: xp(d, "//iframe[@title='Message content']"), what="iframe")
+        frame = wait(lambda: xp(d, "//iframe[starts-with(@title, 'Message')]"), what="iframe")
         assert frame.get_attribute("sandbox") == "", f"iframe sandbox is {frame.get_attribute('sandbox')!r}"
         srcdoc = frame.get_attribute("srcdoc") or ""
         assert "<script" not in srcdoc.lower() and "onclick" not in srcdoc.lower(), "unsanitized HTML reached the viewer"
         assert "tracker.example" not in srcdoc, "remote image URL inside the iframe"
         assert "href=" not in srcdoc.lower(), "live link inside the iframe (links are only opened via confirmation)"
         assert "default-src 'none'" in srcdoc, "inner CSP missing"
-        assert "remote image(s) blocked" in text(d)
-        xp(d, "//summary[contains(., 'Links in this message')]").click()
+        assert "1 remote image blocked" in text(d), "blocked remote image not reported"
+        links = wait(lambda: [e for e in d.find_elements(By.XPATH, "//summary[starts-with(normalize-space(), 'Links (')]") if e.is_displayed()], what="links list")
+        d.execute_script("arguments[0].parentElement.open = true", links[0])
         assert "https://evil.example/login" in text(d), "real link target not shown"
         shot(d, "06-viewer")
-        d.execute_script("window.confirm = () => true")
-        button(d, "Save as").click()
+        # Saving asks first, with the warnings.
+        d.execute_script("window.confirm = (m) => { window.lastConfirm = m; return true }")
+        titled(d, "Save as").click()
         wait(lambda: os.path.exists(f"{SHOTS}/invoice.pdf.exe"), what="attachment saved")
+        assert "Executable" in (d.execute_script("return window.lastConfirm") or ""), "no warning before saving"
         with open(f"{SHOTS}/invoice.pdf.exe", "rb") as f:
             assert f.read(2) == b"MZ"
 
@@ -277,7 +313,7 @@ def main():
         wait(lambda: "GUI OAuth mail" in text(d) and "Step 2 of 3" not in text(d), what="oauth account list")
         d.execute_script("location.hash = '#/activity'")
         wait(lambda: "Via OAuth" in text(d), timeout=90, what="oauth message discovered")
-        wait(lambda: xp(d, "//tr[contains(., 'Via OAuth')]//span[contains(@class,'pill') and normalize-space()='verified']"), timeout=90, what="oauth message verified")
+        wait(lambda: xp(d, "//button[contains(., 'Via OAuth')]//span[contains(@class,'pill') and normalize-space()='verified']"), timeout=90, what="oauth message verified")
 
         # Browse shows both, new-since-last-visit filter works.
         d.execute_script("location.hash = '#/browse'")
@@ -322,7 +358,7 @@ def main():
         fill(d, "to confirm", "delete owner")
         final.click()
         wait(lambda: "last administrator" in text(d), what="last-admin refusal")
-        button(d, "Back").click()
+        Clickable(xp(d, "//button[normalize-space()='Back']")).click()  # not "Back up now"
         button(d, "Cancel").click()
 
         # Remote mode: switch to the Docker server, confirm its fingerprint (TOFU), set it up.
