@@ -29,10 +29,29 @@ pub struct OAuthRequest {
 
 #[derive(Serialize)]
 pub struct OAuthResult {
+    /// A placeholder for the token (see `held`).
     pub refresh_token: String,
 }
 
 const PAGE: &str = "<!doctype html><meta charset=utf-8><title>Malo</title><body style=\"font-family:sans-serif;padding:3em\"><h2>Malo is authorized.</h2><p>You can close this tab and return to Malo.</p>";
+
+/// A provider URL (which can come from the server's presets): https, or http to this machine for
+/// local test providers. Never another scheme, which the system would hand to whatever program
+/// claims it.
+fn provider_url(what: &str, url: &str) -> anyhow::Result<url::Url> {
+    let u = url::Url::parse(url).with_context(|| format!("the {what} isn't a valid URL"))?;
+    let loopback = match u.host() {
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
+    match u.scheme() {
+        "https" => Ok(u),
+        "http" if loopback => Ok(u),
+        _ => bail!("the {what} must be an https address"),
+    }
+}
 
 fn query_param(target: &str, key: &str) -> Option<String> {
     let url = url::Url::parse(&format!("http://localhost{target}")).ok()?;
@@ -41,7 +60,10 @@ fn query_param(target: &str, key: &str) -> Option<String> {
         .map(|(_, v)| v.into_owned())
 }
 
-pub async fn authorize(app: &AppHandle, req: OAuthRequest) -> anyhow::Result<OAuthResult> {
+/// Signs in through the browser; returns the refresh token.
+pub async fn authorize(app: &AppHandle, req: OAuthRequest) -> anyhow::Result<String> {
+    provider_url("authorization URL", &req.auth_url)?;
+    provider_url("token URL", &req.token_url)?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     let redirect = format!("http://127.0.0.1:{port}/callback");
@@ -69,6 +91,7 @@ pub async fn authorize(app: &AppHandle, req: OAuthRequest) -> anyhow::Result<OAu
         auth = auth.add_extra_param("login_hint", h.clone());
     }
     let (url, csrf) = auth.url();
+    let url = provider_url("authorization URL", url.as_str())?;
     app.opener()
         .open_url(url.as_str(), None::<&str>)
         .context("cannot open the browser")?;
@@ -84,14 +107,17 @@ pub async fn authorize(app: &AppHandle, req: OAuthRequest) -> anyhow::Result<OAu
                 let _ = sock.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").await;
                 continue;
             }
+            // Any page in the browser can call this address: only the callback of this sign-in
+            // (its state) is answered as such, others are ignored and the sign-in goes on.
+            if query_param(&target, "state").as_deref() != Some(csrf.secret().as_str()) {
+                let _ = sock.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                continue;
+            }
             let body = PAGE;
             let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
             let _ = sock.write_all(resp.as_bytes()).await;
             if let Some(e) = query_param(&target, "error") {
                 bail!("authorization denied: {e} {}", query_param(&target, "error_description").unwrap_or_default());
-            }
-            if query_param(&target, "state").as_deref() != Some(csrf.secret().as_str()) {
-                bail!("state mismatch in OAuth callback");
             }
             return query_param(&target, "code").ok_or_else(|| anyhow!("no authorization code in callback"));
         }
@@ -111,7 +137,32 @@ pub async fn authorize(app: &AppHandle, req: OAuthRequest) -> anyhow::Result<OAu
     let refresh = token.refresh_token().ok_or_else(|| {
         anyhow!("the provider did not return a refresh token (offline access not granted)")
     })?;
-    Ok(OAuthResult {
-        refresh_token: refresh.secret().clone(),
-    })
+    Ok(refresh.secret().clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_url;
+
+    #[test]
+    fn provider_urls() {
+        for ok in [
+            "https://accounts.google.com/o/oauth2/v2/auth",
+            "http://localhost:18080/default/authorize",
+            "http://127.0.0.1:9/x",
+            "http://[::1]/x",
+        ] {
+            assert!(provider_url("URL", ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://example.com/authorize",
+            "file:///etc/passwd",
+            "smb://evil.example/share",
+            "ms-settings:privacy",
+            "javascript:alert(1)",
+            "not a url",
+        ] {
+            assert!(provider_url("URL", bad).is_err(), "{bad}");
+        }
+    }
 }

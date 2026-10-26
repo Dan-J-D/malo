@@ -373,6 +373,30 @@ def main():
         wait(lambda: "invalid username or password" in text(d), what="deleted user can't log in")
         shot(d, "10-account-deleted")
 
+        # The remote server gets a new certificate (run.sh replaces it): the app warns instead of
+        # offering a "first connection", and keeps the old pin until it is deliberately forgotten.
+        open("/tmp/saved/rotate-remote", "w").close()
+        wait(lambda: os.path.exists("/tmp/saved/remote-rotated"), timeout=60, what="new remote certificate")
+        button(d, "Change server").click()
+        wait(lambda: "Connect to a Malo server" in text(d), what="connect screen")
+        fill(d, "Server URL", os.environ["MALO_REMOTE_URL"])
+        button(d, "Check server").click()
+        wait(lambda: "certificate changed" in text(d), what="certificate warning")
+        assert "First connection" not in text(d), "a changed certificate must not look like a first connection"
+        assert os.environ["MALO_REMOTE_FP"] in text(d), "the trusted fingerprint is shown"
+        shot(d, "11-certificate-changed")
+        button(d, "Keep the trusted certificate").click()
+        wait(lambda: "Connect to a Malo server" in text(d), what="connect screen after keeping the pin")
+        # The pin wasn't replaced: checking again warns again.
+        button(d, "Check server").click()
+        wait(lambda: "certificate changed" in text(d), what="certificate warning again")
+        xp(d, "//summary[contains(., 'I replaced the certificate')]").click()
+        forget = xp(d, "//button[normalize-space()='Forget the old certificate and connect']")
+        assert not forget.is_enabled(), "forgetting the old certificate needs the confirmation"
+        field(d, "The new fingerprint matches the server log").click()
+        forget.click()
+        wait(lambda: "Create the administrator" in text(d), what="new remote server's setup")
+
         # Reset the local server (two steps), then the bundled server starts from scratch.
         button(d, "Change server").click()
         wait(lambda: "Reset local server" in text(d), what="local data panel")
@@ -382,7 +406,7 @@ def main():
         fill(d, "to confirm", "DELETE")
         button(d, "Delete local server data").click()
         wait(lambda: "No local server data yet" in text(d), what="local data gone")
-        shot(d, "11-local-reset")
+        shot(d, "12-local-reset")
         button(d, "Use local server").click()
         wait(lambda: "Create the administrator" in text(d), timeout=60, what="fresh local setup")
         print("GUI end-to-end test passed")

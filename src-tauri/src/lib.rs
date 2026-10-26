@@ -1,6 +1,7 @@
 //! Malo desktop app. The Rust side owns the HTTP/WS client and the session token; the Svelte UI only
 //! calls the commands below. The token never reaches JavaScript.
 
+mod held;
 mod net;
 mod oauth;
 mod sidecar;
@@ -54,6 +55,7 @@ pub struct AppState {
     events: Mutex<Option<tokio::task::AbortHandle>>,
     sidecar: Mutex<Option<sidecar::Sidecar>>,
     tray_mode: AtomicBool,
+    held: held::Held,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -191,26 +193,53 @@ async fn probe_server(url: String) -> CmdResult<Probe> {
     })
 }
 
+/// The error for a server whose certificate isn't the pinned one any more: `409|cert_changed|`
+/// and the details as JSON (`url`, `old`, `new`; `new` is null for a publicly trusted one).
+fn cert_changed(url: &str, old: &str, new: Option<&str>) -> String {
+    let details = serde_json::json!({ "url": url, "old": old, "new": new });
+    format!("409|cert_changed|{details}")
+}
+
 /// Connects to a remote server, pinning the confirmed fingerprint (or none for public certificates).
+/// The pin of the server connected to before is only replaced with `replace_pin`: a changed
+/// certificate is what an interception looks like, so the app asks first.
 #[tauri::command]
 async fn connect_remote(
     app: AppHandle,
     state: State<'_, AppState>,
     url: String,
     fingerprint: Option<String>,
+    replace_pin: Option<bool>,
 ) -> CmdResult<ServerStatus> {
     let url = normalize_url(&url)?;
+    let fingerprint = fingerprint.map(|f| net::normalize(&f));
+    let prefs = load_prefs(&app);
+    let pinned = prefs
+        .fingerprint
+        .as_deref()
+        .filter(|_| prefs.url.as_deref() == Some(&url))
+        .map(net::normalize);
+    if let Some(old) = &pinned {
+        if fingerprint.as_ref() != Some(old) && !replace_pin.unwrap_or(false) {
+            return Err(cert_changed(&url, old, fingerprint.as_deref()));
+        }
+    }
     let http = net::http_client(net::tls_config(fingerprint.as_deref()));
-    let status: ServerStatus = check(
-        http.get(format!("{url}/status"))
-            .send()
-            .await
-            .map_err(err)?,
-    )
-    .await?
-    .json()
-    .await
-    .map_err(err)?;
+    let sent = match http.get(format!("{url}/status")).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            // With a pin, tell a changed certificate apart from a server that's just unreachable.
+            if let Some(pin) = &fingerprint {
+                if let Ok(p) = probe_server(url.clone()).await {
+                    if p.fingerprint.as_ref() != Some(pin) {
+                        return Err(cert_changed(&url, pin, p.fingerprint.as_deref()));
+                    }
+                }
+            }
+            return Err(net_err(e));
+        }
+    };
+    let status: ServerStatus = check(sent).await?.json().await.map_err(err)?;
     stop_events(&state);
     *state.conn.lock().unwrap() = Some(Conn {
         base: url.clone(),
@@ -301,6 +330,7 @@ fn set_tray_mode(app: AppHandle, state: State<'_, AppState>, enabled: bool) -> C
 #[tauri::command]
 fn disconnect(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
     stop_events(&state);
+    state.held.clear();
     *state.conn.lock().unwrap() = None;
     let mut p = load_prefs(&app);
     p.mode = None;
@@ -464,6 +494,7 @@ async fn logout(state: State<'_, AppState>, lock: bool) -> CmdResult<()> {
     let path = if lock { "/auth/lock" } else { "/auth/logout" };
     let _ = request(&c, reqwest::Method::POST, path).send().await;
     stop_events(&state);
+    state.held.clear();
     if let Some(cur) = state.conn.lock().unwrap().as_mut() {
         cur.token = None;
     }
@@ -500,7 +531,8 @@ async fn api(
     let c = conn(&state)?;
     let m = reqwest::Method::from_bytes(method.to_uppercase().as_bytes()).map_err(err)?;
     let mut r = request(&c, m, &path);
-    if let Some(b) = body {
+    if let Some(mut b) = body {
+        state.held.release(&mut b);
         r = r.json(&b);
     }
     let resp = check(r.send().await.map_err(net_err)?).await?;
@@ -586,7 +618,6 @@ async fn subscribe_events(
 
 // ───────────────────────────── files ─────────────────────────────
 
-/// Native "Save as…" dialog. `MALO_AUTOSAVE_DIR` skips it (headless end-to-end tests).
 /// Zero-width, bidi-override and other invisible characters (same set as malo-core's layout).
 fn is_invisible(c: char) -> bool {
     matches!(c,
@@ -626,10 +657,21 @@ fn dialog_dir(app: &AppHandle) -> Option<PathBuf> {
     paths.document_dir().or_else(|_| paths.home_dir()).ok()
 }
 
+/// A setting for the headless end-to-end tests (`MALO_AUTOSAVE_DIR`, `MALO_AUTOPICK_FILE`):
+/// only debug builds read it, so a release can't be told to skip its file dialogs.
+fn test_hook(name: &str) -> Option<PathBuf> {
+    if cfg!(debug_assertions) {
+        std::env::var_os(name).map(PathBuf::from)
+    } else {
+        None
+    }
+}
+
+/// Native "Save as…" dialog. `MALO_AUTOSAVE_DIR` skips it (see [`test_hook`]).
 fn save_target(app: &AppHandle, suggested: &str) -> Option<PathBuf> {
     let suggested = safe_file_name(suggested);
-    if let Ok(dir) = std::env::var("MALO_AUTOSAVE_DIR") {
-        return Some(PathBuf::from(dir).join(&suggested));
+    if let Some(dir) = test_hook("MALO_AUTOSAVE_DIR") {
+        return Some(dir.join(&suggested));
     }
     let mut dialog = app.dialog().file().set_file_name(&suggested);
     if let Some(dir) = dialog_dir(app) {
@@ -647,12 +689,25 @@ async fn download_to(
     let Some(target) = save_target(app, suggested) else {
         return Ok(None);
     };
-    fetch_to_file(state, path, &target).await?;
+    // The dialog already asked whether to replace an existing file.
+    let tmp = fetch_to_temp(state, path, &target).await?;
+    let placed = std::fs::rename(&tmp, &target);
+    if placed.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    placed.map_err(err)?;
     Ok(Some(target.display().to_string()))
 }
 
-/// Streams a server response into `target` (through a `.part` file, renamed when complete).
-async fn fetch_to_file(state: &AppState, path: &str, target: &std::path::Path) -> CmdResult<()> {
+/// Streams a server response into a new hidden file next to `target`, with a random name: it
+/// can't be an existing file, or a link someone placed to make the download land elsewhere.
+async fn fetch_to_temp(
+    state: &AppState,
+    path: &str,
+    target: &std::path::Path,
+) -> CmdResult<PathBuf> {
+    use rand::RngCore;
+    use tokio::io::AsyncWriteExt;
     let c = conn(state)?;
     let resp = check(
         request(&c, reqwest::Method::GET, path)
@@ -661,18 +716,40 @@ async fn fetch_to_file(state: &AppState, path: &str, target: &std::path::Path) -
             .map_err(err)?,
     )
     .await?;
-    let tmp = target.with_extension("part");
-    {
-        use tokio::io::AsyncWriteExt;
-        let mut f = tokio::fs::File::create(&tmp).await.map_err(err)?;
+    let dir = target.parent().ok_or("no folder to save into")?;
+    let mut rnd = [0u8; 8];
+    rand::rngs::OsRng.fill_bytes(&mut rnd);
+    let tmp = dir.join(format!(".malo-{}.part", hex::encode(rnd)));
+    let mut f = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .await
+        .map_err(err)?;
+    let written = async {
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             f.write_all(&chunk.map_err(err)?).await.map_err(err)?;
         }
-        f.flush().await.map_err(err)?;
+        f.flush().await.map_err(err)
     }
-    tokio::fs::rename(&tmp, target).await.map_err(err)?;
-    Ok(())
+    .await;
+    if let Err(e) = written {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
+    }
+    Ok(tmp)
+}
+
+/// Copies a finished download to `target` if nothing has that name (checked and claimed in one
+/// step, so nothing existing is ever overwritten or followed).
+fn place_new(tmp: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)?;
+    std::io::copy(&mut std::fs::File::open(tmp)?, &mut out)?;
+    out.sync_all()
 }
 
 /// "Save as…" for an attachment. Never opened automatically.
@@ -718,9 +795,9 @@ async fn save_raw_many(
     state: State<'_, AppState>,
     message_ids: Vec<i64>,
 ) -> CmdResult<Option<(String, u32)>> {
-    let dir = match std::env::var("MALO_AUTOSAVE_DIR") {
-        Ok(d) => PathBuf::from(d),
-        Err(_) => {
+    let dir = match test_hook("MALO_AUTOSAVE_DIR") {
+        Some(d) => d,
+        None => {
             let mut dialog = app.dialog().file();
             if let Some(d) = dialog_dir(&app) {
                 dialog = dialog.set_directory(d);
@@ -736,13 +813,25 @@ async fn save_raw_many(
     };
     let mut saved = 0u32;
     for id in message_ids {
-        let mut target = dir.join(format!("message-{id}.eml"));
-        let mut n = 1;
-        while target.exists() {
-            target = dir.join(format!("message-{id}-{n}.eml"));
-            n += 1;
+        let first = dir.join(format!("message-{id}.eml"));
+        let saved_one = async {
+            let tmp = fetch_to_temp(&state, &format!("/messages/{id}/raw"), &first).await?;
+            let mut n = 0u32;
+            let placed = loop {
+                let target = match n {
+                    0 => first.clone(),
+                    n => dir.join(format!("message-{id}-{n}.eml")),
+                };
+                match place_new(&tmp, &target) {
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n < 10_000 => n += 1,
+                    res => break res,
+                }
+            };
+            let _ = std::fs::remove_file(&tmp);
+            placed.map_err(err)
         }
-        if let Err(e) = fetch_to_file(&state, &format!("/messages/{id}/raw"), &target).await {
+        .await;
+        if let Err(e) = saved_one {
             return Err(format!("saved {saved} message(s), then: {e}"));
         }
         saved += 1;
@@ -830,10 +919,13 @@ async fn save_recovery_kit(
 }
 
 #[tauri::command]
-async fn pick_recovery_kit(app: AppHandle) -> CmdResult<Option<RecoveryKitFile>> {
-    // `MALO_AUTOPICK_FILE` skips the dialog (headless end-to-end tests).
-    let picked = match std::env::var_os("MALO_AUTOPICK_FILE") {
-        Some(p) => Some(PathBuf::from(p)),
+async fn pick_recovery_kit(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<Option<RecoveryKitFile>> {
+    // `MALO_AUTOPICK_FILE` skips the dialog (see `test_hook`).
+    let picked = match test_hook("MALO_AUTOPICK_FILE") {
+        Some(p) => Some(p),
         None => {
             let mut dialog = app.dialog().file().add_filter("Recovery kit", &["json"]);
             if let Some(dir) = dialog_dir(&app) {
@@ -845,8 +937,12 @@ async fn pick_recovery_kit(app: AppHandle) -> CmdResult<Option<RecoveryKitFile>>
     let Some(path) = picked else {
         return Ok(None);
     };
-    let kit: RecoveryKitFile = serde_json::from_slice(&std::fs::read(path).map_err(err)?)
+    let mut kit: RecoveryKitFile = serde_json::from_slice(&std::fs::read(path).map_err(err)?)
         .map_err(|_| "not a Malo recovery kit".to_string())?;
+    // A plain kit holds the archive key in the clear: the UI only gets a placeholder for it.
+    if let RecoveryKitFile::Plain(k) = &mut kit {
+        k.archive_key = state.held.hold(std::mem::take(&mut k.archive_key));
+    }
     let format = match &kit {
         RecoveryKitFile::Sealed(k) => k.format.as_str(),
         RecoveryKitFile::Plain(k) => k.format.as_str(),
@@ -870,11 +966,16 @@ fn open_external(app: AppHandle, url: String) -> CmdResult<()> {
 #[tauri::command]
 async fn oauth_authorize(
     app: AppHandle,
+    state: State<'_, AppState>,
     req: oauth::OAuthRequest,
 ) -> CmdResult<oauth::OAuthResult> {
-    oauth::authorize(&app, req)
+    let token = oauth::authorize(&app, req)
         .await
-        .map_err(|e| format!("{e:#}"))
+        .map_err(|e| format!("{e:#}"))?;
+    // The UI saves the account with a placeholder; the token goes to the server from here.
+    Ok(oauth::OAuthResult {
+        refresh_token: state.held.hold(token),
+    })
 }
 
 pub fn run() {
@@ -886,7 +987,6 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_shell::init())
         .manage(AppState::default())
         .setup(|app| {
             let prefs = load_prefs(app.handle());
@@ -977,6 +1077,30 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saving_never_overwrites_or_follows_links() {
+        let dir = std::env::temp_dir().join(format!("malo-place-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = dir.join(".malo-x.part");
+        std::fs::write(&tmp, b"new").unwrap();
+        let existing = dir.join("message-1.eml");
+        std::fs::write(&existing, b"old").unwrap();
+        let e = place_new(&tmp, &existing).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&existing).unwrap(), b"old");
+        #[cfg(unix)]
+        {
+            let victim = dir.join("victim");
+            std::os::unix::fs::symlink(&victim, dir.join("message-2.eml")).unwrap();
+            assert!(place_new(&tmp, &dir.join("message-2.eml")).is_err());
+            assert!(!victim.exists(), "a link isn't followed");
+        }
+        place_new(&tmp, &dir.join("message-3.eml")).unwrap();
+        assert_eq!(std::fs::read(dir.join("message-3.eml")).unwrap(), b"new");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn file_names_cannot_escape() {

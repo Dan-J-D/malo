@@ -27,6 +27,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 rand.workspace = true
 hex.workspace = true
+zeroize.workspace = true
 sha2.workspace = true
 url = "2"
 rustls.workspace = true
@@ -37,4 +38,3 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
-tauri-plugin-shell = "2"

@@ -1,5 +1,5 @@
 // Global UI state (Svelte 5 runes) fed by REST calls and the live event stream.
-import { api, app, ApiError } from './api/client';
+import { api, app, ApiError, type CertChange } from './api/client';
 import type * as T from './api/types';
 
 export type Phase = 'boot' | 'connect' | 'login' | 'app';
@@ -12,6 +12,8 @@ export const session = $state({
   url: '' as string,
   setupToken: null as string | null,
   lockedReason: null as string | null,
+  /** The pinned server presented another certificate: Connect warns before anything else. */
+  certChanged: null as CertChange | null,
 });
 
 export const live = $state({

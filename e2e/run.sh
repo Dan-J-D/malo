@@ -13,6 +13,14 @@ trap 'docker logs malo-e2e-remote 2>&1 | tail -15 > e2e/out/remote-server.log; d
 for _ in $(seq 1 30); do docker logs malo-e2e-remote 2>&1 | grep -q "setup token" && break; sleep 0.5; done
 REMOTE_TOKEN=$(docker logs malo-e2e-remote 2>&1 | sed -n 's/.*setup token \([0-9a-f]*\).*/\1/p' | head -1)
 REMOTE_FP=$(docker logs malo-e2e-remote 2>&1 | sed -n 's/.*"fingerprint":"\([0-9A-F:]*\)".*/\1/p' | head -1)
+# When the test asks, the remote server starts over with a new certificate (same address).
+(
+  while [ ! -f e2e/out/rotate-remote ]; do sleep 0.5; done
+  docker rm -fv malo-e2e-remote >/dev/null 2>&1
+  docker run -d --name malo-e2e-remote -p 18443:8443 -e MALO_INSECURE_FAST_KDF=1 malo-server:latest >/dev/null
+  for _ in $(seq 1 30); do docker logs malo-e2e-remote 2>&1 | grep -q "setup token" && break; sleep 0.5; done
+  touch e2e/out/remote-rotated
+) &
 docker run --rm --network host \
   -v "$PWD/target/debug:/app:ro" \
   -v "$HOME/.cargo/bin/tauri-driver:/usr/local/bin/tauri-driver:ro" \

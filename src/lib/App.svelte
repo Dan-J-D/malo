@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { fade } from 'svelte/transition';
   import { ms } from './motion';
-  import { app } from './api/client';
+  import { app, certChange } from './api/client';
   import { session, route } from './state.svelte';
   import Notices from './components/Notices.svelte';
   import ContextMenu from './components/ContextMenu.svelte';
@@ -41,8 +41,9 @@
         session.phase = 'login';
         return;
       }
-    } catch {
-      // fall through to the connect screen
+    } catch (e) {
+      // Fall through to the connect screen, which warns about a changed certificate.
+      session.certChanged = certChange(e);
     }
     session.phase = 'connect';
   });

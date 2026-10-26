@@ -30,6 +30,19 @@ export const api = {
   del: <R>(path: string) => call<R>('api', { method: 'DELETE', path, body: null }),
 };
 
+/** A pinned server whose certificate changed: `new` is null when it is now publicly trusted. */
+export interface CertChange { url: string; old: string; new: string | null }
+
+/** The certificate change behind an error from `connectRemote`, if that's what it is. */
+export function certChange(e: unknown): CertChange | null {
+  if (!(e instanceof ApiError) || e.code !== 'cert_changed') return null;
+  try {
+    return JSON.parse(e.message) as CertChange;
+  } catch {
+    return null;
+  }
+}
+
 export interface Probe { url: string; fingerprint: string | null; publicly_trusted: boolean; status: T.ServerStatus }
 export interface LocalInfo { url: string; fingerprint: string | null; status: T.ServerStatus; setup_token: string | null }
 export interface Prefs { mode: 'local' | 'remote' | null; url: string | null; fingerprint: string | null; tray_mode: boolean; last_username: string | null }
@@ -41,7 +54,8 @@ export interface OAuthRequest {
 
 export const app = {
   probe: (url: string) => call<Probe>('probe_server', { url }),
-  connectRemote: (url: string, fingerprint: string | null) => call<T.ServerStatus>('connect_remote', { url, fingerprint }),
+  connectRemote: (url: string, fingerprint: string | null, replacePin = false) =>
+    call<T.ServerStatus>('connect_remote', { url, fingerprint, replacePin }),
   startLocal: () => call<LocalInfo>('start_local'),
   prefs: () => call<Prefs>('get_prefs'),
   setTrayMode: (enabled: boolean) => call<void>('set_tray_mode', { enabled }),
