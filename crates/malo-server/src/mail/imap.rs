@@ -2224,6 +2224,46 @@ pub async fn session<S: AsyncRead + AsyncWrite + Unpin>(
     .await
 }
 
+/// Fuzzing entry point (`fuzz/fuzz_targets/imap_server_command.rs`): the command parsers on
+/// whatever a mail app sends. 0xFF bytes split the input into text and literal segments.
+#[doc(hidden)]
+pub fn fuzz_command(data: &[u8]) {
+    let segs: Vec<Seg> = data
+        .split(|b| *b == 0xff)
+        .take(MAX_SEGMENTS)
+        .enumerate()
+        .map(|(i, s)| match i % 2 {
+            0 => Seg::Text(s.to_vec()),
+            _ => Seg::Literal(s.to_vec()),
+        })
+        .collect();
+    let _ = describe(&segs);
+    let _ = literal_marker(data);
+    let _ = literal_allowed(&segs, data);
+    let _ = segs_tag(&segs, data);
+    let Some(toks) = tokenize(segs) else { return };
+    for (i, t) in toks.iter().enumerate().take(16) {
+        let _ = parse_key(&mut toks[i..].iter().peekable(), 100, 1000, 0);
+        let _ = parse_atts(t);
+        let _ = given_flags(toks[i..].iter());
+        if let Some(a) = t.atom() {
+            let _ = parse_set(a, 1000);
+            let _ = parse_section(a);
+        }
+        if let Some(s) = t.string() {
+            let _ = append_date(s.as_bytes());
+        }
+    }
+    if let [p, n, ..] = toks.as_slice() {
+        if let (Some(p), Some(n)) = (p.string(), n.string()) {
+            if p.len() <= MAX_PATTERN {
+                let _ = wildcard(p.as_bytes(), n.as_bytes(), Some(b'/'));
+                let _ = wildcard(p.as_bytes(), n.as_bytes(), None);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

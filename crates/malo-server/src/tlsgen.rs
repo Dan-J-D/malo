@@ -296,13 +296,8 @@ fn issue(p: &Paths, issued: &mut Issued, names: &[String]) -> anyhow::Result<()>
 }
 
 fn write_key(path: &Path, pem: &str) -> anyhow::Result<()> {
-    crate::keyring::write_atomic(path, pem.as_bytes())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
+    // Created owner-only, then renamed into place.
+    crate::keyring::write_atomic(path, pem.as_bytes())
 }
 
 fn date(unix: i64) -> String {
@@ -371,6 +366,15 @@ mod tests {
         let pin = malo_core::tls::fingerprint(&ca);
         let certs = chain(dir.path());
         assert_eq!(certs.len(), 2, "certificate, then the authority");
+        #[cfg(unix)]
+        for f in std::fs::read_dir(dir.path()).unwrap() {
+            use std::os::unix::fs::PermissionsExt;
+            let f = f.unwrap();
+            if f.file_name().to_string_lossy().contains("key") {
+                let mode = f.metadata().unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o600, "{:?}", f.file_name());
+            }
+        }
         assert_eq!(certs[1], ca);
         let now = UnixTime::now();
         // The pinned authority vouches for the certificate, and a browser-style check accepts

@@ -12,7 +12,7 @@ use imap_proto::types::BodyStructure;
 use malo_api::{AccountAuth, Envelope, TlsMode};
 use once_cell::sync::Lazy;
 use rustls::pki_types::ServerName;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_rustls::TlsConnector;
@@ -88,13 +88,14 @@ impl async_imap::Authenticator for XOAuth2 {
     }
 }
 
+/// Longest line accepted from a server before TLS.
+const MAX_PLAIN_LINE: usize = 8 * 1024;
+
 async fn read_line(r: &mut BufReader<TcpStream>) -> anyhow::Result<String> {
-    let mut line = String::new();
-    let n = tokio::time::timeout(CONNECT_TIMEOUT, r.read_line(&mut line)).await??;
-    if n == 0 {
-        bail!("connection closed by server");
-    }
-    Ok(line)
+    let line = tokio::time::timeout(CONNECT_TIMEOUT, crate::lines::read_line(r, MAX_PLAIN_LINE))
+        .await??
+        .ok_or_else(|| anyhow!("connection closed by server"))?;
+    Ok(String::from_utf8_lossy(&line).into_owned())
 }
 
 async fn starttls(tcp: TcpStream) -> anyhow::Result<TcpStream> {

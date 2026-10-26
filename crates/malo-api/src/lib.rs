@@ -117,11 +117,16 @@ pub struct ServerStatus {
     pub cert_fingerprint: Option<String>,
 }
 
+/// `GET /healthz` (anyone: just the status) and `GET /admin/health` (with the user counts).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct Health {
     pub status: String,
-    pub sealed_users: u32,
-    pub unlocked_users: u32,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub sealed_users: Option<u32>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub unlocked_users: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

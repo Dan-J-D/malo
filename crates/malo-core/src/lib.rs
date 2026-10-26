@@ -9,6 +9,7 @@ pub mod faults;
 pub mod imap;
 pub mod index;
 pub mod layout;
+pub mod lines;
 pub mod mailview;
 pub mod mime;
 pub mod netguard;

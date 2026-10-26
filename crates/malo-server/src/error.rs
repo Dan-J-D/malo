@@ -56,13 +56,16 @@ impl IntoResponse for ApiErr {
     }
 }
 
+/// An unexpected failure: the details (paths, SQL, addresses on the server's network) go to the
+/// log under a reference the client gets instead.
 impl From<anyhow::Error> for ApiErr {
     fn from(e: anyhow::Error) -> Self {
-        tracing::debug!("request failed: {e:#}");
+        let reference = hex::encode(rand::random::<[u8; 4]>());
+        tracing::warn!(reference, "request failed: {e:#}");
         ApiErr::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal",
-            format!("{e:#}"),
+            format!("internal error (reference {reference}; the server log has the details)"),
         )
     }
 }
@@ -70,5 +73,22 @@ impl From<anyhow::Error> for ApiErr {
 impl From<rusqlite::Error> for ApiErr {
     fn from(e: rusqlite::Error) -> Self {
         anyhow::Error::from(e).into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn internal_errors_keep_their_details_in_the_log() {
+        let e: ApiErr =
+            anyhow::anyhow!("cannot open /data/users/u1/index.db: disk I/O error").into();
+        assert_eq!(e.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            !e.message.contains("/data") && e.message.contains("reference"),
+            "{}",
+            e.message
+        );
     }
 }

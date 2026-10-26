@@ -55,7 +55,7 @@ async fn stream(state: SharedState, auth: AuthUser, mut socket: WebSocket) {
                 }
             }
             _ = session_check.tick() => {
-                if !matches!(state.db.check_session(&auth.token_hash, idle), Ok(Some(_))) {
+                if !matches!(state.db.session_still_valid(&auth.token_hash, idle), Ok(Some(_))) {
                     let _ = socket.send(Message::Close(None)).await;
                     break;
                 }

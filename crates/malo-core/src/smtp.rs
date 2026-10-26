@@ -8,7 +8,7 @@ use anyhow::{anyhow, Context};
 use base64::Engine;
 use malo_api::{AccountAuth, SmtpSettings, TlsMode};
 use rustls::pki_types::ServerName;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
@@ -19,6 +19,8 @@ use crate::tls;
 const TIMEOUT: Duration = Duration::from_secs(60);
 /// The server may take a while to accept a large message after the final dot.
 const DATA_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Longest reply line accepted (RFC 5321 allows 512 bytes).
+const MAX_LINE: usize = 8 * 1024;
 
 /// A reply of the upstream server.
 #[derive(Debug, Clone)]
@@ -59,11 +61,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Conn<S> {
     async fn reply(&mut self, timeout: Duration) -> anyhow::Result<Reply> {
         let mut text = Vec::new();
         loop {
-            let mut line = String::new();
-            let n = tokio::time::timeout(timeout, self.io.read_line(&mut line))
-                .await
-                .map_err(|_| anyhow!("the SMTP server stopped responding"))??;
-            anyhow::ensure!(n > 0, "the SMTP server closed the connection");
+            let line =
+                tokio::time::timeout(timeout, crate::lines::read_line(&mut self.io, MAX_LINE))
+                    .await
+                    .map_err(|_| anyhow!("the SMTP server stopped responding"))??
+                    .ok_or_else(|| anyhow!("the SMTP server closed the connection"))?;
+            let line = String::from_utf8_lossy(&line);
             anyhow::ensure!(line.len() >= 3, "malformed SMTP reply: {}", line.trim());
             let code: u16 = line[..3]
                 .parse()

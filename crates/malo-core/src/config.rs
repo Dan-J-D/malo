@@ -69,6 +69,25 @@ impl Drop for UserConfig {
     fn drop(&mut self) {
         use zeroize::Zeroize;
         self.archive_key.zeroize();
+        // Mail passwords, refresh tokens and storage credentials go with it.
+        for a in &mut self.accounts {
+            match &mut a.auth {
+                AccountAuth::Password { password } => password.zeroize(),
+                AccountAuth::OAuth2 {
+                    client_secret,
+                    refresh_token,
+                    ..
+                } => {
+                    refresh_token.zeroize();
+                    if let Some(s) = client_secret {
+                        s.zeroize();
+                    }
+                }
+            }
+        }
+        for d in &mut self.destinations {
+            d.options.values_mut().for_each(Zeroize::zeroize);
+        }
     }
 }
 
@@ -571,6 +590,7 @@ mod tests {
     fn destination_secret_options_redacted() {
         let mut opts = BTreeMap::new();
         opts.insert("bucket".into(), "b".into());
+        opts.insert("access_key_id".into(), "abc".into());
         opts.insert("secret_access_key".into(), "xyz".into());
         let d = Destination::from_input(
             "d".into(),

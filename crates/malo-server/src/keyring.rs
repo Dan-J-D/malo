@@ -87,7 +87,14 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> anyhow::Result<()> {
     }
     {
         use std::io::Write;
-        let mut f = std::fs::File::create(&tmp)?;
+        // Owner-only from the first byte (keys, vaults, sealed configs): never readable
+        // under a loose umask, even for a moment. A stale temp file may carry other modes.
+        let _ = std::fs::remove_file(&tmp);
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+        let mut f = opts.open(&tmp)?;
         f.write_all(data)?;
         f.sync_all()?;
     }

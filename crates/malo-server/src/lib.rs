@@ -104,6 +104,7 @@ pub fn router(state: SharedState) -> Router {
         .merge(limited)
         .route("/status", get(status))
         .route("/healthz", get(healthz))
+        .route("/admin/health", get(admin_health))
         .route("/presets", get(presets))
         .route("/", get(trust_page::page))
         .route("/tls/{file}", get(authority))
@@ -227,7 +228,19 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<Running> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&cfg.data_dir, std::fs::Permissions::from_mode(0o700));
+        // Vaults, keys and indexes live here: refuse to run in a directory others can read.
+        if let Err(e) =
+            std::fs::set_permissions(&cfg.data_dir, std::fs::Permissions::from_mode(0o700))
+        {
+            let mode = std::fs::metadata(&cfg.data_dir)?.permissions().mode();
+            if mode & 0o077 != 0 {
+                anyhow::bail!(
+                    "cannot make the data dir {} private (mode {:o}): {e}",
+                    cfg.data_dir.display(),
+                    mode & 0o777
+                );
+            }
+        }
     }
     let db = Arc::new(Db::open(&cfg.data_dir.join("server.db"))?);
     // A restart seals every user: no sessions survive, jobs left running are failed.

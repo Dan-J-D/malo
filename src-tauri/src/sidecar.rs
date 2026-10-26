@@ -23,6 +23,8 @@ pub struct SidecarInfo {
 pub struct Sidecar {
     pub info: SidecarInfo,
     child: Child,
+    /// Kept open while the app runs: the server exits when it closes (also if the app crashes).
+    _stdin: tokio::process::ChildStdin,
 }
 
 impl Sidecar {
@@ -77,7 +79,7 @@ pub async fn spawn(_app: &AppHandle, data_dir: &Path) -> anyhow::Result<Sidecar>
         .env("MALO_DATA_DIR", data_dir)
         .env("MALO_SIDECAR_SECRET", &secret)
         .env("RUST_LOG", "info")
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -87,6 +89,7 @@ pub async fn spawn(_app: &AppHandle, data_dir: &Path) -> anyhow::Result<Sidecar>
         cmd.creation_flags(0x0800_0000);
     }
     let mut child = cmd.spawn().context("can't start the local server")?;
+    let stdin = child.stdin.take().unwrap();
     let (tx, mut rx) = mpsc::unbounded_channel();
     forward(child.stdout.take().unwrap(), tx.clone(), Output::Stdout);
     forward(child.stderr.take().unwrap(), tx, Output::Stderr);
@@ -124,5 +127,6 @@ pub async fn spawn(_app: &AppHandle, data_dir: &Path) -> anyhow::Result<Sidecar>
             setup_token: ready.setup_token,
         },
         child,
+        _stdin: stdin,
     })
 }

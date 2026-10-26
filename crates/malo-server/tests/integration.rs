@@ -523,9 +523,18 @@ async fn auto_lock_stops_jobs_and_restart_seals() {
     drop(server);
     let server2 = start_server(dir.path(), |_| {}).await;
     let api2 = Api::new(&server2);
+    // Anyone sees that the server is up, only administrators how many users are unlocked.
     let health: Health = api2.get("/healthz").await;
-    assert_eq!(health.unlocked_users, 0);
-    assert!(health.sealed_users >= 2);
+    assert_eq!((health.status.as_str(), health.sealed_users), ("ok", None));
+    assert_eq!(api2.status_of(Method::GET, "/admin/health").await, 401);
+    let admin2 = api2.login("admin", "admin-password-1").await;
+    let health: Health = admin2.get("/admin/health").await;
+    assert_eq!(
+        health.unlocked_users,
+        Some(1),
+        "the admin who just logged in"
+    );
+    assert!(health.sealed_users.unwrap() >= 1, "carol");
     let old = Api {
         token: carol.token.clone(),
         ..api2.clone()

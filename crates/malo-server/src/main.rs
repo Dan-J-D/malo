@@ -15,7 +15,8 @@ async fn main() -> anyhow::Result<()> {
     }
     let cfg = ServerConfig::load()?;
     let running = malo_server::start(cfg.clone()).await?;
-    if let Some(token) = &running.setup_token {
+    // A sidecar hands the token to its app on stdout; only a standalone server logs it.
+    if let (Some(token), None) = (&running.setup_token, &cfg.sidecar_secret) {
         tracing::warn!("first start: create the admin account with setup token {token}");
     }
     // Machine-readable line for the desktop app that launches us as a sidecar.

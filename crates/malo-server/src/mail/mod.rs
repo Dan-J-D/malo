@@ -17,7 +17,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rand::Rng;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio_rustls::TlsAcceptor;
@@ -185,35 +184,7 @@ pub async fn authenticate(
     })
 }
 
-/// Reads one line (up to and including LF) of at most `max` bytes. None at end of stream.
-pub async fn read_line<R: AsyncBufRead + Unpin>(
-    r: &mut R,
-    max: usize,
-) -> std::io::Result<Option<Vec<u8>>> {
-    let mut line = Vec::new();
-    loop {
-        let buf = r.fill_buf().await?;
-        if buf.is_empty() {
-            return Ok((!line.is_empty()).then_some(line));
-        }
-        let (chunk, done) = match buf.iter().position(|b| *b == b'\n') {
-            Some(i) => (&buf[..=i], true),
-            None => (buf, false),
-        };
-        if line.len() + chunk.len() > max {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "line too long",
-            ));
-        }
-        line.extend_from_slice(chunk);
-        let n = chunk.len();
-        r.consume(n);
-        if done {
-            return Ok(Some(line));
-        }
-    }
-}
+pub use malo_core::lines::read_line;
 
 pub struct Listeners {
     imap: Option<std::net::TcpListener>,

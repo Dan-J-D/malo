@@ -50,7 +50,7 @@ export type ServerStatus = { version: string, needs_setup: boolean, self_registr
  */
 cert_fingerprint: string | null, };
 
-export type Health = { status: string, sealed_users: number, unlocked_users: number, };
+export type Health = { status: string, sealed_users?: number | null, unlocked_users?: number | null, };
 
 export type UserSettings = { auto_lock_hours: number, quick_check_hours: number, deep_check_hours: number, auto_repair: boolean, };
 

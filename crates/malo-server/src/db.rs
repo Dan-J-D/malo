@@ -336,13 +336,14 @@ impl Db {
         })
     }
 
+    /// False (and nothing changed) if the change would leave no active administrator.
     pub fn update_user(
         &self,
         id: &str,
         disabled: Option<bool>,
         role: Option<Role>,
         max_accounts: Option<Option<u32>>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
         self.with(|c| {
             let tx = c.unchecked_transaction()?;
             let c = &tx;
@@ -361,7 +362,17 @@ impl Db {
                     params![id, m],
                 )?;
             }
-            tx.commit()
+            // Never leave the server without an active administrator (two demotions at once).
+            let admins: i64 = c.query_row(
+                "SELECT COUNT(*) FROM users WHERE role='admin' AND disabled=0",
+                [],
+                |r| r.get(0),
+            )?;
+            if admins == 0 {
+                return Ok(false); // dropping the transaction rolls it back
+            }
+            tx.commit()?;
+            Ok(true)
         })
     }
 
@@ -375,9 +386,17 @@ impl Db {
         Ok(())
     }
 
-    pub fn delete_user(&self, id: &str) -> anyhow::Result<()> {
-        self.with(|c| c.execute("DELETE FROM users WHERE id=?1", [id]))?;
-        Ok(())
+    /// Deletes the user unless that would leave no active administrator, in one statement so
+    /// two administrators deleting themselves at once can't both succeed. False if refused.
+    pub fn delete_user_keeping_an_admin(&self, id: &str) -> anyhow::Result<bool> {
+        let n = self.with(|c| {
+            c.execute(
+                "DELETE FROM users WHERE id=?1 AND (role!='admin' OR disabled=1 OR
+                   (SELECT COUNT(*) FROM users WHERE role='admin' AND disabled=0) > 1)",
+                [id],
+            )
+        })?;
+        Ok(n == 1)
     }
 
     // ───── sessions ─────
@@ -404,6 +423,25 @@ impl Db {
         token_hash: &str,
         idle: chrono::Duration,
     ) -> anyhow::Result<Option<String>> {
+        self.session(token_hash, idle, true)
+    }
+
+    /// Like [`Db::check_session`], but doesn't count as activity: an open event stream alone
+    /// mustn't keep an idle session alive.
+    pub fn session_still_valid(
+        &self,
+        token_hash: &str,
+        idle: chrono::Duration,
+    ) -> anyhow::Result<Option<String>> {
+        self.session(token_hash, idle, false)
+    }
+
+    fn session(
+        &self,
+        token_hash: &str,
+        idle: chrono::Duration,
+        touch: bool,
+    ) -> anyhow::Result<Option<String>> {
         let now = Utc::now();
         self.with(|c| {
             let row: Option<(String, String, String)> = c
@@ -422,10 +460,12 @@ impl Db {
                 c.execute("DELETE FROM sessions WHERE token_hash=?1", [token_hash])?;
                 return Ok(None);
             }
-            c.execute(
-                "UPDATE sessions SET last_seen=?2 WHERE token_hash=?1",
-                params![token_hash, now.to_rfc3339()],
-            )?;
+            if touch {
+                c.execute(
+                    "UPDATE sessions SET last_seen=?2 WHERE token_hash=?1",
+                    params![token_hash, now.to_rfc3339()],
+                )?;
+            }
             Ok(Some(user))
         })
     }
@@ -854,4 +894,25 @@ fn valid_invite(
         return Ok(None);
     }
     Ok(Some(parse_role(&role)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_active_administrator_always_remains() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("server.db")).unwrap();
+        db.create_user("a", "alice", Role::Admin, None).unwrap();
+        db.create_user("b", "bob", Role::Admin, None).unwrap();
+        db.create_user("u", "user", Role::User, None).unwrap();
+        assert!(db.delete_user_keeping_an_admin("u").unwrap());
+        assert!(db.delete_user_keeping_an_admin("a").unwrap());
+        assert!(!db.delete_user_keeping_an_admin("b").unwrap());
+        assert!(!db.update_user("b", Some(true), None, None).unwrap());
+        assert!(!db.update_user("b", None, Some(Role::User), None).unwrap());
+        assert_eq!(db.active_admin_count().unwrap(), 1);
+        assert!(db.update_user("b", None, None, Some(Some(3))).unwrap());
+    }
 }

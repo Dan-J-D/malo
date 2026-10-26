@@ -462,7 +462,11 @@ pub async fn delete_self(
     {
         tracing::warn!(user = %user.username, "jobs still running 60 s after the deletion request");
     }
-    state.db.delete_user(&user.id)?;
+    if !state.db.delete_user_keeping_an_admin(&user.id)? {
+        return Err(ApiErr::conflict(
+            "you are the last administrator; make someone else an administrator first",
+        ));
+    }
     let dir = keyring::UserPaths::try_new(&state.cfg.data_dir, &user.id)?.dir;
     if dir.starts_with(state.cfg.data_dir.join("users")) {
         std::fs::remove_dir_all(&dir).or_else(|e| {

@@ -64,13 +64,26 @@ pub async fn status(State(state): State<SharedState>) -> ApiResult<Json<ServerSt
     }))
 }
 
-pub async fn healthz(State(state): State<SharedState>) -> ApiResult<Json<Health>> {
+/// For load balancers and the Docker health check: says nothing about the users.
+pub async fn healthz() -> Json<Health> {
+    Json(Health {
+        status: "ok".into(),
+        sealed_users: None,
+        unlocked_users: None,
+    })
+}
+
+/// [`healthz`] with how many users are unlocked, for administrators.
+pub async fn admin_health(
+    State(state): State<SharedState>,
+    _admin: Admin,
+) -> ApiResult<Json<Health>> {
     let total = state.db.user_count()? as u32;
     let unlocked = state.keyring.count() as u32;
     Ok(Json(Health {
         status: "ok".into(),
-        sealed_users: total.saturating_sub(unlocked),
-        unlocked_users: unlocked,
+        sealed_users: Some(total.saturating_sub(unlocked)),
+        unlocked_users: Some(unlocked),
     }))
 }
 
@@ -914,7 +927,7 @@ pub async fn list_messages(
             new_only: q.new,
             text: q.q,
             states,
-            limit: q.limit.unwrap_or(100),
+            limit: q.limit.unwrap_or(100).min(1000),
             offset: q.offset.unwrap_or(0),
             max_id: q.max_id,
             sort: q
@@ -1589,9 +1602,12 @@ pub async fn admin_update_user(
         (_, Some(n)) => Some(Some(n)),
         _ => None,
     };
-    state
+    if !state
         .db
-        .update_user(&id, req.disabled, req.role, max_accounts)?;
+        .update_user(&id, req.disabled, req.role, max_accounts)?
+    {
+        return Err(ApiErr::conflict("that would leave no active administrator"));
+    }
     if req.disabled == Some(true) {
         scheduler::lock_user(&state, &id, "disabled by an administrator");
     }
@@ -1650,7 +1666,9 @@ pub async fn admin_delete_user(
     {
         tracing::warn!(user = %id, "jobs still running 60 s after the deletion request");
     }
-    state.db.delete_user(&id)?;
+    if !state.db.delete_user_keeping_an_admin(&id)? {
+        return Err(ApiErr::conflict("that would leave no active administrator"));
+    }
     let dir = crate::keyring::UserPaths::try_new(&state.cfg.data_dir, &id)?.dir;
     if dir.starts_with(state.cfg.data_dir.join("users")) {
         let _ = std::fs::remove_dir_all(dir);
