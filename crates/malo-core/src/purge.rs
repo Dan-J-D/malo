@@ -4,7 +4,10 @@ use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{anyhow, bail, Context};
 use chrono::{DateTime, Duration, Utc};
-use malo_api::{PurgeMailboxCount, PurgePolicy, PurgePreview, PurgeSummary, SyncEvent};
+use malo_api::{
+    DeleteScope, DeleteSummary, PurgeMailboxCount, PurgePolicy, PurgePreview, PurgeSummary,
+    SyncEvent,
+};
 
 use crate::config::Account;
 use crate::ctx::JobCtx;
@@ -226,6 +229,39 @@ pub async fn run_purge(ctx: &JobCtx, account_id: &str) -> anyhow::Result<PurgeSu
     if let Some(b) = blocked {
         bail!("purge blocked: {b}");
     }
+    let rules = Rules {
+        required: account.policy.required_destinations.clone(),
+        exclude_flagged: account.policy.exclude_flagged,
+        audit: "purge_run",
+    };
+    let summary = delete_on_server(ctx, &account, list, &rules).await?;
+    ctx.events.emit(SyncEvent::PurgeSummary {
+        summary: summary.clone(),
+    });
+    Ok(summary)
+}
+
+/// How [`delete_on_server`] treats its candidates.
+struct Rules {
+    /// Destinations every candidate is re-verified on (and whose manifests are rewritten) before
+    /// anything is deleted. Empty when the backup is deleted too.
+    required: Vec<String>,
+    /// Keep messages flagged on the server.
+    exclude_flagged: bool,
+    /// Audit log entry for the run.
+    audit: &'static str,
+}
+
+/// Deletes candidates from the IMAP server: re-verifies their backups on the required
+/// destinations, writes the manifests there, then deletes each UID only after re-confirming it is
+/// still exactly the backed-up message. An error after the server was touched still returns the
+/// partial summary in the audit log.
+async fn delete_on_server(
+    ctx: &JobCtx,
+    account: &Account,
+    list: Vec<Candidate>,
+    rules: &Rules,
+) -> anyhow::Result<PurgeSummary> {
     let mut summary = PurgeSummary {
         account_id: account.id.clone(),
         deleted: 0,
@@ -234,16 +270,12 @@ pub async fn run_purge(ctx: &JobCtx, account_id: &str) -> anyhow::Result<PurgeSu
         errors: vec![],
     };
     if list.is_empty() {
-        ctx.events.emit(SyncEvent::PurgeSummary {
-            summary: summary.clone(),
-        });
         return Ok(summary);
     }
 
     // Pre-purge re-verify (stat + hash) in every required destination.
-    let stores: HashMap<String, Store> = account
-        .policy
-        .required_destinations
+    let stores: HashMap<String, Store> = rules
+        .required
         .iter()
         .map(|d| ctx.store(d).map(|s| (d.clone(), s)))
         .collect::<anyhow::Result<_>>()?;
@@ -309,9 +341,6 @@ pub async fn run_purge(ctx: &JobCtx, account_id: &str) -> anyhow::Result<PurgeSu
             Some(&account.id),
             &serde_json::json!({"errors": summary.errors}),
         )?;
-        ctx.events.emit(SyncEvent::PurgeSummary {
-            summary: summary.clone(),
-        });
         bail!(
             "purge aborted: {} replica(s) failed re-verification",
             summary.skipped
@@ -329,7 +358,7 @@ pub async fn run_purge(ctx: &JobCtx, account_id: &str) -> anyhow::Result<PurgeSu
         mailboxes.dedup();
         for store in stores.values() {
             ctx.check_cancel()?;
-            sync::write_manifests(ctx, &account, store, &mailboxes)
+            sync::write_manifests(ctx, account, store, &mailboxes)
                 .await
                 .with_context(|| {
                     format!(
@@ -340,26 +369,221 @@ pub async fn run_purge(ctx: &JobCtx, account_id: &str) -> anyhow::Result<PurgeSu
         }
     }
 
-    let mut conn = imap::connect(&account, ctx.tokens.as_ref()).await?;
+    if confirmed.is_empty() {
+        return Ok(summary);
+    }
+    let mut conn = imap::connect(account, ctx.tokens.as_ref()).await?;
     if !conn.caps.uidplus() {
         conn.logout().await;
-        bail!("server lacks UIDPLUS; refusing to purge");
+        bail!("server lacks UIDPLUS; refusing to delete");
     }
+    let flagged = rules.exclude_flagged;
     let result = if conn.caps.gmail() {
-        purge_gmail(ctx, &account, &mut conn, &confirmed, &mut summary).await
+        purge_gmail(ctx, account, &mut conn, &confirmed, flagged, &mut summary).await
     } else {
-        purge_generic(ctx, &account, &mut conn, &confirmed, &mut summary).await
+        purge_generic(ctx, account, &mut conn, &confirmed, flagged, &mut summary).await
     };
     conn.logout().await;
     ctx.index.audit(
-        "purge_run",
+        rules.audit,
         Some(&account.id),
         &serde_json::json!({"deleted": summary.deleted, "bytes": summary.bytes, "skipped": summary.skipped, "errors": summary.errors}),
     )?;
-    ctx.events.emit(SyncEvent::PurgeSummary {
-        summary: summary.clone(),
-    });
     result.map(|_| summary)
+}
+
+/// Deletes messages the user selected, from the mail server (`DeleteScope::Server`) or from the
+/// backup too (`DeleteScope::Everywhere`).
+///
+/// Server: like a purge without the age, mailbox and flag rules, since the user picked each
+/// message: every one must be verified on the policy's required destinations (or on every
+/// destination when none are set), and is re-verified there first.
+///
+/// Everywhere: messages still on the server are deleted there first (identity-checked, but
+/// without the backup checks, since the backup goes as well); a message that stays on the server
+/// is kept, or the next backup would bring it back. Then the messages leave the index (with
+/// tombstones), the manifests on every destination are rewritten without them, and their stored
+/// objects are deleted. A destination that can't be reached keeps its manifest marked dirty and
+/// its objects queued, both finished by a later manifest write there.
+pub async fn delete_selected(
+    ctx: &JobCtx,
+    account_id: &str,
+    ids: &[i64],
+    scope: DeleteScope,
+) -> anyhow::Result<DeleteSummary> {
+    let account = ctx.account(account_id)?.clone();
+    if account.imported && scope == DeleteScope::Server {
+        bail!("this imported account has no mail server to delete from");
+    }
+    let mut summary = DeleteSummary {
+        account_id: account.id.clone(),
+        ..Default::default()
+    };
+    let mut inputs = Vec::new();
+    for id in ids {
+        match ctx.index.message(*id)? {
+            Some(message) if message.account == account.id => {
+                let memberships = ctx
+                    .index
+                    .memberships(*id)?
+                    .into_iter()
+                    .filter_map(|m| Some((m.clone(), ctx.index.mailbox(m.mailbox).ok()??)))
+                    .collect();
+                inputs.push(CandidateInput {
+                    replicas: ctx.index.replicas_of(*id)?,
+                    message,
+                    memberships,
+                });
+            }
+            // Gone meanwhile, or another account's: nothing to do.
+            _ => summary.skipped += 1,
+        }
+    }
+    let live = |c: &CandidateInput| {
+        c.memberships
+            .iter()
+            .any(|(m, mb)| !m.deleted_on_server && mb.current)
+    };
+
+    // 1. The mail server.
+    let on_server: Vec<&CandidateInput> = inputs.iter().filter(|c| live(c)).collect();
+    if !on_server.is_empty() && !account.imported {
+        let rules = match scope {
+            DeleteScope::Server => {
+                let mut policy = account.policy.clone();
+                if policy.required_destinations.is_empty() {
+                    policy.required_destinations = ctx.destination_ids();
+                }
+                let failing = failing_destinations(ctx, &policy)?;
+                if let Some(b) = blocked_reason(&policy, &failing, &ctx.destination_ids()) {
+                    bail!("can't delete from the server: {b}");
+                }
+                Rules {
+                    required: policy.required_destinations,
+                    exclude_flagged: false,
+                    audit: "deleted_on_server",
+                }
+            }
+            DeleteScope::Everywhere => Rules {
+                required: vec![],
+                exclude_flagged: false,
+                audit: "deleted_on_server",
+            },
+        };
+        let backed_up = |c: &CandidateInput| {
+            let Some(sha) = c.message.sha256.as_ref() else {
+                return false;
+            };
+            rules.required.iter().all(|d| {
+                c.replicas.iter().any(|r| {
+                    &r.destination == d
+                        && r.status == ReplicaStatus::Verified
+                        && r.sha256.as_ref() == Some(sha)
+                })
+            })
+        };
+        let mut list = Vec::new();
+        for c in on_server {
+            if backed_up(c) {
+                list.push(Candidate {
+                    message: c.message.clone(),
+                    memberships: c
+                        .memberships
+                        .iter()
+                        .filter(|(m, mb)| !m.deleted_on_server && mb.current)
+                        .cloned()
+                        .collect(),
+                });
+            } else {
+                summary.skipped += 1;
+                summary.errors.push(format!(
+                    "{}: not yet verified on every required destination; kept on the server",
+                    subject_of(&c.message)
+                ));
+            }
+        }
+        let r = delete_on_server(ctx, &account, list, &rules).await?;
+        summary.deleted_from_server = r.deleted;
+        summary.skipped += r.skipped;
+        summary.errors.extend(r.errors);
+    }
+    if scope == DeleteScope::Server {
+        return Ok(summary);
+    }
+
+    // 2. The backup: only what is no longer on the server. What stayed there was counted as
+    // skipped above.
+    let mut gone = Vec::new();
+    for c in &inputs {
+        let still = ctx.index.memberships(c.message.id)?.into_iter().any(|m| {
+            !m.deleted_on_server
+                && c.memberships
+                    .iter()
+                    .any(|(_, mb)| mb.id == m.mailbox && mb.current)
+        });
+        if !still || account.imported {
+            gone.push(c);
+        }
+    }
+    if gone.is_empty() {
+        return Ok(summary);
+    }
+    let mut mailboxes: Vec<i64> = gone
+        .iter()
+        .flat_map(|c| c.memberships.iter().map(|(_, mb)| mb.id))
+        .collect();
+    mailboxes.sort_unstable();
+    mailboxes.dedup();
+    let ids: Vec<i64> = gone.iter().map(|c| c.message.id).collect();
+    for c in &gone {
+        ctx.index.audit(
+            "deleted_from_backup",
+            Some(&account.id),
+            &serde_json::json!({"message": c.message.id, "sha256": c.message.sha256, "size": c.message.size}),
+        )?;
+    }
+    let unused = ctx.index.forget_messages(&ids)?;
+    for id in &ids {
+        ctx.spool_remove(*id);
+    }
+    summary.deleted_from_backup = ids.len() as u64;
+    ctx.events.emit(SyncEvent::MessagesDeleted {
+        account_id: account.id.clone(),
+        ids: ids.clone(),
+    });
+    for dest in ctx.destination_ids() {
+        let objects: Vec<String> = unused
+            .iter()
+            .filter(|(d, _)| *d == dest)
+            .map(|(_, p)| p.clone())
+            .collect();
+        sync::queue_object_deletes(ctx, &dest, &objects)?;
+        let result = async {
+            let store = ctx.store(&dest)?;
+            sync::write_manifests(ctx, &account, &store, &mailboxes).await?;
+            sync::flush_object_deletes(ctx, &store).await
+        }
+        .await;
+        if let Err(e) = result {
+            let name = ctx
+                .config
+                .destination(&dest)
+                .map_or(dest.clone(), |d| d.name.clone());
+            summary.errors.push(format!(
+                "{name}: {e:#} (cleaned up at the next successful backup there)"
+            ));
+        }
+    }
+    Ok(summary)
+}
+
+fn subject_of(m: &MessageRow) -> String {
+    let s = m.envelope.subject.trim();
+    if s.is_empty() {
+        format!("message {}", m.id)
+    } else {
+        format!("“{s}”")
+    }
 }
 
 /// Groups candidate memberships per mailbox.
@@ -427,7 +651,7 @@ fn record_deleted(
 /// does for a mailbox recreated within the same second), so UIDs alone are never trusted.
 async fn confirm_identity<'a>(
     conn: &mut ImapConn,
-    policy: &PurgePolicy,
+    exclude_flagged: bool,
     items: &[(u32, &'a MessageRow)],
     summary: &mut PurgeSummary,
 ) -> anyhow::Result<Vec<(u32, &'a MessageRow)>> {
@@ -466,7 +690,7 @@ async fn confirm_identity<'a>(
             };
         }
         let flagged =
-            policy.exclude_flagged && id.flags.iter().any(|f| f.eq_ignore_ascii_case("\\Flagged"));
+            exclude_flagged && id.flags.iter().any(|f| f.eq_ignore_ascii_case("\\Flagged"));
         if same && !flagged {
             ok.push((*uid, *msg));
         } else {
@@ -484,6 +708,7 @@ async fn purge_generic(
     account: &Account,
     conn: &mut ImapConn,
     list: &[Candidate],
+    exclude_flagged: bool,
     summary: &mut PurgeSummary,
 ) -> anyhow::Result<()> {
     for (_, (mb, items)) in by_mailbox(list) {
@@ -497,7 +722,7 @@ async fn purge_generic(
             summary.skipped += items.len() as u64;
             continue;
         }
-        let ok = confirm_identity(conn, &account.policy, &items, summary).await?;
+        let ok = confirm_identity(conn, exclude_flagged, &items, summary).await?;
         if ok.is_empty() {
             continue;
         }
@@ -532,6 +757,7 @@ async fn purge_gmail(
     account: &Account,
     conn: &mut ImapConn,
     list: &[Candidate],
+    exclude_flagged: bool,
     summary: &mut PurgeSummary,
 ) -> anyhow::Result<()> {
     let listing = conn.list_mailboxes().await?;
@@ -553,7 +779,7 @@ async fn purge_gmail(
             summary.skipped += items.len() as u64;
             continue;
         }
-        let ok = confirm_identity(conn, &account.policy, items, summary).await?;
+        let ok = confirm_identity(conn, exclude_flagged, items, summary).await?;
         if ok.is_empty() {
             continue;
         }

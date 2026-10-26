@@ -23,6 +23,8 @@ export const live = $state({
   /** Messages discovered since login, including those dropped from `newlyFound`. */
   foundCount: 0,
   latestReport: null as T.CheckReport | null,
+  /** The messages last deleted from the backup (a new array each time), so open lists reload. */
+  deleted: [] as number[],
   notices: [] as { id: number; level: string; message: string }[],
 });
 
@@ -81,6 +83,14 @@ export async function setReviewed(ids: number[], reviewed: boolean): Promise<boo
   return true;
 }
 
+export function deleteText(r: T.DeleteSummary): string {
+  const parts = [];
+  if (r.deleted_from_backup) parts.push(`${r.deleted_from_backup} deleted from the backup`);
+  if (r.deleted_from_server) parts.push(`${r.deleted_from_server} deleted from the mail server`);
+  if (r.skipped) parts.push(`${r.skipped} kept`);
+  return parts.join(' · ') || 'nothing to delete';
+}
+
 export function accountName(id: string): string {
   return live.accounts.find((a) => a.id === id)?.name ?? id.slice(0, 8);
 }
@@ -121,6 +131,11 @@ function handle(ev: T.SyncEvent) {
       upsertJob(ev.job);
       if (ev.job.state === 'failed') notify(`Job failed: ${ev.job.error ?? 'unknown error'}`, 'error');
       if (ev.job.kind.type === 'backup') void refreshAccounts();
+      if (ev.job.kind.type === 'delete_messages' && ev.job.state === 'done' && ev.job.result) {
+        const r = ev.job.result as T.DeleteSummary;
+        notify(`${accountName(r.account_id)}: ${deleteText(r)}${r.errors.length ? ` — ${r.errors[0]}` : ''}`, r.errors.length ? 'warning' : 'success');
+        void refreshAccounts();
+      }
       break;
     case 'job_progress': {
       const j = live.jobs.find((x) => x.id === ev.job_id);
@@ -151,6 +166,12 @@ function handle(ev: T.SyncEvent) {
         ev.summary.errors.length ? 'warning' : 'success',
       );
       break;
+    case 'messages_deleted': {
+      const gone = new Set(ev.ids);
+      live.newlyFound = live.newlyFound.filter((m) => !gone.has(m.id));
+      live.deleted = ev.ids;
+      break;
+    }
     case 'accounts_changed':
       // Also sent when a rebuild restores destinations from a settings copy.
       void refreshAccounts();

@@ -742,6 +742,20 @@ pub async fn create_job(
             CheckScope::All => {}
         },
         JobKind::RebuildIndexAll => {}
+        JobKind::DeleteMessages {
+            account_id,
+            message_ids,
+            ..
+        } => {
+            cfg.account(account_id)
+                .ok_or_else(|| ApiErr::not_found("account"))?;
+            if message_ids.is_empty() || message_ids.len() > malo_api::MAX_DELETE_BATCH {
+                return Err(ApiErr::bad_request(format!(
+                    "select between 1 and {} messages per delete",
+                    malo_api::MAX_DELETE_BATCH
+                )));
+            }
+        }
     }
     if let JobKind::Purge { account_id } = &req.kind {
         if !cfg.account(account_id).is_some_and(|a| a.policy.armed) {

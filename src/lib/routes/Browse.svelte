@@ -1,8 +1,9 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { SvelteMap } from 'svelte/reactivity';
   import { api, app, qs } from '../api/client';
   import type * as T from '../api/types';
-  import { live, route, scope, go, attempt, accountName, setReviewed } from '../state.svelte';
+  import { live, route, scope, go, attempt, accountName, setReviewed, notify } from '../state.svelte';
   import { commands, type Command } from '../commands.svelte';
   import { contextMenu, menuUnder, copy, type Entry } from '../menu.svelte';
   import { reveal, shortDate } from '../format';
@@ -11,6 +12,7 @@
   import Avatar from '../components/Avatar.svelte';
   import Icon from '../components/Icon.svelte';
   import Resizer from '../components/Resizer.svelte';
+  import DeleteMessages from '../components/DeleteMessages.svelte';
   import { fade } from 'svelte/transition';
   import { ms } from '../motion';
 
@@ -41,6 +43,7 @@
   }
   let boxes: T.MailboxInfo[] = $state([]);
   let searchEl: HTMLInputElement | undefined = $state();
+  let selBar: HTMLElement | undefined = $state();
 
   $effect(() => {
     const a = params.get('account');
@@ -105,6 +108,7 @@
   /** Starts the list over (filters changed, or the user asked for new mail). */
   async function reset() {
     const g = ++gen;
+    clearSelection();
     inflight.clear();
     stopWaiting();
     maxId = null;
@@ -157,6 +161,121 @@
   function onSearch() {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(reset, 300);
+  }
+
+  // ── Selection ──
+  // Ctrl/⌘-click or the checkbox toggles a message, Shift-click selects the range from the last
+  // toggled one, x toggles the open message. Rows in a selection act together.
+  const selected = new SvelteMap<number, T.MessageSummary>();
+  let anchor = -1;
+  let selectingAll = $state(false);
+  let deleteScope: T.DeleteScope | null = $state(null);
+  let pendingJobs: string[] = $state([]);
+  /** Most messages "Select all" takes at once. */
+  const SELECT_MAX = 10000;
+
+  function clearSelection() {
+    selected.clear();
+    anchor = -1;
+  }
+
+  function toggle(m: T.MessageSummary, i: number) {
+    if (selected.has(m.id)) selected.delete(m.id);
+    else selected.set(m.id, m);
+    anchor = i;
+  }
+
+  /** Selects rows anchor..i (both included), fetching pages that aren't loaded yet. */
+  async function selectRange(i: number) {
+    const from = Math.min(anchor < 0 ? i : anchor, i);
+    const to = Math.max(anchor < 0 ? i : anchor, i);
+    for (let p = Math.floor(from / PAGE); p <= Math.floor(to / PAGE); p++) await fetchPage(p);
+    for (let k = from; k <= to; k++) {
+      const m = at(k);
+      if (m) selected.set(m.id, m);
+    }
+    anchor = i;
+  }
+
+  /** Every message in the current view (up to SELECT_MAX), fetched in large pages. */
+  async function selectAll() {
+    const g = gen;
+    selectingAll = true;
+    try {
+      const want = Math.min(total, SELECT_MAX);
+      for (let offset = 0; offset < want; offset += 1000) {
+        const r = await attempt(() => api.get<T.MessageList>(
+          `/messages${qs({ account, mailbox: account ? mailbox : '', new: newOnly, q, sort, limit: Math.min(1000, want - offset), offset, max_id: maxId })}`,
+        ));
+        if (!r || g !== gen) return;
+        for (const m of r.messages) selected.set(m.id, m);
+      }
+      if (total > SELECT_MAX) notify(`Selected the first ${SELECT_MAX.toLocaleString()} of ${total.toLocaleString()} messages`, 'warning');
+    } finally {
+      selectingAll = false;
+    }
+  }
+
+  function rowClick(e: MouseEvent, m: T.MessageSummary, i: number) {
+    if (e.shiftKey) return void selectRange(i);
+    if (e.ctrlKey || e.metaKey) return toggle(m, i);
+    open(m, i);
+  }
+
+  const chosen = () => [...selected.values()];
+
+  async function markSelected(reviewed: boolean) {
+    const ids = [...selected.keys()];
+    if (!(await setReviewed(ids, reviewed))) return;
+    const set = new Set(ids);
+    touch((x) => { if (set.has(x.id)) x.reviewed = reviewed; });
+    loadBoxes();
+    notify(`Marked ${ids.length.toLocaleString()} as ${reviewed ? 'read' : 'unread'}`, 'success');
+  }
+
+  async function saveSelected() {
+    const r = await attempt(() => app.saveRawMany([...selected.keys()]));
+    if (r) notify(`Saved ${r[1].toLocaleString()} message${r[1] === 1 ? '' : 's'} to ${r[0]}`, 'success');
+  }
+
+  // The list reloads when delete jobs finish (server-side deletes change the trash icons) and
+  // when messages leave the backup, also from another device.
+  $effect(() => {
+    if (!pendingJobs.length) return;
+    const done = pendingJobs.every((id) => {
+      const j = live.jobs.find((x) => x.id === id);
+      return j && j.state !== 'queued' && j.state !== 'running';
+    });
+    if (done) untrack(() => {
+      pendingJobs = [];
+      reset();
+      loadBoxes();
+    });
+  });
+  $effect(() => {
+    const gone = live.deleted;
+    if (!gone.length) return;
+    untrack(() => {
+      if (openId !== null && gone.includes(openId)) go('/browse');
+      reset();
+      loadBoxes();
+    });
+  });
+
+  /** Actions on the whole selection, for the bar, its context menu and shortcuts. */
+  function selectionMenu(): Entry[] {
+    const n = selected.size;
+    return [
+      { label: 'Mark as read', icon: 'check', keys: 'shift+i', run: () => markSelected(true) },
+      { label: 'Mark as unread', icon: 'mail', keys: 'shift+u', run: () => markSelected(false) },
+      { label: `Save ${n === 1 ? '.eml' : `${n.toLocaleString()} .eml files`}…`, icon: 'download', run: saveSelected },
+      '-',
+      { label: 'Delete from mail server…', icon: 'trash', keys: 'delete', danger: true, run: () => (deleteScope = 'server') },
+      { label: 'Delete from backup…', icon: 'trash', keys: 'shift+delete', danger: true, run: () => (deleteScope = 'everywhere') },
+      '-',
+      { label: 'Select all in this view', icon: 'checks', keys: 'mod+a', disabled: selected.size >= Math.min(total, SELECT_MAX), run: selectAll },
+      { label: 'Clear selection', icon: 'x', keys: 'escape', run: clearSelection },
+    ];
   }
 
   /** Applies `f` to copies of the rows and republishes the pages. The page map isn't deeply
@@ -235,8 +354,10 @@
 
   /** Everything that can be done with one message, for its context menu and the "." shortcut. */
   function messageMenu(m: T.MessageSummary, i: number): Entry[] {
+    if (selected.size > 1 && selected.has(m.id)) return selectionMenu();
     const subject = reveal(m.envelope.subject);
     return [
+      { label: selected.has(m.id) ? 'Deselect' : 'Select', icon: 'check', keys: 'x', run: () => toggle(m, i) },
       openId !== m.id && { label: 'Open', icon: 'mail-open', run: () => open(m, i) },
       m.reviewed
         ? { label: 'Mark as unread', icon: 'mail', keys: 'shift+u', run: () => mark(m, false) }
@@ -248,11 +369,21 @@
       { label: 'Copy sender address', icon: 'copy', run: () => copy(m.envelope.from, 'Address copied') },
       subject && { label: 'Copy subject', icon: 'copy', run: () => copy(subject, 'Subject copied') },
       { label: 'Save .eml…', icon: 'download', run: () => attempt(() => app.saveRaw(m.id)) },
+      '-',
+      { label: 'Delete from mail server…', icon: 'trash', danger: true, disabled: m.deleted_on_server, run: () => deleteOne(m, 'server') },
+      { label: 'Delete from backup…', icon: 'trash', danger: true, run: () => deleteOne(m, 'everywhere') },
     ];
+  }
+
+  function deleteOne(m: T.MessageSummary, scope: T.DeleteScope) {
+    clearSelection();
+    selected.set(m.id, m);
+    deleteScope = scope;
   }
 
   // Right-click on the list itself, around the rows.
   const listMenu = (): Entry[] => [
+    { label: 'Select all in this view', icon: 'checks', keys: 'mod+a', disabled: total === 0, run: selectAll },
     { label: newOnly ? 'Show all messages' : 'Show only new messages', icon: 'mail', keys: 'n', run: () => (newOnly = !newOnly) },
     { label: 'Mark all read', icon: 'checks', keys: 'shift+a', run: markAll },
     { label: 'Reload list', icon: 'refresh', keys: 'r', run: reset },
@@ -265,17 +396,30 @@
 
   commands(() => {
     const m = current;
+    const n = selected.size;
+    const sel = n > 0;
     return [
+      { id: 'select', group: 'Selection', label: m && selected.has(m.id) ? 'Deselect message' : 'Select message', keys: 'x', disabled: !m, run: () => m && toggle(m, index) },
+      { id: 'select-all', group: 'Selection', label: 'Select all in this view', keys: 'mod+a', disabled: total === 0 || selectingAll, run: selectAll },
+      { id: 'select-clear', group: 'Selection', label: 'Clear selection', keys: 'escape', disabled: !sel, run: clearSelection },
+      { id: 'select-read', group: 'Selection', label: `Mark ${n} selected as read`, keys: 'shift+i', disabled: !sel, run: () => markSelected(true) },
+      { id: 'select-unread', group: 'Selection', label: `Mark ${n} selected as unread`, keys: 'shift+u', disabled: !sel, run: () => markSelected(false) },
+      { id: 'select-save', group: 'Selection', label: `Save ${n} selected as .eml files…`, disabled: !sel, run: saveSelected },
+      { id: 'select-del-server', group: 'Selection', label: sel ? `Delete ${n} selected from mail server…` : 'Delete from mail server…', keys: 'delete, #',
+        disabled: !sel && !m, run: () => (sel ? (deleteScope = 'server') : m && deleteOne(m, 'server')) },
+      { id: 'select-del-backup', group: 'Selection', label: sel ? `Delete ${n} selected from backup…` : 'Delete from backup…', keys: 'shift+delete',
+        disabled: !sel && !m, run: () => (sel ? (deleteScope = 'everywhere') : m && deleteOne(m, 'everywhere')) },
       { id: 'next', group: 'Mail', label: 'Next message', keys: 'j, arrowdown', run: () => step(1) },
       { id: 'prev', group: 'Mail', label: 'Previous message', keys: 'k, arrowup', run: () => step(-1) },
       { id: 'first', group: 'Mail', label: 'First message', keys: 'home', run: () => openAt(0) },
       { id: 'last', group: 'Mail', label: 'Last message', keys: 'end', run: () => openAt(total - 1) },
-      { id: 'close', group: 'Mail', label: 'Close message', keys: 'escape', disabled: openId === null, run: () => go('/browse') },
+      { id: 'close', group: 'Mail', label: 'Close message', keys: 'escape', disabled: openId === null || sel, run: () => go('/browse') },
       { id: 'search', group: 'Mail', label: 'Search', keys: '/', run: () => searchEl?.focus() },
       { id: 'search-f', group: 'Mail', label: 'Search', keys: 'mod+f', anywhere: true, hidden: true, run: () => searchEl?.focus() },
-      { id: 'actions', group: 'Mail', label: 'Message actions…', keys: '.', disabled: !m, run: () => m && menuUnder(rowAt(index) ?? scroller, messageMenu(m, index)) },
-      { id: 'mark-unread', group: 'Mail', label: 'Mark as unread', keys: 'shift+u', disabled: !m?.reviewed, run: () => m && mark(m, false) },
-      { id: 'mark-read', group: 'Mail', label: 'Mark as read', keys: 'shift+i', disabled: !m || m.reviewed, run: () => m && mark(m, true) },
+      { id: 'actions', group: 'Mail', label: sel ? 'Selection actions…' : 'Message actions…', keys: '.', disabled: !m && !sel,
+        run: () => (sel ? menuUnder(selBar ?? scroller, selectionMenu()) : m && menuUnder(rowAt(index) ?? scroller, messageMenu(m, index))) },
+      { id: 'mark-unread', group: 'Mail', label: 'Mark as unread', keys: 'shift+u', disabled: sel || !m?.reviewed, run: () => m && mark(m, false) },
+      { id: 'mark-read', group: 'Mail', label: 'Mark as read', keys: 'shift+i', disabled: sel || !m || m.reviewed, run: () => m && mark(m, true) },
       { id: 'mark-all', group: 'Mail', label: 'Mark all in this view read', keys: 'shift+a', run: markAll },
       { id: 'from-sender', group: 'Mail', label: 'Search mail from this sender', disabled: !m, run: () => m && fromSender(m) },
       { id: 'copy-sender', group: 'Mail', label: 'Copy sender address', disabled: !m, run: () => m && copy(m.envelope.from, 'Address copied') },
@@ -307,13 +451,32 @@
   <!-- Message list -->
   <div class="relative min-h-0 min-w-0">
   <section class="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-line bg-panel">
-    <header class="flex items-center gap-2 border-b border-line px-4 py-3">
-      <Icon name="inbox" />
-      <h1 class="m-0 flex-1 truncate text-base font-semibold">{title}</h1>
-      <button class="bg-transparent px-2 py-1 text-muted hover:text-fg" onclick={markAll} title="Mark everything in this view as read (Shift+A)">
-        <Icon name="checks" size={15} /> Mark all read
-      </button>
-    </header>
+    {#if selected.size}
+      <!-- Same height as the title header, and swapped without a transition: the rows below must not move. -->
+      <header bind:this={selBar} class="flex h-13 flex-none items-center gap-1 border-b border-line bg-accent/8 px-3" {@attach contextMenu(selectionMenu)}
+        aria-label="Selection">
+        <button class="bg-transparent p-1.5 text-muted hover:text-fg" onclick={clearSelection} aria-label="Clear selection" title="Clear selection (Esc)"><Icon name="x" /></button>
+        <span class="mr-auto truncate pl-1 font-semibold tabular-nums">{selected.size.toLocaleString()} selected</span>
+        {#if selected.size < Math.min(total, SELECT_MAX)}
+          <button class="link flex-none px-2 text-[0.85rem]" disabled={selectingAll} onclick={selectAll}>{selectingAll ? 'Selecting…' : `Select all ${Math.min(total, SELECT_MAX).toLocaleString()}`}</button>
+        {/if}
+        <button class="bg-transparent p-1.5 text-muted hover:text-fg" onclick={() => markSelected(true)} title="Mark as read (Shift+I)" aria-label="Mark as read"><Icon name="check" /></button>
+        <button class="bg-transparent p-1.5 text-muted hover:text-fg" onclick={() => markSelected(false)} title="Mark as unread (Shift+U)" aria-label="Mark as unread"><Icon name="mail" /></button>
+        <button class="bg-transparent p-1.5 text-muted hover:text-fg" onclick={saveSelected} title="Save as .eml files…" aria-label="Save as .eml files"><Icon name="download" /></button>
+        <button class="bg-transparent p-1.5 text-muted hover:text-bad" onclick={(e) => menuUnder(e.currentTarget, [
+          { label: 'Delete from mail server…', icon: 'trash', keys: 'delete', danger: true, run: () => (deleteScope = 'server') },
+          { label: 'Delete from backup…', icon: 'trash', keys: 'shift+delete', danger: true, run: () => (deleteScope = 'everywhere') },
+        ])} title="Delete…" aria-label="Delete"><Icon name="trash" /></button>
+      </header>
+    {:else}
+      <header class="flex h-13 flex-none items-center gap-2 border-b border-line px-4">
+        <Icon name="inbox" />
+        <h1 class="m-0 flex-1 truncate text-base font-semibold">{title}</h1>
+        <button class="bg-transparent px-2 py-1 text-muted hover:text-fg" onclick={markAll} title="Mark everything in this view as read (Shift+A)">
+          <Icon name="checks" size={15} /> Mark all read
+        </button>
+      </header>
+    {/if}
 
     <div class="flex flex-col gap-2.5 px-3 pt-3 pb-2">
       <label class="relative m-0 block">
@@ -371,9 +534,15 @@
         <ul class="relative m-0 list-none p-0" style="height: {total * ROW}px">
           {#each visible as i (i)}
             {@const m = at(i)}
-            <li class="absolute inset-x-0" style="top: {i * ROW}px; height: {ROW}px" role="option" aria-selected={!!m && openId === m.id} aria-setsize={total} aria-posinset={i + 1}>
+            <li class="group absolute inset-x-0" style="top: {i * ROW}px; height: {ROW}px" role="option" aria-selected={!!m && (openId === m.id || selected.has(m.id))} aria-setsize={total} aria-posinset={i + 1}>
               {#if m}
                 {@render row(m, i)}
+                <!-- Over the avatar: shown on hover, and on every row while something is selected. -->
+                <label class="absolute top-2.5 left-2.5 z-10 m-0 grid size-[34px] cursor-pointer place-items-center rounded-full bg-raised transition-opacity {selected.size ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'}"
+                  title="Select (x, or Ctrl/Shift-click the row)">
+                  <input type="checkbox" class="m-0 size-4 cursor-pointer accent-[var(--color-accent)]" checked={selected.has(m.id)}
+                    onclick={(e) => { e.preventDefault(); if (e.shiftKey) void selectRange(i); else toggle(m, i); }} aria-label="Select message" />
+                </label>
               {:else}
                 <div class="flex h-full items-start gap-3 px-2.5 py-2.5" aria-label="Loading">
                   <span class="mt-0.5 size-[34px] flex-none rounded-full bg-raised"></span>
@@ -420,7 +589,7 @@
   {@const sender = reveal(m.envelope.from_name ?? m.envelope.from) || '(unknown sender)'}
   {@const st = stateIcon[m.state]}
   {@const meta = [!account ? accountName(m.account_id) : '', reveal(m.labels.join(', '))].filter(Boolean).join(' · ')}
-  <button class="flex h-full w-full items-start gap-3 overflow-hidden rounded-lg px-2.5 py-2.5 text-left active:scale-[0.99] {openId === m.id ? 'bg-raised!' : 'bg-transparent'}" onclick={() => open(m, i)}
+  <button class="flex h-full w-full items-start gap-3 overflow-hidden rounded-lg px-2.5 py-2.5 text-left active:scale-[0.99] {selected.has(m.id) ? 'bg-accent/12!' : openId === m.id ? 'bg-raised!' : 'bg-transparent'}" onclick={(e) => rowClick(e, m, i)}
     {@attach contextMenu(() => messageMenu(m, i))}>
     <span class="relative mt-0.5">
       <Avatar name={sender} seed={m.envelope.from} size={34} />
@@ -443,3 +612,8 @@
     </span>
   </button>
 {/snippet}
+
+{#if deleteScope}
+  <DeleteMessages messages={chosen()} scope={deleteScope} onclose={() => (deleteScope = null)}
+    onstarted={(jobs) => { pendingJobs = [...pendingJobs, ...jobs]; deleteScope = null; clearSelection(); }} />
+{/if}

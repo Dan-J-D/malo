@@ -440,6 +440,33 @@ pub struct PurgeSummary {
     pub errors: Vec<String>,
 }
 
+/// Most messages one delete job takes; the app splits larger selections.
+pub const MAX_DELETE_BATCH: usize = 1000;
+
+/// Where selected messages are deleted from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum DeleteScope {
+    /// From the mail server only; the backup stays. Like a purge: each message must be verified
+    /// on the purge policy's required destinations (or every destination when none are set).
+    Server,
+    /// From the backup (index, manifests and stored objects on every destination), and first from
+    /// the mail server where it's still there, so the next backup doesn't bring it back.
+    Everywhere,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+pub struct DeleteSummary {
+    pub account_id: String,
+    #[ts(type = "number")]
+    pub deleted_from_server: u64,
+    #[ts(type = "number")]
+    pub deleted_from_backup: u64,
+    #[ts(type = "number")]
+    pub skipped: u64,
+    pub errors: Vec<String>,
+}
+
 // ───────────────────────────── jobs ─────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -474,13 +501,22 @@ pub enum JobKind {
     },
     /// From every destination: all mail, with each account's newest manifests first.
     RebuildIndexAll,
+    /// Deletes messages the user selected (at most [`MAX_DELETE_BATCH`]).
+    DeleteMessages {
+        account_id: String,
+        #[ts(type = "Array<number>")]
+        message_ids: Vec<i64>,
+        scope: DeleteScope,
+    },
 }
 
 impl JobKind {
     /// Account whose mutex this job needs, if any.
     pub fn account_id(&self) -> Option<&str> {
         match self {
-            JobKind::Backup { account_id } | JobKind::Purge { account_id } => Some(account_id),
+            JobKind::Backup { account_id }
+            | JobKind::Purge { account_id }
+            | JobKind::DeleteMessages { account_id, .. } => Some(account_id),
             _ => None,
         }
     }
@@ -908,6 +944,12 @@ pub enum SyncEvent {
     PurgeSummary {
         summary: PurgeSummary,
     },
+    /// Messages the user deleted from the backup: they're gone from the index.
+    MessagesDeleted {
+        account_id: String,
+        #[ts(type = "Array<number>")]
+        ids: Vec<i64>,
+    },
     AccountsChanged,
     Locked {
         reason: String,
@@ -975,6 +1017,8 @@ pub fn typescript_bindings() -> String {
         PurgeMailboxCount,
         ArmRequest,
         PurgeSummary,
+        DeleteScope,
+        DeleteSummary,
         CheckScope,
         JobKind,
         JobState,

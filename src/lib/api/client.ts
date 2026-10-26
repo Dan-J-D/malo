@@ -56,6 +56,8 @@ export const app = {
   saveAttachment: (messageId: number, index: number, filename: string) =>
     call<string | null>('save_attachment', { messageId, index, filename }),
   saveRaw: (messageId: number) => call<string | null>('save_raw', { messageId }),
+  /** Saves messages as .eml files into a folder the user picks: [folder, count saved]. */
+  saveRawMany: (messageIds: number[]) => call<[string, number] | null>('save_raw_many', { messageIds }),
   rawSource: (messageId: number) => call<string>('raw_source', { messageId }),
   saveRecoveryKit: (username: string, password: string, passphrase: string) =>
     call<string | null>('save_recovery_kit', { username, password, passphrase }),

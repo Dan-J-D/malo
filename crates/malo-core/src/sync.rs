@@ -681,7 +681,67 @@ pub async fn write_manifests(
     ctx.index.kv_bump(&dest_key, generation, 0)?;
     store.write_account_marker(account, generation).await?;
     ctx.index.kv_delete(&dirty_key)?;
+    // Objects of messages deleted from the backup go once no manifest lists them any more.
+    if let Err(e) = flush_object_deletes(ctx, store).await {
+        tracing::warn!(dest = %store.dest.name, "deleting objects of deleted messages: {e:#}");
+    }
     Ok(())
+}
+
+fn object_deletes_key(destination_id: &str) -> String {
+    format!("object_deletes:{destination_id}")
+}
+
+/// Queues stored objects of messages deleted from the backup for deletion on a destination.
+pub fn queue_object_deletes(
+    ctx: &JobCtx,
+    destination_id: &str,
+    paths: &[String],
+) -> anyhow::Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let key = object_deletes_key(destination_id);
+    let mut queued: Vec<String> = ctx
+        .index
+        .kv_get(&key)?
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default();
+    queued.extend(paths.iter().cloned());
+    queued.sort();
+    queued.dedup();
+    ctx.index.kv_set(&key, &serde_json::to_string(&queued)?)
+}
+
+/// Deletes the queued objects on one destination. Call it only after the manifests there were
+/// rewritten without them. An object a message uses again (identical content backed up since)
+/// stays; ones that fail to delete stay queued.
+pub async fn flush_object_deletes(ctx: &JobCtx, store: &Store) -> anyhow::Result<()> {
+    let key = object_deletes_key(&store.dest.id);
+    let Some(v) = ctx.index.kv_get(&key)? else {
+        return Ok(());
+    };
+    let queued: Vec<String> = serde_json::from_str(&v).unwrap_or_default();
+    let mut left = Vec::new();
+    let mut first_error = None;
+    for path in queued {
+        if ctx.index.object_in_use(&store.dest.id, &path)? {
+            continue;
+        }
+        if let Err(e) = store.delete(&path).await {
+            first_error.get_or_insert(e);
+            left.push(path);
+        }
+    }
+    if left.is_empty() {
+        ctx.index.kv_delete(&key)?;
+    } else {
+        ctx.index.kv_set(&key, &serde_json::to_string(&left)?)?;
+    }
+    match first_error {
+        Some(e) => Err(e.context(format!("{} object(s) not deleted yet", left.len()))),
+        None => Ok(()),
+    }
 }
 
 /// Result of comparing the server with the index for one account.

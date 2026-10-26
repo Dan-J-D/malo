@@ -175,9 +175,13 @@ confirm_name: string, };
 
 export type PurgeSummary = { account_id: string, deleted: number, bytes: number, skipped: number, errors: Array<string>, };
 
+export type DeleteScope = "server" | "everywhere";
+
+export type DeleteSummary = { account_id: string, deleted_from_server: number, deleted_from_backup: number, skipped: number, errors: Array<string>, };
+
 export type CheckScope = { "scope": "all" } | { "scope": "account", account_id: string, } | { "scope": "destination", destination_id: string, };
 
-export type JobKind = { "type": "backup", account_id: string, } | { "type": "check", scope: CheckScope, deep: boolean, } | { "type": "purge_dry_run", account_id: string, } | { "type": "purge", account_id: string, } | { "type": "repair", scope: CheckScope, } | { "type": "rebuild_index", destination_id: string, } | { "type": "rebuild_index_all" };
+export type JobKind = { "type": "backup", account_id: string, } | { "type": "check", scope: CheckScope, deep: boolean, } | { "type": "purge_dry_run", account_id: string, } | { "type": "purge", account_id: string, } | { "type": "repair", scope: CheckScope, } | { "type": "rebuild_index", destination_id: string, } | { "type": "rebuild_index_all" } | { "type": "delete_messages", account_id: string, message_ids: Array<number>, scope: DeleteScope, };
 
 export type JobState = "queued" | "running" | "done" | "failed" | "cancelled" | "skipped_locked";
 
@@ -271,7 +275,7 @@ export type AdminSettings = { max_auto_lock_hours: number, allowed_fs_mounts: Ar
  */
 block_private_networks: boolean, };
 
-export type SyncEvent = { "type": "job_queued", job: JobInfo, } | { "type": "job_started", job: JobInfo, } | { "type": "job_progress", job_id: string, progress: JobProgress, } | { "type": "job_finished", job: JobInfo, } | { "type": "new_message_discovered", message: MessageSummary, } | { "type": "message_state_changed", id: number, account_id: string, state: MessageState, stored: number, destinations: number, error: string | null, } | { "type": "check_progress", job_id: string, destination_id: string, done: number, total: number, } | { "type": "check_finished", report: CheckReport, } | { "type": "purge_summary", summary: PurgeSummary, } | { "type": "accounts_changed" } | { "type": "locked", reason: string, } | { "type": "notice", level: string, message: string, };
+export type SyncEvent = { "type": "job_queued", job: JobInfo, } | { "type": "job_started", job: JobInfo, } | { "type": "job_progress", job_id: string, progress: JobProgress, } | { "type": "job_finished", job: JobInfo, } | { "type": "new_message_discovered", message: MessageSummary, } | { "type": "message_state_changed", id: number, account_id: string, state: MessageState, stored: number, destinations: number, error: string | null, } | { "type": "check_progress", job_id: string, destination_id: string, done: number, total: number, } | { "type": "check_finished", report: CheckReport, } | { "type": "purge_summary", summary: PurgeSummary, } | { "type": "messages_deleted", account_id: string, ids: Array<number>, } | { "type": "accounts_changed" } | { "type": "locked", reason: string, } | { "type": "notice", level: string, message: string, };
 
 export type EventBatch = { events: Array<SyncEvent>, };
 

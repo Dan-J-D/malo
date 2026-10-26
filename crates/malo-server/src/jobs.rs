@@ -364,7 +364,8 @@ async fn execute(
     let refused = |e: crate::error::ApiErr| anyhow::anyhow!(e.message);
     if let JobKind::Backup { account_id }
     | JobKind::Purge { account_id }
-    | JobKind::PurgeDryRun { account_id } = kind
+    | JobKind::PurgeDryRun { account_id }
+    | JobKind::DeleteMessages { account_id, .. } = kind
     {
         crate::net::check_account(state, ctx.account(account_id)?)
             .await
@@ -407,6 +408,13 @@ async fn execute(
         JobKind::Purge { account_id } => {
             serde_json::to_value(purge::run_purge(ctx, account_id).await?)?
         }
+        JobKind::DeleteMessages {
+            account_id,
+            message_ids,
+            scope,
+        } => serde_json::to_value(
+            purge::delete_selected(ctx, account_id, message_ids, *scope).await?,
+        )?,
         JobKind::RebuildIndex { .. } | JobKind::RebuildIndexAll => {
             let from = match kind {
                 JobKind::RebuildIndex { destination_id } => vec![destination_id.clone()],

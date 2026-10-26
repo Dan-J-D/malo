@@ -54,6 +54,10 @@ export function jobLabel(kind: import('./api/types').JobKind, accountName: (id: 
     case 'repair': return `Repair · ${scope(kind.scope)}`;
     case 'rebuild_index': return `Rebuild index · ${destName(kind.destination_id)}`;
     case 'rebuild_index_all': return 'Rebuild index · all destinations';
+    case 'delete_messages': {
+      const n = `${kind.message_ids.length} message${kind.message_ids.length === 1 ? '' : 's'}`;
+      return `Delete ${n} from ${kind.scope === 'server' ? 'mail server' : 'backup'} · ${accountName(kind.account_id)}`;
+    }
   }
 }
 

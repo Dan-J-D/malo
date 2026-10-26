@@ -19,6 +19,8 @@ pub struct RebuildStats {
     pub replicas: u64,
     /// Manifest lines ignored because they were malformed or pointed outside the destination.
     pub skipped: u64,
+    /// Manifest lines of messages the user deleted from the backup (manifest not rewritten yet).
+    pub deleted: u64,
     /// The account manifests found, with their generation (higher is newer).
     pub sources: Vec<RebuildSource>,
     /// Destinations that couldn't be read (a rebuild from all destinations goes on without them).
@@ -229,6 +231,13 @@ fn import_entry(
     {
         tracing::warn!(path = %e.object_path, "skipping invalid manifest entry");
         stats.skipped += 1;
+        return Ok(None);
+    }
+    if ctx
+        .index
+        .is_tombstoned(&e.account_id, &e.mailbox, e.uidvalidity, e.uid, &e.sha256)?
+    {
+        stats.deleted += 1;
         return Ok(None);
     }
     // An entry whose account has neither a config entry nor a marker (marker lost, or the id

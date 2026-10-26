@@ -135,6 +135,12 @@ random 256-bit MDK ◄───────────────────�
 5. **Purge.** Set the retention rule: older than N days (0 means everything), the required destinations, mailboxes to exclude, and whether to skip flagged mail. Run a dry run, then arm the purge by typing the account name. Each run re-verifies every candidate in every required destination, re-selects the mailbox, checks that UIDVALIDITY hasn't changed and that size and Gmail id still match, and only then deletes with `UID STORE +FLAGS.SILENT (\Deleted)` followed by `UID EXPUNGE <set>`. Servers without UIDPLUS are refused. On Gmail, messages are moved to Trash and expunged there, which deletes them permanently. Every deletion is written to the audit log.
 
    Exchange and Microsoft 365 may keep deleted items in *Recoverable Items* for some time; Malo can't control that.
+6. **Selecting mail.** In *Mail*, tick the box on a message's avatar, Ctrl/⌘-click a row, Shift-click for a range, press `x` for the open message, or Ctrl+A for the whole view (up to 10,000). The selection bar and right-click menu then act on all of them:
+   - mark them read or unread, or save them as `.eml` files into a folder;
+   - **Delete from mail server** (`Delete` or `#`): a purge of just these messages, without the age, mailbox and flag rules. Each message must be verified on the purge's required destinations (every destination when none are set). It's re-verified there and identity-checked on the server, like a purge. The backup stays.
+   - **Delete from backup** (`Shift+Delete`): removes the messages from Malo's index, rewrites the manifests on every destination without them, and deletes their stored copies. A message still on the mail server is deleted there first, or the next backup would bring it back; if that fails, it stays in the backup too. A destination that can't be reached is cleaned up at its next successful backup, and tombstones in the index keep a rebuild from restoring the messages meanwhile. This can't be undone.
+
+   Both deletions ask for two confirmations and run as jobs (at most 1,000 messages each, one per account), listed in *Activity* and the audit log.
 
 ## Desktop app
 

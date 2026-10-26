@@ -2200,3 +2200,161 @@ async fn admin_invites_limits_and_deletion() {
         assert!(actions.contains(&a), "{a} missing from {actions:?}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delete_selected_messages() {
+    if !enabled() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let server = start_server(dir.path(), |_| {}).await;
+    let admin = bootstrap(&server).await;
+    let kai = new_user(&admin, &uniq("kai")).await;
+    let me: Me = kai.get("/me").await;
+    let plain: DestinationView = kai.post("/destinations", &fs_dest("plain", "p")).await;
+    let sealed: DestinationView = kai
+        .post(
+            "/destinations",
+            &DestinationInput {
+                encrypt: true,
+                ..fs_dest("sealed", "s")
+            },
+        )
+        .await;
+    let imap_user = uniq("del-");
+    let mut c = imap_conn(&imap_user, IMAP_PORT).await;
+    for subject in ["keep", "server only", "everywhere", "backup only"] {
+        append(&mut c, "INBOX", None, None, &mail(subject, 0)).await;
+    }
+    c.logout().await;
+    let acc: AccountView = kai
+        .post("/accounts", &imap_input("del", &imap_user, IMAP_PORT))
+        .await;
+    let backup = || {
+        kai.run_job(JobKind::Backup {
+            account_id: acc.id.clone(),
+        })
+    };
+    job_result::<serde_json::Value>(&backup().await);
+    let local = dir.path().join("users").join(&me.id).join("local");
+    let files = |ext: &str| {
+        fn walk(p: &std::path::Path, ext: &str, n: &mut usize) {
+            for e in std::fs::read_dir(p).into_iter().flatten().flatten() {
+                if e.path().is_dir() {
+                    walk(&e.path(), ext, n);
+                } else if e.path().to_string_lossy().ends_with(ext) {
+                    *n += 1;
+                }
+            }
+        }
+        let mut n = 0;
+        walk(&local, ext, &mut n);
+        n
+    };
+    let (eml, enc) = (files(".eml"), files(".enc"));
+    let list: MessageList = kai.get("/messages?limit=100").await;
+    let id = |subject: &str| {
+        list.messages
+            .iter()
+            .find(|m| m.envelope.subject == subject)
+            .unwrap()
+            .id
+    };
+    let delete = |ids: Vec<i64>, scope: DeleteScope| {
+        kai.run_job(JobKind::DeleteMessages {
+            account_id: acc.id.clone(),
+            message_ids: ids,
+            scope,
+        })
+    };
+
+    // From the server: the backup stays.
+    let s: DeleteSummary = job_result(
+        &delete(
+            vec![id("server only"), id("backup only")],
+            DeleteScope::Server,
+        )
+        .await,
+    );
+    assert_eq!(
+        (s.deleted_from_server, s.deleted_from_backup),
+        (2, 0),
+        "{s:?}"
+    );
+    let on_server = server_messages(&imap_user, IMAP_PORT).await;
+    assert_eq!(on_server.len(), 2);
+    let list2: MessageList = kai.get("/messages?limit=100").await;
+    assert_eq!(list2.total, 4);
+    assert!(list2
+        .messages
+        .iter()
+        .any(|m| m.envelope.subject == "server only" && m.deleted_on_server));
+
+    // From the backup: one already gone from the server, one deleted there first.
+    let s: DeleteSummary = job_result(
+        &delete(
+            vec![id("everywhere"), id("backup only")],
+            DeleteScope::Everywhere,
+        )
+        .await,
+    );
+    assert_eq!(
+        (s.deleted_from_server, s.deleted_from_backup),
+        (1, 2),
+        "{s:?}"
+    );
+    assert!(s.errors.is_empty(), "{s:?}");
+    let on_server = server_messages(&imap_user, IMAP_PORT).await;
+    assert_eq!(
+        on_server.keys().collect::<HashSet<_>>(),
+        HashSet::from([&"keep".to_string()])
+    );
+    let list3: MessageList = kai.get("/messages?limit=100").await;
+    let left: HashSet<_> = list3
+        .messages
+        .iter()
+        .map(|m| m.envelope.subject.clone())
+        .collect();
+    assert_eq!(left, HashSet::from(["keep".into(), "server only".into()]));
+    // The stored copies are gone from both destinations.
+    assert_eq!((files(".eml"), files(".enc")), (eml - 2, enc - 2));
+
+    // Neither the next backup nor a rebuild from the rewritten manifests brings them back.
+    job_result::<serde_json::Value>(&backup().await);
+    for d in [&plain, &sealed] {
+        job_result::<serde_json::Value>(
+            &kai.run_job(JobKind::RebuildIndex {
+                destination_id: d.id.clone(),
+            })
+            .await,
+        );
+    }
+    let list4: MessageList = kai.get("/messages?limit=100").await;
+    assert_eq!(list4.total, 2);
+
+    // A check finds the destinations consistent.
+    let report: CheckReport = job_result(
+        &kai.run_job(JobKind::Check {
+            scope: CheckScope::All,
+            deep: true,
+        })
+        .await,
+    );
+    assert!(report.ok, "{report:?}");
+
+    // Too many messages in one job are refused.
+    let big = kai
+        .call::<_, JobInfo>(
+            Method::POST,
+            "/jobs",
+            Some(&CreateJobRequest {
+                kind: JobKind::DeleteMessages {
+                    account_id: acc.id.clone(),
+                    message_ids: (0..=MAX_DELETE_BATCH as i64).collect(),
+                    scope: DeleteScope::Everywhere,
+                },
+            }),
+        )
+        .await;
+    assert_eq!(big.unwrap_err().0, 400);
+}

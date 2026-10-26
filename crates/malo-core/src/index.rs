@@ -126,6 +126,15 @@ CREATE TABLE IF NOT EXISTS audit_log (
     detail TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS tombstones (
+    account TEXT NOT NULL,
+    mailbox TEXT NOT NULL,
+    uidvalidity INTEGER NOT NULL,
+    uid INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    deleted_at TEXT NOT NULL,
+    PRIMARY KEY(account, mailbox, uidvalidity, uid, sha256)
+);
 "#;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -719,6 +728,87 @@ impl Index {
                 c.prepare(&format!("{MEMBERSHIP_SELECT} WHERE message=?1 ORDER BY id"))?;
             let rows = stmt.query_map([message], membership_row)?.collect();
             rows
+        })
+    }
+
+    /// Removes messages the user deleted from the backup: their rows, memberships and replicas.
+    /// Each membership leaves a tombstone, so manifests on a destination that couldn't be
+    /// rewritten yet don't bring the message back in a rebuild. Returns the stored objects that
+    /// no remaining replica uses (encrypted objects are shared by identical messages), as
+    /// (destination, object path).
+    pub fn forget_messages(&self, ids: &[i64]) -> anyhow::Result<Vec<(String, String)>> {
+        let now = Utc::now().to_rfc3339();
+        self.with(|c| {
+            let tx = c.unchecked_transaction()?;
+            let mut objects: Vec<(String, String)> = Vec::new();
+            for id in ids {
+                let sha: Option<Option<String>> = tx
+                    .query_row("SELECT sha256 FROM messages WHERE id=?1", [id], |r| r.get(0))
+                    .optional()?;
+                let Some(sha) = sha else { continue };
+                tx.execute(
+                    "INSERT OR IGNORE INTO tombstones(account, mailbox, uidvalidity, uid, sha256, deleted_at)
+                     SELECT g.account, mb.name, mb.uidvalidity, m.uid, ?2, ?3
+                     FROM memberships m JOIN mailboxes mb ON mb.id=m.mailbox JOIN messages g ON g.id=m.message
+                     WHERE m.message=?1",
+                    params![id, sha.unwrap_or_default(), now],
+                )?;
+                {
+                    let mut stmt =
+                        tx.prepare("SELECT destination, object_path FROM replicas WHERE message=?1")?;
+                    let rows = stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                    for row in rows {
+                        objects.push(row?);
+                    }
+                }
+                tx.execute("DELETE FROM memberships WHERE message=?1", [id])?;
+                tx.execute("DELETE FROM replicas WHERE message=?1", [id])?;
+                tx.execute("DELETE FROM messages WHERE id=?1", [id])?;
+            }
+            objects.sort();
+            objects.dedup();
+            let mut unused = Vec::new();
+            for (dest, path) in objects {
+                let used: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM replicas WHERE destination=?1 AND object_path=?2)",
+                    params![dest, path],
+                    |r| r.get(0),
+                )?;
+                if !used {
+                    unused.push((dest, path));
+                }
+            }
+            tx.commit()?;
+            Ok(unused)
+        })
+    }
+
+    /// Whether a manifest line describes a message the user deleted from the backup.
+    pub fn is_tombstoned(
+        &self,
+        account: &str,
+        mailbox: &str,
+        uidvalidity: u32,
+        uid: u32,
+        sha256: &str,
+    ) -> anyhow::Result<bool> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM tombstones WHERE account=?1 AND mailbox=?2 AND uidvalidity=?3 AND uid=?4 AND sha256=?5)",
+                params![account, mailbox, uidvalidity, uid, sha256],
+                |r| r.get(0),
+            )
+        })
+    }
+
+    /// Whether any replica on `destination` still uses `object_path`.
+    pub fn object_in_use(&self, destination: &str, object_path: &str) -> anyhow::Result<bool> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM replicas WHERE destination=?1 AND object_path=?2)",
+                params![destination, object_path],
+                |r| r.get(0),
+            )
         })
     }
 
@@ -1503,6 +1593,54 @@ mod tests {
         assert_eq!(idx.pending_messages("a", false).unwrap().len(), 1);
         assert_eq!(retry_backoff(5), chrono::Duration::minutes(30));
         assert_eq!(retry_backoff(50), chrono::Duration::hours(24));
+    }
+
+    #[test]
+    fn forgotten_messages_leave_tombstones_and_shared_objects() {
+        let idx = Index::open_in_memory().unwrap();
+        let env = empty_envelope();
+        let inbox = idx
+            .upsert_mailbox("a", "INBOX", "INBOX", "INBOX", None, None, 7)
+            .unwrap();
+        let sha = "ab".repeat(32);
+        let add = |uid: u32| {
+            let id = idx
+                .insert_message(&NewMessage {
+                    account: "a",
+                    run: None,
+                    size: 1,
+                    internaldate: None,
+                    message_id_hdr: None,
+                    gm_msgid: None,
+                    envelope: &env,
+                    state: MessageState::Verified,
+                    sha256: Some(&sha),
+                })
+                .unwrap();
+            idx.add_membership(id, inbox.id, uid, &[], &[]).unwrap();
+            // Identical content: both messages use the same encrypted object.
+            idx.upsert_replica(id, "d1", "o/shared.enc", true, 1, ReplicaStatus::Verified)
+                .unwrap();
+            id
+        };
+        let (one, two) = (add(1), add(2));
+        // The object stays while the other message uses it …
+        assert!(idx.forget_messages(&[one]).unwrap().is_empty());
+        assert!(idx.message(one).unwrap().is_none());
+        assert!(idx.memberships(one).unwrap().is_empty());
+        assert!(idx.is_tombstoned("a", "INBOX", 7, 1, &sha).unwrap());
+        // … not for another UID, UIDVALIDITY or content.
+        assert!(!idx.is_tombstoned("a", "INBOX", 7, 2, &sha).unwrap());
+        assert!(!idx.is_tombstoned("a", "INBOX", 8, 1, &sha).unwrap());
+        assert!(!idx
+            .is_tombstoned("a", "INBOX", 7, 1, &"cd".repeat(32))
+            .unwrap());
+        // … and goes with the last one.
+        assert_eq!(
+            idx.forget_messages(&[two, 999]).unwrap(),
+            vec![("d1".to_string(), "o/shared.enc".to_string())]
+        );
+        assert!(!idx.object_in_use("d1", "o/shared.enc").unwrap());
     }
 
     #[test]

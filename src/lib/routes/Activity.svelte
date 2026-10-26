@@ -1,7 +1,7 @@
 <script lang="ts">
   import { api } from '../api/client';
   import type * as T from '../api/types';
-  import { live, scope, attempt, accountName, destName, go, refreshJobs, clearFound, setReviewed, FOUND_KEEP } from '../state.svelte';
+  import { live, scope, attempt, accountName, destName, go, refreshJobs, clearFound, setReviewed, FOUND_KEEP, deleteText } from '../state.svelte';
   import { commands } from '../commands.svelte';
   import { contextMenu, copy, type Entry } from '../menu.svelte';
   import { bytes, when, ago, jobLabel, reveal, shortDate } from '../format';
@@ -129,6 +129,7 @@
             {:else if j.kind.type === 'purge' && j.result}{j.result.deleted} deleted · {bytes(j.result.bytes)}
             {:else if (j.kind.type === 'check' || j.kind.type === 'repair') && j.result}{j.result.ok ? 'in sync' : 'problems found'}{j.result.repaired ? ` · ${j.result.repaired} repaired` : ''}
             {:else if j.kind.type === 'purge_dry_run' && j.result}{j.result.total_count} would be deleted
+            {:else if j.kind.type === 'delete_messages' && j.result}{deleteText(j.result)}
             {/if}
           </td>
         </tr>

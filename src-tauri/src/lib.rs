@@ -638,6 +638,12 @@ async fn download_to(
     let Some(target) = save_target(app, suggested) else {
         return Ok(None);
     };
+    fetch_to_file(state, path, &target).await?;
+    Ok(Some(target.display().to_string()))
+}
+
+/// Streams a server response into `target` (through a `.part` file, renamed when complete).
+async fn fetch_to_file(state: &AppState, path: &str, target: &std::path::Path) -> CmdResult<()> {
     let c = conn(state)?;
     let resp = check(
         request(&c, reqwest::Method::GET, path)
@@ -656,8 +662,8 @@ async fn download_to(
         }
         f.flush().await.map_err(err)?;
     }
-    tokio::fs::rename(&tmp, &target).await.map_err(err)?;
-    Ok(Some(target.display().to_string()))
+    tokio::fs::rename(&tmp, target).await.map_err(err)?;
+    Ok(())
 }
 
 /// "Save as…" for an attachment. Never opened automatically.
@@ -692,6 +698,47 @@ async fn save_raw(
         &format!("message-{message_id}.eml"),
     )
     .await
+}
+
+/// Saves several messages as `.eml` files into a folder the user picks (`MALO_AUTOSAVE_DIR` in
+/// headless tests). Existing files are never overwritten. Returns the folder and how many were
+/// saved; a failure stops there and reports how far it got.
+#[tauri::command]
+async fn save_raw_many(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    message_ids: Vec<i64>,
+) -> CmdResult<Option<(String, u32)>> {
+    let dir = match std::env::var("MALO_AUTOSAVE_DIR") {
+        Ok(d) => PathBuf::from(d),
+        Err(_) => {
+            let mut dialog = app.dialog().file();
+            if let Some(d) = dialog_dir(&app) {
+                dialog = dialog.set_directory(d);
+            }
+            match dialog
+                .blocking_pick_folder()
+                .and_then(|p| p.into_path().ok())
+            {
+                Some(d) => d,
+                None => return Ok(None),
+            }
+        }
+    };
+    let mut saved = 0u32;
+    for id in message_ids {
+        let mut target = dir.join(format!("message-{id}.eml"));
+        let mut n = 1;
+        while target.exists() {
+            target = dir.join(format!("message-{id}-{n}.eml"));
+            n += 1;
+        }
+        if let Err(e) = fetch_to_file(&state, &format!("/messages/{id}/raw"), &target).await {
+            return Err(format!("saved {saved} message(s), then: {e}"));
+        }
+        saved += 1;
+    }
+    Ok(Some((dir.display().to_string(), saved)))
 }
 
 /// Raw RFC 822 source as text (lossy UTF-8), shown in a <pre>, never rendered.
@@ -865,6 +912,7 @@ pub fn run() {
             subscribe_events,
             save_attachment,
             save_raw,
+            save_raw_many,
             raw_source,
             save_recovery_kit,
             pick_recovery_kit,
