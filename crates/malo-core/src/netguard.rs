@@ -153,6 +153,26 @@ pub fn http_client() -> reqwest::ClientBuilder {
         .redirect(reqwest::redirect::Policy::none())
 }
 
+impl reqwest013::dns::Resolve for Resolver {
+    fn resolve(&self, name: reqwest013::dns::Name) -> reqwest013::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let addrs = resolve(&host, 0).await?;
+            let addrs: reqwest013::dns::Addrs = Box::new(addrs.into_iter());
+            Ok(addrs)
+        })
+    }
+}
+
+/// The same for storage destinations (OpenDAL's transport uses reqwest 0.13), with Malo's
+/// rustls setup so it never depends on a process-wide crypto provider.
+pub fn storage_http_client() -> reqwest013::ClientBuilder {
+    reqwest013::Client::builder()
+        .dns_resolver(Arc::new(Resolver))
+        .redirect(reqwest013::redirect::Policy::none())
+        .tls_backend_preconfigured(Arc::unwrap_or_clone(crate::tls::webpki_config()))
+}
+
 /// An HTTP(S) URL for credentials to be sent to: https, or http to this machine (for local test
 /// servers). With the block on, addresses given as numbers must be public too, as the resolver
 /// isn't asked about those.

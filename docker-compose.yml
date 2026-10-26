@@ -1,6 +1,7 @@
 # Malo backup server. The test profile adds Dovecot, RustFS (S3) and fake-gcs-server.
 #   Production:   docker compose up -d malo
 #   Test stack:   docker compose --profile test up -d
+#                 (its services carry test credentials and admin APIs: published on 127.0.0.1 only)
 #                 MALO_IT=1 cargo test -p malo-server --test integration -- --test-threads=1
 services:
   malo:
@@ -41,18 +42,18 @@ services:
 
   dovecot:
     profiles: [test]
-    image: dovecot/dovecot:2.3.21
+    image: dovecot/dovecot:2.3.21@sha256:1c18c756f20d03867077a1b509a6e2e3008ab1eafa56377b6f2eca12dc1ba581
     ports:
-      - "10993:993"
-      - "10143:143"
+      - "127.0.0.1:10993:993"
+      - "127.0.0.1:10143:143"
     volumes:
       - ./docker/test/dovecot/dovecot.conf:/etc/dovecot/dovecot.conf:ro
 
   dovecot-nouidplus:
     profiles: [test]
-    image: dovecot/dovecot:2.3.21
+    image: dovecot/dovecot:2.3.21@sha256:1c18c756f20d03867077a1b509a6e2e3008ab1eafa56377b6f2eca12dc1ba581
     ports:
-      - "11993:993"
+      - "127.0.0.1:11993:993"
     volumes:
       - ./docker/test/dovecot/dovecot.conf:/etc/dovecot/dovecot.conf:ro
       - ./docker/test/dovecot/no-uidplus.conf:/etc/dovecot/malo-extra.conf:ro
@@ -62,17 +63,17 @@ services:
   # network namespace so both see the same issuer URL (http://localhost:18080/default).
   mockoauth:
     profiles: [test]
-    image: ghcr.io/navikt/mock-oauth2-server:2.1.10
+    image: ghcr.io/navikt/mock-oauth2-server:2.1.10@sha256:65d4ed47ce094cc3849e41e03499bfb32372d69c726ec22b3d5a19eba9bc787e
     environment:
       SERVER_PORT: "18080"
       JSON_CONFIG: '{"interactiveLogin":true}'
     ports:
-      - "18080:18080"
-      - "12993:993"
+      - "127.0.0.1:18080:18080"
+      - "127.0.0.1:12993:993"
 
   dovecot-oauth:
     profiles: [test]
-    image: dovecot/dovecot:2.3.21
+    image: dovecot/dovecot:2.3.21@sha256:1c18c756f20d03867077a1b509a6e2e3008ab1eafa56377b6f2eca12dc1ba581
     network_mode: "service:mockoauth"
     depends_on: [mockoauth]
     volumes:
@@ -81,9 +82,9 @@ services:
 
   rustfs:
     profiles: [test]
-    image: rustfs/rustfs:latest
+    image: rustfs/rustfs:1.0.4@sha256:ed9210d6411d77ffceb70d94b964a3cb7d225983368bc25bebe01e995293dcc2
     ports:
-      - "19000:9000"
+      - "127.0.0.1:19000:9000"
     environment:
       RUSTFS_ACCESS_KEY: malo-test
       RUSTFS_SECRET_KEY: malo-test-secret
@@ -95,14 +96,14 @@ services:
   # Malo's fuzzers talk to RustFS through 127.0.0.1:19001.
   toxiproxy:
     profiles: [test]
-    image: ghcr.io/shopify/toxiproxy:2.9.0
+    image: ghcr.io/shopify/toxiproxy:2.9.0@sha256:b44c283298cea49e2defaba1b3028783798346f2a926684e3a345fd8441af3b8
     ports:
-      - "8474:8474"
-      - "19001-19016:19001-19016"
+      - "127.0.0.1:8474:8474"
+      - "127.0.0.1:19001-19016:19001-19016"
 
   rustfs-init:
     profiles: [test]
-    image: amazon/aws-cli:latest
+    image: amazon/aws-cli:2.38.5@sha256:c8156a0e74e13929a42d7e60f0d4e14e7d28d980cd21822505d4bff80e5460c1
     depends_on: [rustfs]
     environment:
       AWS_ACCESS_KEY_ID: malo-test
@@ -118,10 +119,10 @@ services:
 
   gcs:
     profiles: [test]
-    image: fsouza/fake-gcs-server:latest
+    image: fsouza/fake-gcs-server:1.56.1@sha256:797ce226d62f947c009dc40246b30cfb456b8473d8241407f9d6f2c04e4d69ef
     command: ["-scheme", "http", "-port", "4443", "-public-host", "localhost:14443", "-backend", "memory"]
     ports:
-      - "14443:4443"
+      - "127.0.0.1:14443:4443"
 
 volumes:
   malo-data:

@@ -1,0 +1,24 @@
+# cargo deny check advisories bans sources (run in CI's audit job)
+
+[advisories]
+# RustSec advisories: vulnerable crates fail; unmaintained ones only in our direct dependencies.
+unmaintained = "workspace"
+yanked = "deny"
+ignore = [
+    # rsa (Marvin): no fixed release exists. Reached only through OpenDAL's request signing for
+    # GCS service accounts and Azure, which signs Malo's own requests with the user's key; Malo
+    # never decrypts with RSA or signs input an attacker chooses and times.
+    { id = "RUSTSEC-2023-0071", reason = "no fix; only signs Malo's own storage requests" },
+]
+
+[bans]
+# Duplicate versions are common through the Tauri tree; they're not a security problem.
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

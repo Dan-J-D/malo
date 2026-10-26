@@ -409,11 +409,7 @@ pub fn fs_dest(name: &str, root: &str) -> DestinationInput {
 
 /// Direct OpenDAL access to the S3 test bucket (to delete or corrupt objects behind Malo's back).
 pub fn s3_operator(bucket: &str) -> opendal::Operator {
-    let opts = s3_dest("x", bucket, "", false)
-        .options
-        .into_iter()
-        .collect::<Vec<_>>();
-    opendal::Operator::via_iter(opendal::Scheme::S3, opts).unwrap()
+    malo_core::store::raw_operator("s3", &s3_dest("x", bucket, "", false).options).unwrap()
 }
 
 pub async fn wait_until(mut f: impl FnMut() -> BoxFuture<'static, bool>, secs: u64) -> bool {

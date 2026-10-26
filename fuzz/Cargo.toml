@@ -11,6 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 malo-core = { path = "../crates/malo-core" }
 malo-api = { path = "../crates/malo-api" }
+malo-server = { path = "../crates/malo-server" }
 serde_json = "1"
 imap-proto = "0.16"
 zeroize = "1"
@@ -73,5 +74,11 @@ doc = false
 [[bin]]
 name = "config_blob"
 path = "fuzz_targets/config_blob.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "imap_server_command"
+path = "fuzz_targets/imap_server_command.rs"
 test = false
 doc = false

@@ -7,6 +7,10 @@ on:
   schedule:
     - cron: "17 3 * * *"
 
+# Actions are pinned by commit; jobs only read the repository.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -15,13 +19,14 @@ jobs:
     name: fmt · clippy · unit tests
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           components: rustfmt, clippy
       - name: System libraries (Tauri)
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo fmt --all --check
       - name: Sidecar placeholder for tauri-build
         run: mkdir -p src-tauri/binaries && touch src-tauri/binaries/malo-server-x86_64-unknown-linux-gnu && mkdir -p dist
@@ -30,12 +35,29 @@ jobs:
       - name: TypeScript bindings are up to date
         run: git diff --exit-code src/lib/api/types.ts
 
+  audit:
+    name: Dependency audit (cargo-deny · npm audit)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo install cargo-deny --version 0.20.2 --locked
+      - run: cargo deny check advisories bans sources
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm audit --audit-level=high
+
   frontend:
     name: Svelte / Astro
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -47,9 +69,11 @@ jobs:
     name: Server integration (Dovecot · mock OAuth · RustFS · fake-gcs)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: docker compose --profile test up -d dovecot dovecot-nouidplus mockoauth dovecot-oauth rustfs gcs toxiproxy
       - run: docker compose --profile test up rustfs-init
       - run: MALO_IT=1 cargo test -p malo-server --test integration
@@ -58,7 +82,7 @@ jobs:
           MALO_IT=1 cargo test -p malo-server --test fuzz_lifecycle fuzz_regressions
           MALO_IT=1 MALO_FUZZ_RUNS=5 MALO_FUZZ_STEPS=60 MALO_FUZZ_SEED=${{ github.run_number }} \
             cargo test -p malo-server --test fuzz_lifecycle fuzz_client -- --nocapture
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
           name: fuzz-lifecycle-failures
@@ -70,7 +94,7 @@ jobs:
     name: Docker image
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: docker build -f docker/Dockerfile -t malo-server:ci .
       - name: Boots and reports healthy
         run: |
@@ -95,19 +119,21 @@ jobs:
             bundles: msi,nsis
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: npm ci
       - run: node scripts/build-sidecar.mjs
       - run: npx tauri build --bundles ${{ matrix.bundles }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: malo-${{ matrix.os }}
           path: target/release/bundle/
@@ -117,21 +143,23 @@ jobs:
     runs-on: ubuntu-24.04
     needs: [docker]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
       - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: npm ci
-      - run: cargo install tauri-driver --locked
+      - run: cargo install tauri-driver --version 2.1.0 --locked
       - run: node scripts/build-sidecar.mjs --debug && npx tauri build --debug --no-bundle
       - run: docker build -f docker/Dockerfile -t malo-server:latest .
       - run: docker compose --profile test up -d dovecot mockoauth dovecot-oauth
       - run: e2e/run.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: e2e-screenshots
@@ -143,10 +171,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo install cargo-fuzz --locked
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@2c76c034f9e32a5d6e2c104dc4df23a22476db04 # nightly
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo install cargo-fuzz --version 0.13.2 --locked
       - run: docker compose --profile test up -d dovecot dovecot-nouidplus mockoauth dovecot-oauth rustfs gcs toxiproxy
       - run: docker compose --profile test up rustfs-init
       - name: Long lifecycle fuzz
@@ -159,7 +189,7 @@ jobs:
           for t in $(cargo +nightly fuzz list); do
             cargo +nightly fuzz run "$t" -- -max_total_time=180 -rss_limit_mb=4096
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
           name: fuzz-failures

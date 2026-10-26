@@ -1,14 +1,13 @@
 //! Destinations: OpenDAL operators, object layout, encrypted write + read-back verification, manifests.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Component, Path, PathBuf};
-use std::str::FromStr;
 use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context};
 use futures::TryStreamExt;
 use malo_api::DestinationTest;
-use opendal::{ErrorKind, Operator, Scheme};
+use opendal::{ErrorKind, Operator};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -197,11 +196,47 @@ pub fn confine_fs_root(requested: Option<&str>, policy: &FsPolicy) -> anyhow::Re
 
 const MAX_PREFIX_BYTES: usize = 512;
 
+/// The OpenDAL services a destination can use.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Scheme {
+    S3,
+    Gcs,
+    Azblob,
+    Webdav,
+    B2,
+    Fs,
+}
+
+impl Scheme {
+    fn parse(s: &str) -> anyhow::Result<Scheme> {
+        Ok(match s.to_ascii_lowercase().as_str() {
+            "s3" => Scheme::S3,
+            "gcs" => Scheme::Gcs,
+            "azblob" => Scheme::Azblob,
+            "webdav" => Scheme::Webdav,
+            "b2" => Scheme::B2,
+            "fs" => Scheme::Fs,
+            _ => bail!("{s} can't be used as a destination"),
+        })
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Scheme::S3 => "s3",
+            Scheme::Gcs => "gcs",
+            Scheme::Azblob => "azblob",
+            Scheme::Webdav => "webdav",
+            Scheme::B2 => "b2",
+            Scheme::Fs => "fs",
+        }
+    }
+}
+
 /// The OpenDAL options a destination may set, per service (with the aliases OpenDAL accepts).
 /// Everything else is refused: options that make the server use its own identity (an instance
 /// role, a VM service account, `role_arn`), read its own files, or that a future OpenDAL adds.
-fn allowed_options(scheme: Scheme) -> Option<&'static [&'static str]> {
-    Some(match scheme {
+fn allowed_options(scheme: Scheme) -> &'static [&'static str] {
+    match scheme {
         Scheme::S3 => &[
             "root",
             "bucket",
@@ -223,6 +258,7 @@ fn allowed_options(scheme: Scheme) -> Option<&'static [&'static str]> {
             "aws_token",
             "token",
             "allow_anonymous",
+            "skip_signature",
             "server_side_encryption",
             "aws_server_side_encryption",
             "server_side_encryption_aws_kms_key_id",
@@ -313,18 +349,13 @@ fn allowed_options(scheme: Scheme) -> Option<&'static [&'static str]> {
             "application_key",
         ],
         Scheme::Fs => &["root"],
-        _ => return None,
-    })
+    }
 }
 
 /// Azure falls back to credentials from the server's environment and to the VM's managed
 /// identity when a destination has none of its own: it must bring a SAS token or a shared key.
 fn check_azure_credentials(dest: &Destination) -> anyhow::Result<()> {
-    let has = |keys: &[&str]| {
-        dest.options
-            .iter()
-            .any(|(k, v)| keys.contains(&k.to_ascii_lowercase().as_str()) && !v.trim().is_empty())
-    };
+    let has = |keys: &[&str]| has_option(dest, keys);
     let sas = has(&[
         "sas_token",
         "azure_storage_sas_key",
@@ -347,6 +378,31 @@ fn check_azure_credentials(dest: &Destination) -> anyhow::Result<()> {
     }
 }
 
+fn has_option(dest: &Destination, keys: &[&str]) -> bool {
+    dest.options
+        .iter()
+        .any(|(k, v)| keys.contains(&k.to_ascii_lowercase().as_str()) && !v.trim().is_empty())
+}
+
+/// Without keys of its own, S3 goes down the AWS credential chain, and parts of it (web identity,
+/// ECS task role, SSO and credential processes) can't be switched off: they would sign with the
+/// server's identity. So a destination brings its keys, or is explicitly anonymous.
+fn check_s3_credentials(dest: &Destination) -> anyhow::Result<()> {
+    let id = has_option(dest, &["access_key_id", "aws_access_key_id"]);
+    let secret = has_option(dest, &["secret_access_key", "aws_secret_access_key"]);
+    let anonymous = dest.options.iter().any(|(k, v)| {
+        matches!(
+            k.to_ascii_lowercase().as_str(),
+            "allow_anonymous" | "skip_signature"
+        ) && v.trim().eq_ignore_ascii_case("true")
+    });
+    if (id && secret) || anonymous {
+        Ok(())
+    } else {
+        bail!("an S3 destination needs an access key ID and secret access key (or allow_anonymous for a public bucket)")
+    }
+}
+
 /// Rejects destination settings that could reach outside their storage area: `..` in the prefix or
 /// any `*root` option, and options that make the server read one of its own files
 /// (`credential_path`, `config_file`, …).
@@ -360,12 +416,12 @@ pub fn validate_destination(dest: &Destination) -> anyhow::Result<()> {
     if dest.root.split('/').any(|seg| seg.len() > 255) {
         bail!("a folder name in the destination prefix is too long (max. 255 bytes)");
     }
-    let scheme = Scheme::from_str(&dest.scheme)
-        .map_err(|e| anyhow!("unknown scheme {}: {e}", dest.scheme))?;
-    let allowed = allowed_options(scheme)
-        .ok_or_else(|| anyhow!("{} can't be used as a destination", dest.scheme))?;
-    if scheme == Scheme::Azblob {
-        check_azure_credentials(dest)?;
+    let scheme = Scheme::parse(&dest.scheme)?;
+    let allowed = allowed_options(scheme);
+    match scheme {
+        Scheme::Azblob => check_azure_credentials(dest)?,
+        Scheme::S3 => check_s3_credentials(dest)?,
+        _ => {}
     }
     for (k, v) in &dest.options {
         let key = k.to_ascii_lowercase();
@@ -411,32 +467,59 @@ fn forced_options(
     opts
 }
 
+/// An operator for a non-`fs` destination, without a `Store` around it (tests use it to reach
+/// objects behind Malo's back).
+#[doc(hidden)]
+pub fn raw_operator(scheme: &str, options: &BTreeMap<String, String>) -> anyhow::Result<Operator> {
+    let s = Scheme::parse(scheme)?;
+    anyhow::ensure!(s != Scheme::Fs, "not for fs destinations");
+    let dest = Destination {
+        id: String::new(),
+        name: String::new(),
+        scheme: scheme.into(),
+        options: options.clone(),
+        root: String::new(),
+        encrypt: false,
+        required_for_purge: false,
+        deep_check: malo_api::DeepCheckMode::Off,
+        revision: 0,
+    };
+    validate_destination(&dest)?;
+    operator(s, forced_options(s, dest.options.clone()))
+}
+
+fn operator(scheme: Scheme, opts: HashMap<String, String>) -> anyhow::Result<Operator> {
+    // Own HTTP client per operator: OpenDAL's global client is bound to the first tokio runtime
+    // that used it. It doesn't follow redirects and checks the addresses it connects to.
+    let http = crate::netguard::storage_http_client()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("http client")?;
+    opendal::init_default_registry();
+    let op = Operator::via_iter(scheme.as_str(), opts)?;
+    let ctx = op
+        .context()
+        .with_http_transport(opendal::HttpTransporter::new(
+            opendal_http_transport_reqwest::ReqwestTransport::new(http),
+        ));
+    Ok(op.with_context(ctx).layer(
+        opendal::layers::RetryLayer::new()
+            .with_max_times(4)
+            .with_jitter(),
+    ))
+}
+
 impl Store {
     pub fn open(dest: &Destination, archive_key: &Key, fs: &FsPolicy) -> anyhow::Result<Store> {
-        let scheme = Scheme::from_str(&dest.scheme)
-            .map_err(|e| anyhow!("unknown scheme {}: {e}", dest.scheme))?;
+        let scheme = Scheme::parse(&dest.scheme)?;
         validate_destination(dest)?;
         let mut opts = forced_options(scheme, dest.options.clone());
         if scheme == Scheme::Fs {
             let root = confine_fs_root(opts.get("root").map(String::as_str), fs)?;
             opts.insert("root".into(), root.to_string_lossy().into_owned());
         }
-        // Own HTTP client per operator: OpenDAL's global client is bound to the first tokio runtime
-        // that used it. It doesn't follow redirects and checks the addresses it connects to.
-        let http = crate::netguard::http_client()
-            .connect_timeout(std::time::Duration::from_secs(30))
-            .build()
-            .context("http client")?;
-        let op = Operator::via_iter(scheme, opts)
-            .with_context(|| format!("cannot configure {}", dest.scheme))?
-            .layer(opendal::layers::HttpClientLayer::new(
-                opendal::raw::HttpClient::with(http),
-            ))
-            .layer(
-                opendal::layers::RetryLayer::new()
-                    .with_max_times(4)
-                    .with_jitter(),
-            );
+        let op =
+            operator(scheme, opts).with_context(|| format!("cannot configure {}", dest.scheme))?;
         Ok(Store {
             dest: dest.clone(),
             op,
@@ -1026,7 +1109,7 @@ mod tests {
             let k = crypto::random_key();
             let store = Store::from_operator(
                 &dest(encrypt),
-                Operator::new(Memory::default()).unwrap().finish(),
+                Operator::new(Memory::default()).unwrap(),
                 &k,
             );
             let msg = b"From: a@b\r\nSubject: hi\r\n\r\nbody".repeat(5000);
@@ -1083,11 +1166,8 @@ mod tests {
     #[tokio::test]
     async fn manifests_round_trip() {
         let k = crypto::random_key();
-        let store = Store::from_operator(
-            &dest(true),
-            Operator::new(Memory::default()).unwrap().finish(),
-            &k,
-        );
+        let store =
+            Store::from_operator(&dest(true), Operator::new(Memory::default()).unwrap(), &k);
         let a = account();
         assert!(matches!(
             store.read_account_marker(&a).await.unwrap(),
@@ -1246,6 +1326,10 @@ mod tests {
     fn s3_dest() -> Destination {
         Destination {
             scheme: "s3".into(),
+            options: [("access_key_id", "a"), ("secret_access_key", "s")]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             ..dest(false)
         }
     }
@@ -1289,8 +1373,11 @@ mod tests {
                     ("bucket", "b"),
                     ("endpoint", "https://s3.example.com"),
                     ("Region", "x"),
+                    ("access_key_id", "a"),
+                    ("secret_access_key", "s"),
                 ],
             ),
+            with("s3", &[("bucket", "public"), ("allow_anonymous", "true")]),
             with(
                 "s3",
                 &[("aws_access_key_id", "a"), ("aws_secret_access_key", "s")],
@@ -1316,6 +1403,13 @@ mod tests {
         let refused = [
             // The server's own identity.
             with("s3", &[("role_arn", "arn:aws:iam::1:role/x")]),
+            // No keys: the AWS chain would find the server's (web identity, ECS, SSO).
+            with(
+                "s3",
+                &[("bucket", "b"), ("endpoint", "https://s3.example.com")],
+            ),
+            with("s3", &[("access_key_id", "a")]),
+            with("s3", &[("bucket", "b"), ("allow_anonymous", "false")]),
             with("s3", &[("external_id", "x")]),
             with("s3", &[("role_session_name", "x")]),
             with("gcs", &[("service_account", "default")]),
@@ -1356,6 +1450,8 @@ mod tests {
                 ("region".to_string(), "us-east-1".to_string()),
                 ("disable_ec2_metadata".to_string(), "false".to_string()),
                 ("disable_config_load".to_string(), "false".to_string()),
+                ("access_key_id".to_string(), "a".to_string()),
+                ("secret_access_key".to_string(), "s".to_string()),
             ]
             .into_iter()
             .collect(),
@@ -1380,11 +1476,8 @@ mod tests {
     #[tokio::test]
     async fn store_rejects_traversal_paths() {
         let k = crypto::random_key();
-        let store = Store::from_operator(
-            &dest(false),
-            Operator::new(Memory::default()).unwrap().finish(),
-            &k,
-        );
+        let store =
+            Store::from_operator(&dest(false), Operator::new(Memory::default()).unwrap(), &k);
         for bad in ["../x", "a/../../b", "./a"] {
             assert!(store.get(bad, false).await.is_err());
             assert!(store
