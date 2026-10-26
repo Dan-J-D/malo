@@ -2358,3 +2358,100 @@ async fn delete_selected_messages() {
         .await;
     assert_eq!(big.unwrap_err().0, 400);
 }
+
+/// A kit file whose key derivation costs as much as a real one (256 MiB).
+fn costly_kit(kdf: malo_core::crypto::KdfParams) -> RecoveryKitFile {
+    RecoveryKitFile::Sealed(SealedRecoveryKit {
+        format: SEALED_KIT_FORMAT.into(),
+        kdf: KitKdf {
+            algorithm: "argon2id".into(),
+            m_kib: kdf.m_kib,
+            t: kdf.t,
+            p: kdf.p,
+        },
+        salt: "00".repeat(16),
+        data: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+    })
+}
+
+/// Needs no Docker. Registration checks who may register before it derives any key from an
+/// uploaded kit, and kits can't ask for more work than Malo's own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn register_checks_before_key_derivation() {
+    enabled();
+    let dir = tempfile::tempdir().unwrap();
+    let server = start_server(dir.path(), |_| {}).await;
+    let admin = bootstrap(&server).await;
+    let anon = Api {
+        token: None,
+        ..admin.clone()
+    };
+    let register = |invite: Option<String>, kit: RecoveryKitFile| RegisterRequest {
+        username: uniq("kit"),
+        password: "kit-user-password".into(),
+        invite_code: invite,
+        recovery_kit: Some(kit),
+        kit_passphrase: Some("some kit passphrase".into()),
+    };
+    let default = malo_core::crypto::KdfParams::DEFAULT;
+    for invite in [None, Some("not-an-invite".to_string())] {
+        let started = std::time::Instant::now();
+        let res = anon
+            .call::<_, serde_json::Value>(
+                Method::POST,
+                "/auth/register",
+                Some(&register(invite, costly_kit(default))),
+            )
+            .await;
+        assert_eq!(res.unwrap_err().0, 403);
+        assert!(
+            started.elapsed() < Duration::from_millis(1500),
+            "refused without deriving the kit's key"
+        );
+    }
+    // Taken names aren't told to clients that may not register.
+    let res = anon
+        .call::<_, serde_json::Value>(
+            Method::POST,
+            "/auth/register",
+            Some(&RegisterRequest {
+                username: other_name(&admin).await,
+                ..register(None, costly_kit(default))
+            }),
+        )
+        .await;
+    assert_eq!(res.unwrap_err().0, 403);
+
+    let invite: Invite = admin
+        .post(
+            "/admin/invites",
+            &CreateInviteRequest {
+                username: None,
+                role: Role::User,
+                valid_hours: 1,
+            },
+        )
+        .await;
+    for over in [
+        malo_core::crypto::KdfParams {
+            m_kib: 1024 * 1024,
+            ..default
+        },
+        malo_core::crypto::KdfParams { t: 10, ..default },
+        malo_core::crypto::KdfParams { p: 4, ..default },
+    ] {
+        let started = std::time::Instant::now();
+        let res = anon
+            .call::<_, serde_json::Value>(
+                Method::POST,
+                "/auth/register",
+                Some(&register(Some(invite.code.clone()), costly_kit(over))),
+            )
+            .await;
+        assert_eq!(res.unwrap_err().0, 400);
+        assert!(started.elapsed() < Duration::from_millis(1500));
+    }
+    // The invite wasn't used up by the failed attempts.
+    let invites: Vec<InviteInfo> = admin.get("/admin/invites").await;
+    assert!(invites.iter().all(|i| !i.used));
+}

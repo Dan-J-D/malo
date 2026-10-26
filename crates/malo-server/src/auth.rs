@@ -3,7 +3,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::extract::{ConnectInfo, FromRequestParts, State};
 use axum::http::request::Parts;
@@ -22,6 +22,7 @@ use crate::db::UserRow;
 use crate::error::{ApiErr, ApiResult};
 use crate::keyring::{self, RecoverError, UnlockedUser};
 use crate::kit;
+use crate::limits::KdfKind;
 use crate::scheduler;
 use crate::state::{AppState, SharedState};
 
@@ -93,25 +94,43 @@ impl FromRequestParts<SharedState> for Unlocked {
     }
 }
 
-/// The client's address: the TCP peer, or (with `MALO_TRUST_PROXY_HEADERS`) the address the
-/// reverse proxy reports. Rate limits and failed-login backoff are counted per client.
+/// The client's address: the TCP peer, or, for a request from a trusted reverse proxy
+/// (`MALO_TRUSTED_PROXIES`), the address the proxy reports. Rate limits and failed-login backoff
+/// are counted per client.
 pub struct ClientIp(pub IpAddr);
 
-pub fn client_ip(headers: &HeaderMap, peer: Option<IpAddr>, trust_proxy: bool) -> IpAddr {
-    if trust_proxy {
-        let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
-        if let Some(ip) = header("x-real-ip").and_then(|v| v.trim().parse().ok()) {
-            return ip;
-        }
-        // The right-most entry is the one the proxy itself added; earlier ones are client-supplied.
-        if let Some(ip) = header("x-forwarded-for")
-            .and_then(|v| v.rsplit(',').next())
-            .and_then(|v| v.trim().parse().ok())
-        {
-            return ip;
+pub fn client_ip(
+    headers: &HeaderMap,
+    peer: Option<IpAddr>,
+    proxies: &[ipnet::IpNet],
+    header: &str,
+) -> IpAddr {
+    let unspecified = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+    let trusted = |ip: &IpAddr| proxies.iter().any(|n| n.contains(ip));
+    let Some(peer) = peer else {
+        return unspecified;
+    };
+    if !trusted(&peer) {
+        return peer;
+    }
+    // Each proxy appends the address it got the request from: going from the right, the first
+    // address that isn't one of our proxies is the client. Entries left of it are client-supplied.
+    let mut client = peer;
+    for value in headers.get_all(header).iter().rev() {
+        let Ok(value) = value.to_str() else {
+            return client;
+        };
+        for entry in value.rsplit(',') {
+            let Ok(ip) = entry.trim().parse::<IpAddr>() else {
+                return client;
+            };
+            client = ip;
+            if !trusted(&ip) {
+                return client;
+            }
         }
     }
-    peer.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+    client
 }
 
 impl FromRequestParts<SharedState> for ClientIp {
@@ -128,15 +147,17 @@ impl FromRequestParts<SharedState> for ClientIp {
         Ok(ClientIp(client_ip(
             &parts.headers,
             peer,
-            state.cfg.trust_proxy_headers,
+            &state.cfg.trusted_proxies,
+            &state.cfg.proxy_header,
         )))
     }
 }
 
-/// Key for the request rate limit (`tower_governor`), the same client address as [`ClientIp`].
+/// Key for the request rate limit (`tower_governor`): the client address of [`ClientIp`], or its
+/// /64 for IPv6.
 #[derive(Clone)]
 pub struct ClientIpKey {
-    pub trust_proxy: bool,
+    pub state: SharedState,
 }
 
 impl tower_governor::key_extractor::KeyExtractor for ClientIpKey {
@@ -150,10 +171,16 @@ impl tower_governor::key_extractor::KeyExtractor for ClientIpKey {
             .extensions()
             .get::<ConnectInfo<SocketAddr>>()
             .map(|c| c.0.ip());
-        if peer.is_none() && !self.trust_proxy {
+        if peer.is_none() {
             return Err(tower_governor::GovernorError::UnableToExtractKey);
         }
-        Ok(client_ip(req.headers(), peer, self.trust_proxy))
+        let cfg = &self.state.cfg;
+        Ok(crate::limits::client_key(client_ip(
+            req.headers(),
+            peer,
+            &cfg.trusted_proxies,
+            &cfg.proxy_header,
+        )))
     }
 }
 
@@ -209,76 +236,26 @@ pub fn max_lock_hours(state: &AppState) -> u32 {
     state.cfg.max_auto_lock_hours.min(admin.max(1))
 }
 
-/// Backoff for one client guessing one user's password: steep after five misses.
-fn failure_delay(n: u32) -> Duration {
-    if n < 5 {
-        Duration::ZERO
-    } else {
-        Duration::from_secs((30u64 << (n - 5).min(5)).min(15 * 60))
-    }
-}
-
-/// Backoff for one user across all clients: it slows guessing spread over many addresses, but is
-/// short enough that nobody can keep a user locked out by failing on purpose.
-fn user_failure_delay(n: u32) -> Duration {
-    if n < 20 {
-        Duration::ZERO
-    } else {
-        Duration::from_secs((5u64 << ((n - 20) / 5).min(4)).min(60))
-    }
-}
-
-/// How long to wait after `n` failures.
-type Backoff = fn(u32) -> Duration;
-
-/// Failures count per name and client, and per name alone.
-fn failure_keys(name: &str, ip: IpAddr) -> [(String, Backoff); 2] {
-    let name = name.to_lowercase();
-    [
-        (format!("{name}|{ip}"), failure_delay),
-        (name, user_failure_delay),
-    ]
+pub(crate) fn try_again(wait: Duration) -> String {
+    format!(
+        "too many failed attempts; try again in {}s",
+        wait.as_secs() + 1
+    )
 }
 
 pub(crate) fn check_failures(state: &AppState, name: &str, ip: IpAddr) -> ApiResult<()> {
-    let map = state.login_failures.lock().unwrap();
-    for (key, delay) in failure_keys(name, ip) {
-        if let Some((n, at)) = map.get(&key) {
-            let wait = delay(*n);
-            if at.elapsed() < wait {
-                return Err(ApiErr::too_many(format!(
-                    "too many failed attempts; try again in {}s",
-                    (wait - at.elapsed()).as_secs() + 1
-                )));
-            }
-        }
+    match state.login_failures.check(name, ip) {
+        Some(wait) => Err(ApiErr::too_many(try_again(wait))),
+        None => Ok(()),
     }
-    Ok(())
 }
 
-/// Most entries are for names that don't exist; old ones are dropped so the map stays small.
-const FAILURES_KEPT: usize = 10_000;
-
 pub(crate) fn record_failure(state: &AppState, name: &str, ip: IpAddr) {
-    let mut map = state.login_failures.lock().unwrap();
-    if map.len() >= FAILURES_KEPT {
-        map.retain(|_, (_, at)| at.elapsed() < Duration::from_secs(3600));
-        if map.len() >= FAILURES_KEPT {
-            map.clear();
-        }
-    }
-    for (key, _) in failure_keys(name, ip) {
-        let e = map.entry(key).or_insert((0, Instant::now()));
-        e.0 += 1;
-        e.1 = Instant::now();
-    }
+    state.login_failures.record(name, ip);
 }
 
 pub(crate) fn clear_failures(state: &AppState, name: &str, ip: IpAddr) {
-    let mut map = state.login_failures.lock().unwrap();
-    for (key, _) in failure_keys(name, ip) {
-        map.remove(&key);
-    }
+    state.login_failures.clear(name, ip);
 }
 
 /// Records an administrative action; failures are logged, never returned.
@@ -296,13 +273,14 @@ pub fn admin_audit(
 
 async fn run_kdf<T: Send + 'static>(
     state: &AppState,
+    kind: KdfKind,
     f: impl FnOnce() -> T + Send + 'static,
 ) -> ApiResult<T> {
     let _permit = state
-        .kdf_slots
-        .acquire()
+        .kdf
+        .acquire(kind)
         .await
-        .map_err(|_| ApiErr::too_many("busy"))?;
+        .map_err(|_| ApiErr::too_many("the server is busy; try again in a moment"))?;
     tokio::task::spawn_blocking(f)
         .await
         .map_err(|e| ApiErr::from(anyhow::anyhow!(e)))
@@ -349,7 +327,7 @@ pub async fn login(
     let Some(user) = user.filter(|u| !u.disabled) else {
         // Spend comparable time so unknown names aren't distinguishable.
         let pw = password.clone();
-        run_kdf(&state, move || {
+        run_kdf(&state, KdfKind::Public, move || {
             let _ = crypto::Vault::seal(
                 "x",
                 &pw,
@@ -364,7 +342,10 @@ pub async fn login(
     let data_dir = state.cfg.data_dir.clone();
     let uid = user.id.clone();
     let pw = password.clone();
-    let mdk = run_kdf(&state, move || keyring::open_vault(&data_dir, &uid, &pw)).await?;
+    let mdk = run_kdf(&state, KdfKind::Public, move || {
+        keyring::open_vault(&data_dir, &uid, &pw)
+    })
+    .await?;
     let mdk = match mdk {
         Ok(k) => k,
         Err(_) => {
@@ -464,7 +445,7 @@ pub async fn delete_self(
     let data_dir = state.cfg.data_dir.clone();
     let uid = user.id.clone();
     let pw = Zeroizing::new(req.password);
-    let ok = run_kdf(&state, move || {
+    let ok = run_kdf(&state, KdfKind::Session, move || {
         keyring::open_vault(&data_dir, &uid, &pw).is_ok()
     })
     .await?;
@@ -518,7 +499,7 @@ pub async fn change_password(
         Zeroizing::new(req.old_password),
         Zeroizing::new(req.new_password),
     );
-    let changed = run_kdf(&state, move || {
+    let changed = run_kdf(&state, KdfKind::Session, move || {
         keyring::change_password(&data_dir, &uid, &old, &new)
     })
     .await?;
@@ -554,7 +535,7 @@ async fn provision(
     let id2 = id.clone();
     let pw = Zeroizing::new(password);
     let dir = keyring::UserPaths::try_new(&state.cfg.data_dir, &id)?.dir;
-    let created = run_kdf(state, move || {
+    let created = run_kdf(state, KdfKind::Public, move || {
         keyring::provision_user(&data_dir, &id2, &pw, archive_key)
     })
     .await?
@@ -609,36 +590,50 @@ pub async fn register(
     Json(req): Json<RegisterRequest>,
 ) -> ApiResult<StatusCode> {
     validate_credentials(&req.username, &req.password)?;
+    // Whether this client may register at all comes first: before anything about the name is
+    // told, and before any key derivation runs.
+    let invite = req.invite_code.as_deref().map(|c| hash_token(c.trim()));
+    let invalid_invite = || ApiErr::forbidden("invalid or expired invite");
+    match &invite {
+        Some(hash) => {
+            state
+                .db
+                .invite_role(hash, &req.username)?
+                .ok_or_else(invalid_invite)?;
+        }
+        None if state.db.admin_settings()?.self_registration => {}
+        None => return Err(ApiErr::forbidden("registration requires an invite")),
+    }
     if state.db.user_by_name(&req.username)?.is_some() {
         return Err(ApiErr::conflict("username taken"));
     }
     // The kit is opened before the invite is used, so a wrong passphrase doesn't use it up.
     let archive = match req.recovery_kit.clone() {
         Some(file) => {
-            check_failures(&state, "recovery kit", ip)?;
+            // Per client: kits carry no name, and one shared count would let anyone block all.
+            let kit_key = format!("recovery kit from {}", crate::limits::client_key(ip));
+            check_failures(&state, &kit_key, ip)?;
             let pass = req.kit_passphrase.clone().map(Zeroizing::new);
-            let opened = run_kdf(&state, move || {
+            let opened = run_kdf(&state, KdfKind::Kit, move || {
                 kit::open(&file, pass.as_deref().map(String::as_str))
             })
             .await?;
             match opened {
                 Ok(k) => Some(k),
                 Err(e) => {
-                    record_failure(&state, "recovery kit", ip);
+                    record_failure(&state, &kit_key, ip);
                     return Err(e);
                 }
             }
         }
         None => None,
     };
-    let invite = req.invite_code.as_deref().map(|c| hash_token(c.trim()));
     let role = match &invite {
         Some(hash) => state
             .db
             .redeem_invite(hash, &req.username)?
-            .ok_or_else(|| ApiErr::forbidden("invalid or expired invite"))?,
-        None if state.db.admin_settings()?.self_registration => Role::User,
-        None => return Err(ApiErr::forbidden("registration requires an invite")),
+            .ok_or_else(invalid_invite)?,
+        None => Role::User,
     };
     if let Err(e) = provision(&state, &req.username, req.password, role, archive).await {
         if let Some(hash) = &invite {
@@ -677,7 +672,7 @@ pub async fn recover(
     let uid = user.as_ref().map(|u| u.id.clone());
     let (file, pass) = (req.recovery_kit, req.kit_passphrase.map(Zeroizing::new));
     let pw = Zeroizing::new(req.new_password);
-    let res = run_kdf(&state, move || -> ApiResult<()> {
+    let res = run_kdf(&state, KdfKind::Kit, move || -> ApiResult<()> {
         let key = kit::open(&file, pass.as_deref().map(String::as_str))?;
         let Some(uid) = uid else { return Err(wrong()) };
         keyring::reset_password_with_kit(&data_dir, &uid, &key, &pw).map_err(|e| match e {
@@ -726,18 +721,22 @@ pub async fn recovery_kit(
     let data_dir = state.cfg.data_dir.clone();
     let user = u.user.clone();
     let (pw, pass) = (Zeroizing::new(req.password), Zeroizing::new(req.passphrase));
-    let sealed = run_kdf(&state, move || -> ApiResult<Option<SealedRecoveryKit>> {
-        if keyring::open_vault(&data_dir, &user.user_id, &pw).is_err() {
-            return Ok(None);
-        }
-        let archive = user.config().archive_key()?;
-        Ok(Some(kit::seal(
-            &user.user_id,
-            &user.username,
-            &archive,
-            &pass,
-        )?))
-    })
+    let sealed = run_kdf(
+        &state,
+        KdfKind::Session,
+        move || -> ApiResult<Option<SealedRecoveryKit>> {
+            if keyring::open_vault(&data_dir, &user.user_id, &pw).is_err() {
+                return Ok(None);
+            }
+            let archive = user.config().archive_key()?;
+            Ok(Some(kit::seal(
+                &user.user_id,
+                &user.username,
+                &archive,
+                &pass,
+            )?))
+        },
+    )
     .await??;
     let Some(sealed) = sealed else {
         record_failure(&state, &name, ip);
@@ -774,11 +773,42 @@ pub async fn recovery_kit_saved(u: Unlocked) -> ApiResult<StatusCode> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
-    fn backoff_grows_and_caps() {
-        assert_eq!(super::failure_delay(4).as_secs(), 0);
-        assert_eq!(super::failure_delay(5).as_secs(), 30);
-        assert_eq!(super::failure_delay(6).as_secs(), 60);
-        assert_eq!(super::failure_delay(50).as_secs(), 900);
+    fn proxy_headers() {
+        let proxies = crate::config::parse_nets("10.0.0.0/8, 192.0.2.1").unwrap();
+        let mut h = HeaderMap::new();
+        h.insert(
+            "x-forwarded-for",
+            "6.6.6.6, 1.2.3.4, 10.0.0.9".parse().unwrap(),
+        );
+        h.insert("x-real-ip", "6.6.6.6".parse().unwrap());
+        let ip = |s: &str| -> IpAddr { s.parse().unwrap() };
+        let xff = |peer| client_ip(&h, Some(ip(peer)), &proxies, "x-forwarded-for");
+        // From a trusted proxy: the right-most address that isn't a proxy.
+        assert_eq!(xff("10.1.1.1"), ip("1.2.3.4"));
+        assert_eq!(xff("192.0.2.1"), ip("1.2.3.4"));
+        // From anyone else, headers are ignored.
+        assert_eq!(xff("198.51.100.5"), ip("198.51.100.5"));
+        assert_eq!(
+            client_ip(&h, Some(ip("198.51.100.5")), &[], "x-forwarded-for"),
+            ip("198.51.100.5")
+        );
+        // Only the configured header counts.
+        assert_eq!(
+            client_ip(&h, Some(ip("10.1.1.1")), &proxies, "x-real-ip"),
+            ip("6.6.6.6")
+        );
+        assert_eq!(
+            client_ip(&h, Some(ip("10.1.1.1")), &proxies, "x-other"),
+            ip("10.1.1.1")
+        );
+        // Garbage stops the walk at the last good hop.
+        let mut junk = HeaderMap::new();
+        junk.insert("x-forwarded-for", "junk, 10.0.0.9".parse().unwrap());
+        let got = client_ip(&junk, Some(ip("10.1.1.1")), &proxies, "x-forwarded-for");
+        assert_eq!(got, ip("10.0.0.9"));
+        assert!(crate::config::parse_nets("10.0.0.0/8,nope").is_err());
     }
 }

@@ -10,7 +10,7 @@ use malo_api::{JobKind, JobTrigger};
 use malo_core::smtp::{self as client, SendError};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
-use super::{authenticate, read_line, LoginError, MailUser};
+use super::{authenticate, read_line, LoginError, MailUser, LOGIN_DEADLINE, PREAUTH_COMMANDS};
 use crate::state::SharedState;
 
 pub const MAX_MESSAGE: usize = 50 * 1024 * 1024;
@@ -27,6 +27,9 @@ struct Session<S> {
     from: Option<String>,
     to: Vec<String>,
     failed_auth: u32,
+    /// When the connection opened, and lines read before login.
+    opened: std::time::Instant,
+    lines: u32,
 }
 
 /// Strips CR/LF so an upstream error text can't inject reply lines.
@@ -66,7 +69,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
     }
 
     async fn line(&mut self) -> anyhow::Result<Option<String>> {
-        let line = match tokio::time::timeout(IDLE, read_line(&mut self.io, 4096)).await {
+        let mut timeout = IDLE;
+        if self.user.is_none() {
+            if self.lines >= PREAUTH_COMMANDS {
+                let _ = self
+                    .reply("421 4.7.0 Too many commands without logging in")
+                    .await;
+                return Ok(None);
+            }
+            self.lines += 1;
+            timeout = timeout.min(LOGIN_DEADLINE.saturating_sub(self.opened.elapsed()));
+        }
+        let line = match tokio::time::timeout(timeout, read_line(&mut self.io, 4096)).await {
             Ok(r) => r?,
             Err(_) => {
                 let _ = self.reply("421 4.4.2 Idle too long, closing").await;
@@ -359,6 +373,8 @@ pub async fn session<S: AsyncRead + AsyncWrite + Unpin>(
         from: None,
         to: vec![],
         failed_auth: 0,
+        opened: std::time::Instant::now(),
+        lines: 0,
     }
     .run()
     .await

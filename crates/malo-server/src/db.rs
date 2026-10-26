@@ -463,25 +463,17 @@ impl Db {
         Ok(())
     }
 
+    /// The role of an unused, unexpired invite valid for `username`.
+    pub fn invite_role(&self, code_hash: &str, username: &str) -> anyhow::Result<Option<Role>> {
+        self.with(|c| valid_invite(c, code_hash, username))
+    }
+
     /// Consumes an invite. Returns its role if valid for `username`.
     pub fn redeem_invite(&self, code_hash: &str, username: &str) -> anyhow::Result<Option<Role>> {
         self.with(|c| {
-            let row: Option<(Option<String>, String, String, i32)> = c
-                .query_row(
-                    "SELECT username, role, expires_at, used FROM invites WHERE code_hash=?1",
-                    [code_hash],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                )
-                .optional()?;
-            let Some((name, role, exp, used)) = row else {
+            let Some(role) = valid_invite(c, code_hash, username)? else {
                 return Ok(None);
             };
-            if used != 0 || ts(Some(exp)).is_none_or(|e| e < Utc::now()) {
-                return Ok(None);
-            }
-            if name.is_some_and(|n| !n.eq_ignore_ascii_case(username)) {
-                return Ok(None);
-            }
             // Only one of two concurrent registrations with the same code gets it.
             if c.execute(
                 "UPDATE invites SET used=1 WHERE code_hash=?1 AND used=0",
@@ -490,7 +482,7 @@ impl Db {
             {
                 return Ok(None);
             }
-            Ok(Some(parse_role(&role)))
+            Ok(Some(role))
         })
     }
 
@@ -838,4 +830,28 @@ fn mail_login_row(r: &rusqlite::Row) -> rusqlite::Result<MailLoginRow> {
         created_at: ts(r.get(4)?).unwrap_or_default(),
         last_used: ts(r.get(5)?),
     })
+}
+
+fn valid_invite(
+    c: &rusqlite::Connection,
+    code_hash: &str,
+    username: &str,
+) -> rusqlite::Result<Option<Role>> {
+    let row: Option<(Option<String>, String, String, i32)> = c
+        .query_row(
+            "SELECT username, role, expires_at, used FROM invites WHERE code_hash=?1",
+            [code_hash],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    let Some((name, role, exp, used)) = row else {
+        return Ok(None);
+    };
+    if used != 0 || ts(Some(exp)).is_none_or(|e| e < Utc::now()) {
+        return Ok(None);
+    }
+    if name.is_some_and(|n| !n.eq_ignore_ascii_case(username)) {
+        return Ok(None);
+    }
+    Ok(Some(parse_role(&role)))
 }

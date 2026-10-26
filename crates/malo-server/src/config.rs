@@ -29,9 +29,14 @@ pub struct ServerConfig {
     pub session_idle_minutes: i64,
     /// Development/test only: auto-lock after this many seconds instead of hours (`MALO_AUTO_LOCK_SECONDS`).
     pub auto_lock_seconds: Option<i64>,
-    /// `MALO_TRUST_PROXY_HEADERS=1`: take the client address from `X-Real-IP` / `X-Forwarded-For`
-    /// (set by the reverse proxy) for rate limits. Only behind a proxy that sets these headers:
-    /// otherwise clients could pick their own address.
+    /// `MALO_TRUSTED_PROXIES`: addresses or CIDR ranges of reverse proxies, comma separated.
+    /// Requests from them take the client address from `proxy_header` for rate limits and
+    /// login backoff; requests from anywhere else use the TCP peer, whatever headers they send.
+    pub trusted_proxies: Vec<ipnet::IpNet>,
+    /// `MALO_PROXY_HEADER`: `x-forwarded-for` (default; the right-most address that isn't a
+    /// trusted proxy) or a header with a single address such as `x-real-ip`.
+    pub proxy_header: String,
+    /// Deprecated `MALO_TRUST_PROXY_HEADERS=1`: trusts proxies on loopback and private networks.
     pub trust_proxy_headers: bool,
     /// `MALO_IMAP_LISTEN`: address of the IMAP service (implicit TLS) that serves the backed-up
     /// mail to mail apps. Off when unset.
@@ -55,6 +60,8 @@ impl Default for ServerConfig {
             sidecar_secret: None,
             session_idle_minutes: 12 * 60,
             auto_lock_seconds: None,
+            trusted_proxies: vec![],
+            proxy_header: "x-forwarded-for".into(),
             trust_proxy_headers: false,
             imap_listen: None,
             smtp_listen: None,
@@ -103,6 +110,20 @@ impl ServerConfig {
         if let Some(v) = env("MALO_TRUST_PROXY_HEADERS") {
             cfg.trust_proxy_headers = matches!(v.as_str(), "1" | "true" | "on" | "yes");
         }
+        if let Some(v) = env("MALO_TRUSTED_PROXIES") {
+            cfg.trusted_proxies = parse_nets(&v)?;
+        }
+        if let Some(v) = env("MALO_PROXY_HEADER") {
+            cfg.proxy_header = v;
+        }
+        cfg.proxy_header = cfg.proxy_header.trim().to_ascii_lowercase();
+        if cfg.trust_proxy_headers && cfg.trusted_proxies.is_empty() {
+            tracing::warn!(
+                "MALO_TRUST_PROXY_HEADERS is deprecated: set MALO_TRUSTED_PROXIES to your reverse proxy's address; trusting proxies on loopback and private networks for now"
+            );
+            cfg.trusted_proxies =
+                parse_nets("127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7")?;
+        }
         let off = |v: &str| matches!(v, "off" | "0" | "false" | "no");
         if let Some(v) = env("MALO_IMAP_LISTEN") {
             cfg.imap_listen = if off(&v) { None } else { Some(v.parse()?) };
@@ -119,4 +140,17 @@ impl ServerConfig {
         cfg.workers = cfg.workers.max(1);
         Ok(cfg)
     }
+}
+
+/// `10.0.0.0/8, 192.0.2.7, ::1`: CIDR ranges or single addresses.
+pub fn parse_nets(list: &str) -> anyhow::Result<Vec<ipnet::IpNet>> {
+    list.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            s.parse::<ipnet::IpNet>()
+                .or_else(|_| s.parse::<std::net::IpAddr>().map(ipnet::IpNet::from))
+                .map_err(|_| anyhow::anyhow!("'{s}' isn't an address or CIDR range"))
+        })
+        .collect()
 }

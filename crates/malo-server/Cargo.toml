@@ -43,6 +43,7 @@ rusqlite = { version = "0.37", features = ["bundled-sqlcipher-vendored-openssl"]
 toml = "0.8"
 libc = "0.2"
 url = "2"
+ipnet = { version = "2", features = ["serde"] }
 memsec = "0.7"
 reqwest.workspace = true
 

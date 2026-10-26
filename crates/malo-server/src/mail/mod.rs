@@ -36,6 +36,12 @@ pub struct MailInfo {
 
 /// Simultaneous IMAP and SMTP connections across all users.
 const MAX_CONNECTIONS: usize = 512;
+/// Simultaneous connections from one address (one /64 for IPv6).
+const MAX_PER_IP: usize = 16;
+/// A connection must have logged in this long after it opened, however busy it keeps itself.
+pub(crate) const LOGIN_DEADLINE: Duration = Duration::from_secs(120);
+/// Commands (lines, for SMTP) a connection may send before it logs in.
+pub(crate) const PREAUTH_COMMANDS: u32 = 32;
 pub const DEFAULT_PASSWORD_LENGTH: u32 = 24;
 
 /// A random password of letters and digits (≈5.95 bits per character).
@@ -135,16 +141,16 @@ impl MailUser {
     }
 }
 
-/// Checks a mail login. Failures share the backoff of the app login, under their own names.
+/// Checks a mail login. Failures back off like app logins, in a table of their own.
 pub async fn authenticate(
     state: &SharedState,
     username: &str,
     password: &str,
     ip: IpAddr,
 ) -> Result<MailUser, LoginError> {
-    let key = format!("mail:{}", username.to_lowercase());
-    if let Err(e) = crate::auth::check_failures(state, &key, ip) {
-        return Err(LoginError::Throttled(e.message));
+    let key = username.to_lowercase();
+    if let Some(wait) = state.mail_failures.check(&key, ip) {
+        return Err(LoginError::Throttled(crate::auth::try_again(wait)));
     }
     let hash = hash_password(password);
     let row = state.db.mail_login(username).ok().flatten();
@@ -156,12 +162,12 @@ pub async fn authenticate(
         _ => false,
     };
     if !ok {
-        crate::auth::record_failure(state, &key, ip);
+        state.mail_failures.record(&key, ip);
         // Slow down guessing a little on every miss, before the backoff starts.
         tokio::time::sleep(Duration::from_millis(500)).await;
         return Err(LoginError::Invalid);
     }
-    crate::auth::clear_failures(state, &key, ip);
+    state.mail_failures.clear(&key, ip);
     let row = row.unwrap();
     let Some(user) = state.keyring.get(&row.user_id) else {
         return Err(LoginError::Locked);
@@ -247,12 +253,13 @@ impl Listeners {
         config.alpn_protocols = vec![];
         let acceptor = TlsAcceptor::from(Arc::new(config));
         let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+        let per_ip = Arc::new(PerIp::default());
         if let Some(l) = self.imap {
             serve(
                 TcpListener::from_std(l)?,
                 state.clone(),
                 acceptor.clone(),
-                slots.clone(),
+                (slots.clone(), per_ip.clone()),
                 Service::Imap,
             );
         }
@@ -261,11 +268,43 @@ impl Listeners {
                 TcpListener::from_std(l)?,
                 state,
                 acceptor,
-                slots,
+                (slots, per_ip),
                 Service::Smtp,
             );
         }
         Ok(())
+    }
+}
+
+/// Open connections per client address.
+#[derive(Default)]
+struct PerIp(std::sync::Mutex<std::collections::HashMap<IpAddr, usize>>);
+
+/// One connection counted in [`PerIp`] until dropped.
+struct IpSlot(Arc<PerIp>, IpAddr);
+
+impl PerIp {
+    fn take(self: &Arc<Self>, ip: IpAddr) -> Option<IpSlot> {
+        let ip = crate::limits::client_key(ip);
+        let mut map = self.0.lock().unwrap();
+        let n = map.entry(ip).or_default();
+        if *n >= MAX_PER_IP {
+            return None;
+        }
+        *n += 1;
+        Some(IpSlot(self.clone(), ip))
+    }
+}
+
+impl Drop for IpSlot {
+    fn drop(&mut self) {
+        let mut map = self.0 .0.lock().unwrap();
+        if let Some(n) = map.get_mut(&self.1) {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.1);
+            }
+        }
     }
 }
 
@@ -279,7 +318,7 @@ fn serve(
     listener: TcpListener,
     state: SharedState,
     acceptor: TlsAcceptor,
-    slots: Arc<Semaphore>,
+    (slots, per_ip): (Arc<Semaphore>, Arc<PerIp>),
     service: Service,
 ) {
     tokio::spawn(async move {
@@ -303,6 +342,13 @@ fn serve(
             if imap::tracing_on() {
                 tracing::info!("mail: {name} connection from {peer}");
             }
+            let Some(ip_slot) = per_ip.take(peer.ip()) else {
+                tracing::debug!(
+                    "mail: refused a {name} connection from {peer}: {MAX_PER_IP} already open"
+                );
+                drop(tcp);
+                continue;
+            };
             let Ok(permit) = slots.clone().try_acquire_owned() else {
                 tracing::warn!(
                     "mail: refused a {name} connection from {peer}: all {MAX_CONNECTIONS} connections are in use"
@@ -312,7 +358,7 @@ fn serve(
             };
             let (state, acceptor) = (state.clone(), acceptor.clone());
             tokio::spawn(async move {
-                let _permit = permit;
+                let _permit = (permit, ip_slot);
                 let mut tcp = tcp;
                 tcp.set_nodelay(true).ok();
                 let greet = match starttls::opening(&tcp).await {
@@ -384,6 +430,19 @@ fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connections_per_ip() {
+        let per_ip = Arc::new(PerIp::default());
+        let ip: IpAddr = "2001:db8::1".parse().unwrap();
+        let same_64: IpAddr = "2001:db8::2".parse().unwrap();
+        let held: Vec<IpSlot> = (0..MAX_PER_IP).map(|_| per_ip.take(ip).unwrap()).collect();
+        assert!(per_ip.take(same_64).is_none());
+        assert!(per_ip.take("2001:db8:0:1::1".parse().unwrap()).is_some());
+        drop(held);
+        assert!(per_ip.take(ip).is_some());
+        assert_eq!(per_ip.0.lock().unwrap().len(), 0, "slots are given back");
+    }
 
     #[test]
     fn passwords_and_usernames() {

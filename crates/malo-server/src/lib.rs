@@ -7,6 +7,7 @@ pub mod error;
 pub mod jobs;
 pub mod keyring;
 pub mod kit;
+pub mod limits;
 pub mod mail;
 pub mod net;
 pub mod routes;
@@ -87,7 +88,7 @@ pub fn router(state: SharedState) -> Router {
             .per_second(2)
             .burst_size(burst)
             .key_extractor(auth::ClientIpKey {
-                trust_proxy: state.cfg.trust_proxy_headers,
+                state: state.clone(),
             })
             .finish()
             .expect("governor config"),
@@ -264,8 +265,9 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<Running> {
         keyring: KeyRing::default(),
         events: Arc::new(EventHub::default()),
         jobs: JobManager::new(cfg.workers),
-        kdf_slots: tokio::sync::Semaphore::new(2),
-        login_failures: Mutex::new(HashMap::new()),
+        kdf: limits::KdfGate::from_env(),
+        login_failures: limits::Failures::default(),
+        mail_failures: limits::Failures::default(),
         cert_fingerprint: tls.as_ref().map(|t| t.fingerprint.clone()),
         tls_ca,
         mail: mail::MailInfo {

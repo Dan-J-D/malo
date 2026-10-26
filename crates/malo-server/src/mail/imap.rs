@@ -18,7 +18,9 @@ use malo_core::mailview::{Folder, FolderSource, ImapMeta, ViewMessage};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 use super::mime::{self, istr, Kind, Part};
-use super::{authenticate, read_line, Gone, LoginError, MailUser};
+use super::{
+    authenticate, read_line, Gone, LoginError, MailUser, LOGIN_DEADLINE, PREAUTH_COMMANDS,
+};
 use crate::keyring::UnlockedUser;
 use crate::state::SharedState;
 
@@ -42,21 +44,23 @@ pub(crate) fn tracing_on() -> bool {
 }
 
 /// A command as the trace shows it: literals as their size, passwords left out.
-fn describe(segs: &[Seg], tag: &str, cmd: &str, args: &[Tok]) -> String {
-    let s = match cmd {
-        "LOGIN" => format!(
-            "{tag} LOGIN {} [password hidden]",
-            args.first().and_then(Tok::string).unwrap_or_default()
-        ),
-        "AUTHENTICATE" => format!("{tag} AUTHENTICATE [credentials hidden]"),
-        _ => segs
-            .iter()
+fn describe(segs: &[Seg]) -> String {
+    let first = match segs.first() {
+        Some(Seg::Text(t)) => String::from_utf8_lossy(t).into_owned(),
+        _ => String::new(),
+    };
+    let mut words = first.split_whitespace();
+    let (tag, cmd) = (words.next().unwrap_or("*"), words.next().unwrap_or(""));
+    let s = if cmd.eq_ignore_ascii_case("LOGIN") || cmd.eq_ignore_ascii_case("AUTHENTICATE") {
+        format!("{tag} {} [credentials hidden]", cmd.to_ascii_uppercase())
+    } else {
+        segs.iter()
             .map(|s| match s {
                 Seg::Text(t) => String::from_utf8_lossy(t).trim_end().to_string(),
                 Seg::Literal(l) => format!("[{} bytes]", l.len()),
             })
             .collect::<Vec<_>>()
-            .join(""),
+            .join("")
     };
     shorten(&s, 300)
 }
@@ -71,6 +75,16 @@ const MAX_LITERAL: usize = super::smtp::MAX_MESSAGE;
 /// RFC 3501: at least 30 minutes for an authenticated client.
 const AUTOLOGOUT: Duration = Duration::from_secs(31 * 60);
 const PREAUTH_TIMEOUT: Duration = Duration::from_secs(60);
+/// The size of a whole command before login; only LOGIN and AUTHENTICATE may carry literals.
+const PREAUTH_MAX: usize = 8 * 1024;
+/// Lines and literals of one command.
+const MAX_SEGMENTS: usize = 64;
+/// Parentheses nested in a command, and NOT/OR nested in a search.
+const MAX_DEPTH: usize = 32;
+/// LIST patterns (reference included).
+const MAX_PATTERN: usize = 1024;
+/// Flags in one STORE or APPEND.
+const MAX_FLAGS: usize = 64;
 const IDLE_POLL: Duration = Duration::from_secs(20);
 
 // ───────────────────────────── parsing ─────────────────────────────
@@ -112,13 +126,14 @@ enum Seg {
     Literal(Vec<u8>),
 }
 
-/// Tokenizes a command; literals arrive as their own segments.
-fn tokenize(segs: &[Seg]) -> Option<Vec<Tok>> {
+/// Tokenizes a command; literals arrive as their own segments. None for a malformed command or
+/// one nested deeper than [`MAX_DEPTH`].
+fn tokenize(segs: Vec<Seg>) -> Option<Vec<Tok>> {
     let mut stack: Vec<Vec<Tok>> = vec![vec![]];
     for seg in segs {
         let text = match seg {
             Seg::Literal(l) => {
-                stack.last_mut()?.push(Tok::Str(l.clone()));
+                stack.last_mut()?.push(Tok::Str(l));
                 continue;
             }
             Seg::Text(t) => t,
@@ -128,6 +143,9 @@ fn tokenize(segs: &[Seg]) -> Option<Vec<Tok>> {
             match text[i] {
                 b' ' | b'\r' | b'\n' => i += 1,
                 b'(' => {
+                    if stack.len() > MAX_DEPTH {
+                        return None;
+                    }
                     stack.push(vec![]);
                     i += 1;
                 }
@@ -324,7 +342,8 @@ fn parse_section(a: &str) -> Option<Section> {
         let orig = orig_inner.get(spec_start..)?;
         let open = orig.find('(')?;
         let close = orig.rfind(')')?;
-        let names = orig[open + 1..close]
+        let names = orig
+            .get(open + 1..close)?
             .split_whitespace()
             .map(|n| n.trim_matches('"').to_ascii_uppercase())
             .collect();
@@ -418,18 +437,23 @@ fn search_date(t: Option<&Tok>) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(s.trim_matches('"'), "%d-%b-%Y").ok()
 }
 
-/// One search key from the front of `toks`.
+/// One search key from the front of `toks`. Lists, NOT and OR nest at most [`MAX_DEPTH`] deep, which
+/// also bounds the recursion of everything that walks a [`Key`].
 fn parse_key(
     toks: &mut std::iter::Peekable<std::slice::Iter<Tok>>,
     max_seq: u32,
     max_uid: u32,
+    depth: usize,
 ) -> Option<Key> {
+    if depth > MAX_DEPTH {
+        return None;
+    }
     let t = toks.next()?;
     if let Tok::List(l) = t {
         let mut it = l.iter().peekable();
         let mut keys = vec![];
         while it.peek().is_some() {
-            keys.push(parse_key(&mut it, max_seq, max_uid)?);
+            keys.push(parse_key(&mut it, max_seq, max_uid, depth + 1)?);
         }
         return Some(Key::And(keys));
     }
@@ -468,10 +492,15 @@ fn parse_key(
         "BODY" => Some(Key::Body(arg()?)),
         "TEXT" => Some(Key::Text(arg()?)),
         "UID" => Some(Key::Uid(parse_set(&arg()?, max_uid)?)),
-        "NOT" => Some(Key::Not(Box::new(parse_key(toks, max_seq, max_uid)?))),
+        "NOT" => Some(Key::Not(Box::new(parse_key(
+            toks,
+            max_seq,
+            max_uid,
+            depth + 1,
+        )?))),
         "OR" => {
-            let a = parse_key(toks, max_seq, max_uid)?;
-            let b = parse_key(toks, max_seq, max_uid)?;
+            let a = parse_key(toks, max_seq, max_uid, depth + 1)?;
+            let b = parse_key(toks, max_seq, max_uid, depth + 1)?;
             Some(Key::Or(Box::new(a), Box::new(b)))
         }
         _ => Some(Key::Seq(parse_set(&word, max_seq)?)),
@@ -585,24 +614,32 @@ fn matches(k: &Key, it: &SearchItem) -> bool {
     }
 }
 
-/// `LIST` patterns: `*` matches anything, `%` anything but the delimiter.
+/// `LIST` patterns: `*` matches anything, `%` anything but the delimiter. Matched row by row
+/// (pattern length × name length), so no pattern can make it backtrack.
 fn wildcard(pattern: &[u8], name: &[u8], delim: Option<u8>) -> bool {
-    match pattern.first() {
-        None => name.is_empty(),
-        Some(b'*') => (0..=name.len()).any(|i| wildcard(&pattern[1..], &name[i..], delim)),
-        Some(b'%') => {
-            for i in 0..=name.len() {
-                if wildcard(&pattern[1..], &name[i..], delim) {
-                    return true;
-                }
-                if i < name.len() && Some(name[i]) == delim {
-                    return false;
+    // row[j]: the pattern so far matches the first j bytes of the name.
+    let mut row = vec![false; name.len() + 1];
+    row[0] = true;
+    let mut next = vec![false; name.len() + 1];
+    for &p in pattern {
+        match p {
+            b'*' | b'%' => {
+                next[0] = row[0];
+                for j in 1..=name.len() {
+                    let extend = next[j - 1] && (p == b'*' || Some(name[j - 1]) != delim);
+                    next[j] = row[j] || extend;
                 }
             }
-            false
+            c => {
+                next[0] = false;
+                for j in 1..=name.len() {
+                    next[j] = row[j - 1] && name[j - 1] == c;
+                }
+            }
         }
-        Some(c) => name.first() == Some(c) && wildcard(&pattern[1..], &name[1..], delim),
+        std::mem::swap(&mut row, &mut next);
     }
+    row[name.len()]
 }
 
 fn is_inbox(name: &str) -> bool {
@@ -613,6 +650,50 @@ fn imap_date(d: Option<DateTime<Utc>>) -> String {
     d.unwrap_or(DateTime::UNIX_EPOCH)
         .format("%d-%b-%Y %H:%M:%S +0000")
         .to_string()
+}
+
+/// A flag as RFC 3501 has it: `\Seen` and other system flags, or a keyword atom. Anything else
+/// (spaces, CR/LF, quotes, parentheses) would break the responses that list flags, or the
+/// command that APPEND sends upstream.
+fn valid_flag(f: &str) -> bool {
+    let atom = f.strip_prefix('\\').unwrap_or(f);
+    !atom.is_empty()
+        && f.len() <= 64
+        && atom
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && !b"(){%*\"\\]".contains(&b))
+}
+
+/// The flags of a STORE or APPEND, without `\Recent`; None if one isn't a valid flag or there
+/// are too many.
+fn given_flags<'a>(toks: impl IntoIterator<Item = &'a Tok>) -> Option<Vec<String>> {
+    let mut out = vec![];
+    for t in toks {
+        let f = t.string()?;
+        if !valid_flag(&f) || out.len() >= MAX_FLAGS {
+            return None;
+        }
+        if !f.eq_ignore_ascii_case("\\Recent") {
+            out.push(f);
+        }
+    }
+    Some(out)
+}
+
+/// An APPEND date-time: `"dd-Mon-yyyy hh:mm:ss +zzzz"` (the day may be space-padded).
+fn append_date(s: &[u8]) -> Option<String> {
+    let s = std::str::from_utf8(s).ok()?;
+    // Two characters for the day; some clients leave out the padding of a single digit.
+    let padded = match s.len() {
+        26 => true,
+        25 => !s.starts_with(' '),
+        _ => false,
+    };
+    if !padded {
+        return None;
+    }
+    DateTime::parse_from_str(s.trim_start(), "%d-%b-%Y %H:%M:%S %z").ok()?;
+    Some(s.to_string())
 }
 
 fn flag_list(flags: &[String]) -> String {
@@ -686,6 +767,9 @@ struct Session<S> {
     user: Option<MailUser>,
     sel: Option<Selected>,
     failed_logins: u32,
+    /// When the connection opened, and commands read before login.
+    opened: std::time::Instant,
+    commands: u32,
     /// Connection number in the trace (see [`tracing_on`]).
     trace: Option<u64>,
     /// The command being answered, and what has been sent for it.
@@ -741,18 +825,37 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
         self.send(format!("{s}\r\n").as_bytes()).await
     }
 
-    /// Reads one command with its literals. Ok(None) at end of stream or timeout.
+    /// Reads one command with its literals. Ok(None) at end of stream or timeout, or for a command
+    /// that can't be skipped.
     async fn read_command(&mut self) -> anyhow::Result<Option<Vec<Seg>>> {
-        let timeout = if self.user.is_some() {
+        let authed = self.user.is_some();
+        let timeout = if authed {
             AUTOLOGOUT
         } else {
-            PREAUTH_TIMEOUT
+            if self.commands >= PREAUTH_COMMANDS {
+                self.line("* BYE Too many commands without logging in")
+                    .await?;
+                return Ok(None);
+            }
+            self.commands += 1;
+            // NOOPs don't keep a connection that never logs in open.
+            let left = LOGIN_DEADLINE.saturating_sub(self.opened.elapsed());
+            PREAUTH_TIMEOUT.min(left)
+        };
+        let (max_line, max_total) = if authed {
+            (MAX_LINE, MAX_LITERAL)
+        } else {
+            (PREAUTH_MAX, PREAUTH_MAX)
         };
         let mut segs = vec![];
         let mut total = 0usize;
         loop {
-            let line = match tokio::time::timeout(timeout, read_line(&mut self.io, MAX_LINE)).await
+            let line = match tokio::time::timeout(timeout, read_line(&mut self.io, max_line)).await
             {
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::InvalidData => {
+                    self.line("* BYE Command line too long").await?;
+                    return Ok(None);
+                }
                 Ok(l) => l?,
                 Err(_) => {
                     if let Some(n) = self.trace {
@@ -768,22 +871,34 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
                 }
                 return Ok(None);
             };
+            total = total.saturating_add(line.len());
+            if segs.len() + 2 > MAX_SEGMENTS || total > max_total {
+                // The rest of the command can't be told apart from the next one.
+                self.line("* BYE Command too long").await?;
+                return Ok(None);
+            }
             match literal_marker(&line) {
                 Some((n, sync)) => {
-                    let mut text = line.clone();
+                    let mut text = line;
                     let open = text.iter().rposition(|b| *b == b'{').unwrap();
                     text.truncate(open);
-                    total += n;
-                    if total > MAX_LITERAL {
-                        let tag = String::from_utf8_lossy(&segs_tag(&segs, &line)).to_string();
+                    let refused = if !authed && !literal_allowed(&segs, &text) {
+                        Some("BAD Log in first")
+                    } else if total.checked_add(n).is_none_or(|t| t > max_total) {
+                        Some("NO [TOOBIG] Message too large")
+                    } else {
+                        None
+                    };
+                    if let Some(why) = refused {
+                        let tag = String::from_utf8_lossy(&segs_tag(&segs, &text)).to_string();
                         if sync {
-                            self.line(&format!("{tag} NO [TOOBIG] Message too large"))
-                                .await?;
+                            self.line(&format!("{tag} {why}")).await?;
                             return Ok(Some(vec![]));
                         }
                         self.line("* BYE Literal too large").await?;
                         return Ok(None);
                     }
+                    total += n;
                     segs.push(Seg::Text(text));
                     if sync {
                         self.line("+ Ready for literal data").await?;
@@ -833,7 +948,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
             if segs.is_empty() {
                 continue;
             }
-            let Some(toks) = tokenize(&segs) else {
+            let traced = self.trace.map(|n| (n, describe(&segs)));
+            let Some(toks) = tokenize(segs) else {
                 self.line("* BAD Malformed command").await?;
                 continue;
             };
@@ -846,8 +962,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
                 continue;
             };
             let args = &toks[2..];
-            if let Some(n) = self.trace {
-                tracing::info!("IMAP #{n} C: {}", describe(&segs, &tag, &cmd, args));
+            if let Some((n, text)) = traced {
+                tracing::info!("IMAP #{n} C: {text}");
             }
             self.current = Some(tag.clone());
             (self.responses, self.sent) = (0, 0);
@@ -1097,10 +1213,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
             Some(r) if r != "=" => r,
             _ => {
                 self.line("+ ").await?;
-                let line = tokio::time::timeout(PREAUTH_TIMEOUT, read_line(&mut self.io, MAX_LINE))
-                    .await
-                    .map_err(|_| anyhow::anyhow!("timeout"))??
-                    .unwrap_or_default();
+                let line =
+                    tokio::time::timeout(PREAUTH_TIMEOUT, read_line(&mut self.io, PREAUTH_MAX))
+                        .await
+                        .map_err(|_| anyhow::anyhow!("timeout"))??
+                        .unwrap_or_default();
                 String::from_utf8_lossy(&line).trim().to_string()
             }
         };
@@ -1150,6 +1267,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
             Tok::List(l) => l.iter().filter_map(Tok::string).collect(),
             t => t.string().into_iter().collect(),
         };
+        if patterns
+            .iter()
+            .any(|p| reference.len() + p.len() > MAX_PATTERN)
+        {
+            return self.bad(tag, "LIST pattern too long").await;
+        }
         let folders = self.folders(user)?;
         let default_delim = folders
             .iter()
@@ -1616,14 +1739,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
             "-FLAGS" => -1,
             _ => return self.bad(tag, "Unknown STORE item").await,
         };
-        let given: Vec<String> = match args.get(2) {
-            Some(Tok::List(l)) => l.iter().filter_map(Tok::string).collect(),
-            _ => args[2..].iter().filter_map(Tok::string).collect(),
+        let given = match args.get(2) {
+            Some(Tok::List(l)) => given_flags(l),
+            _ => given_flags(&args[2..]),
         };
-        let given: Vec<String> = given
-            .into_iter()
-            .filter(|f| !f.eq_ignore_ascii_case("\\Recent"))
-            .collect();
+        let Some(given) = given else {
+            return self.bad(tag, "Invalid flags").await;
+        };
         let Some(targets) = self.targets(set, uid) else {
             return self.bad(tag, "Invalid sequence set").await;
         };
@@ -1689,7 +1811,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
         let mut it = args.iter().peekable();
         let mut keys = vec![];
         while it.peek().is_some() {
-            match parse_key(&mut it, sel_len, max_uid) {
+            match parse_key(&mut it, sel_len, max_uid, 0) {
                 Some(k) => keys.push(k),
                 None => return self.bad(tag, "Invalid search criteria").await,
             }
@@ -1868,39 +1990,28 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
         let Some(name) = args.first().and_then(Tok::string) else {
             return self.bad(tag, "APPEND needs a mailbox").await;
         };
+        // mailbox [(flags)] [date-time] message
         let mut flags = None;
-        let mut date = None;
-        let mut content = None;
+        let mut strings = vec![];
         for t in &args[1..] {
             match t {
-                Tok::List(l) => {
-                    let f: Vec<String> = l
-                        .iter()
-                        .filter_map(Tok::string)
-                        .filter(|f| !f.eq_ignore_ascii_case("\\Recent"))
-                        .collect();
+                Tok::List(l) if flags.is_none() && strings.is_empty() => {
+                    let Some(f) = given_flags(l) else {
+                        return self.bad(tag, "Invalid flags").await;
+                    };
                     flags = Some(format!("({})", f.join(" ")));
                 }
-                Tok::Str(s)
-                    if content.is_none()
-                        && date.is_none()
-                        && s.len() <= 40
-                        && !s.contains(&b'\n') =>
-                {
-                    date = Some(s.clone())
-                }
-                Tok::Str(s) => content = Some(s.clone()),
-                Tok::Atom(_) => {}
+                Tok::Str(s) => strings.push(s),
+                _ => return self.bad(tag, "Invalid APPEND arguments").await,
             }
         }
-        // A short message could have been taken for the date: the last string is the message.
-        let content = match (content, date.take()) {
-            (Some(c), d) => {
-                date = d;
-                c
-            }
-            (None, Some(c)) => c,
-            (None, None) => return self.bad(tag, "APPEND needs a message").await,
+        let (date, content) = match strings[..] {
+            [c] => (None, c.clone()),
+            [d, c] => match append_date(d) {
+                Some(d) => (Some(d), c.clone()),
+                None => return self.bad(tag, "Invalid APPEND date").await,
+            },
+            _ => return self.bad(tag, "APPEND needs a message").await,
         };
         let Ok(user) = self.unlocked().await? else {
             return Ok(Flow::Close);
@@ -1940,7 +2051,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
             FolderSource::Label(l) => l.clone(),
             FolderSource::Mailbox => folder.name.clone(),
         };
-        let date = date.map(|d| format!("\"{}\"", String::from_utf8_lossy(&d).replace('"', "")));
+        let date = date.map(|d| format!("\"{d}\""));
+        if let Err(e) = crate::net::check_account(&self.state, &account).await {
+            self.line(&format!(
+                "{tag} NO {}",
+                e.message.replace(['\r', '\n'], " ")
+            ))
+            .await?;
+            return Ok(Flow::Continue);
+        }
         let res = async {
             let mut conn = malo_core::imap::connect(&account, tokens.as_ref()).await?;
             conn.session
@@ -2057,6 +2176,16 @@ async fn load(
     Ok((meta, raw.filter(|_| need_raw)))
 }
 
+/// Before login, only LOGIN and AUTHENTICATE may send literals (a password with odd characters).
+fn literal_allowed(segs: &[Seg], line: &[u8]) -> bool {
+    let first = match segs.first() {
+        Some(Seg::Text(t)) => t.as_slice(),
+        _ => line,
+    };
+    let cmd = first.split(|b| *b == b' ').nth(1).unwrap_or_default();
+    cmd.eq_ignore_ascii_case(b"LOGIN") || cmd.eq_ignore_ascii_case(b"AUTHENTICATE")
+}
+
 fn segs_tag(segs: &[Seg], line: &[u8]) -> Vec<u8> {
     let first = match segs.first() {
         Some(Seg::Text(t)) => t.as_slice(),
@@ -2079,6 +2208,8 @@ pub async fn session<S: AsyncRead + AsyncWrite + Unpin>(
         user: None,
         sel: None,
         failed_logins: 0,
+        opened: std::time::Instant::now(),
+        commands: 0,
         trace: tracing_on().then(|| {
             static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
             let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2098,7 +2229,7 @@ mod tests {
     use super::*;
 
     fn toks(s: &str) -> Vec<Tok> {
-        tokenize(&[Seg::Text(s.as_bytes().to_vec())]).unwrap()
+        tokenize(vec![Seg::Text(s.as_bytes().to_vec())]).unwrap()
     }
 
     #[test]
@@ -2117,12 +2248,12 @@ mod tests {
         assert_eq!(s.label(), "BODY[HEADER.FIELDS (DATE FROM)]<0>");
         let t = toks("a LOGIN \"us\\\"er\" pass\r\n");
         assert_eq!(t[2], Tok::Str(b"us\"er".to_vec()));
-        let segs = [
+        let segs = vec![
             Seg::Text(b"a APPEND INBOX (\\Seen) ".to_vec()),
             Seg::Literal(b"Subject: x\r\n\r\nhi".to_vec()),
             Seg::Text(b"\r\n".to_vec()),
         ];
-        let t = tokenize(&segs).unwrap();
+        let t = tokenize(segs).unwrap();
         assert_eq!(t[4], Tok::Str(b"Subject: x\r\n\r\nhi".to_vec()));
         assert_eq!(literal_marker(b"a APPEND x {12}\r\n"), Some((12, true)));
         assert_eq!(literal_marker(b"a APPEND x {12+}\r\n"), Some((12, false)));
@@ -2168,16 +2299,89 @@ mod tests {
         assert!(wildcard(b"%", b"INBOX", Some(b'/')));
         assert!(!wildcard(b"%", b"[Gmail]/All Mail", Some(b'/')));
         assert!(wildcard(b"[Gmail]/%", b"[Gmail]/All Mail", Some(b'/')));
+        assert!(wildcard(b"*Mail", b"[Gmail]/All Mail", Some(b'/')));
+        assert!(wildcard(b"%/%", b"[Gmail]/All Mail", Some(b'/')));
+        assert!(!wildcard(b"%Mail", b"[Gmail]/All Mail", Some(b'/')));
+        assert!(wildcard(b"", b"", Some(b'/')));
+        assert!(!wildcard(b"", b"x", Some(b'/')));
+        assert!(wildcard(b"%", b"a/b", None));
+        // Exponential for a backtracking matcher.
+        let pattern = "*a".repeat(500) + "b";
+        let started = std::time::Instant::now();
+        assert!(!wildcard(
+            pattern.as_bytes(),
+            "a".repeat(1000).as_bytes(),
+            None
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn hostile_commands() {
+        let deep = format!(
+            "a SEARCH {}ALL{}\r\n",
+            "(".repeat(100_000),
+            ")".repeat(100_000)
+        );
+        assert!(tokenize(vec![Seg::Text(deep.into_bytes())]).is_none());
+        let ok = format!(
+            "a SEARCH {}ALL{}\r\n",
+            "(".repeat(MAX_DEPTH),
+            ")".repeat(MAX_DEPTH)
+        );
+        assert!(tokenize(vec![Seg::Text(ok.into_bytes())]).is_some());
+
+        let nots = toks(&format!("{}ALL", "NOT ".repeat(10_000)));
+        assert!(parse_key(&mut nots.iter().peekable(), 1, 1, 0).is_none());
+        let nots = toks(&format!("{}ALL", "NOT ".repeat(MAX_DEPTH)));
+        assert!(parse_key(&mut nots.iter().peekable(), 1, 1, 0).is_some());
+
+        assert!(parse_section("BODY[HEADER.FIELDS)(]").is_none());
+    }
+
+    #[test]
+    fn flags_and_dates() {
+        for f in ["\\Seen", "$Forwarded", "Junk", "\\Answered"] {
+            assert!(valid_flag(f), "{f}");
+        }
+        for f in [
+            "",
+            "\\",
+            "a b",
+            "x\r\nA1 DELETE INBOX",
+            "(x",
+            "\"q\"",
+            "a]",
+            "a*",
+            "é",
+            &"x".repeat(65),
+        ] {
+            assert!(!valid_flag(f), "{f}");
+        }
+        let list = |v: &[&str]| -> Vec<Tok> {
+            v.iter().map(|s| Tok::Str(s.as_bytes().to_vec())).collect()
+        };
+        assert_eq!(
+            given_flags(&list(&["\\Seen", "\\Recent"])),
+            Some(vec!["\\Seen".into()])
+        );
+        assert_eq!(given_flags(&list(&["ok", "bad\r\n"])), None);
+        assert_eq!(given_flags(&list(&["a"; MAX_FLAGS + 1])), None);
+        assert!(append_date(b"17-Jul-1996 02:44:25 -0700").is_some());
+        assert!(append_date(b" 7-Jul-1996 02:44:25 -0700").is_some());
+        assert!(append_date(b"7-Jul-1996 02:44:25 -0700").is_some());
+        assert!(append_date(b"17-Jul-1996 02:44:25 -0700\r\nA1 X").is_none());
+        assert!(append_date(b"yesterday").is_none());
     }
 
     #[test]
     fn search_keys() {
         let t = toks("OR SEEN (FROM \"bob\" SINCE 1-Feb-2024) NOT 2:3");
         let mut it = t.iter().peekable();
-        let k = parse_key(&mut it, 10, 50).unwrap();
+        let k = parse_key(&mut it, 10, 50, 0).unwrap();
         assert!(matches!(k, Key::Or(..)));
         assert!(k.needs_header());
-        let k2 = parse_key(&mut it, 10, 50).unwrap();
+        let k2 = parse_key(&mut it, 10, 50, 0).unwrap();
         let m = ViewMessage {
             uid: 4,
             message: 1,

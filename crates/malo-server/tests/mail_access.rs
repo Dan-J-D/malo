@@ -690,3 +690,199 @@ async fn mail_apps_read_backups_and_send() {
     );
     r.shutdown(std::time::Duration::from_secs(5)).await;
 }
+
+/// A raw IMAP connection, for commands no real client would send.
+struct Raw(BufReader<tokio_rustls::client::TlsStream<TcpStream>>);
+
+impl Raw {
+    async fn open(addr: std::net::SocketAddr) -> Raw {
+        let mut io = BufReader::new(tls(addr).await);
+        let mut greeting = String::new();
+        io.read_line(&mut greeting).await.unwrap();
+        assert!(greeting.starts_with("* OK"), "{greeting}");
+        Raw(io)
+    }
+
+    async fn send(&mut self, data: &[u8]) {
+        let _ = self.0.get_mut().write_all(data).await;
+        let _ = self.0.get_mut().flush().await;
+    }
+
+    /// Sends `tag text` and reads up to its tagged reply, a BYE or the end of the stream; returns
+    /// the last line ("" for a closed connection).
+    async fn cmd(&mut self, tag: &str, text: &str) -> String {
+        self.send(format!("{tag} {text}\r\n").as_bytes()).await;
+        self.reply(tag).await
+    }
+
+    async fn log_in(&mut self, pass: &str) {
+        let r = self.cmd("l", &format!("LOGIN hostile {pass}")).await;
+        assert!(r.starts_with("l OK"), "{r}");
+    }
+
+    async fn reply(&mut self, tag: &str) -> String {
+        let read = async {
+            loop {
+                let mut l = String::new();
+                if self.0.read_line(&mut l).await.unwrap_or(0) == 0 {
+                    return String::new();
+                }
+                let l = l.trim_end().to_string();
+                if l.starts_with(&format!("{tag} "))
+                    || l.starts_with("* BYE")
+                    || l.starts_with("* BAD")
+                    || l.starts_with("+")
+                {
+                    return l;
+                }
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), read)
+            .await
+            .unwrap_or_else(|_| panic!("no answer to {tag} in time"))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hostile_imap_clients() {
+    setup_env();
+    let dir = tempfile::tempdir().unwrap();
+    let r = start_server(dir.path(), |c| {
+        c.imap_listen = Some("127.0.0.1:0".parse().unwrap());
+    })
+    .await;
+    let imap = r.imap_addr.unwrap();
+    let admin = bootstrap(&r).await;
+    let mut input = imap_input("Work", "me@example.com", 1);
+    input.enabled = false;
+    let acc: AccountView = admin.post("/accounts", &input).await;
+    let me: Me = admin.get("/me").await;
+    {
+        let user = r.state.keyring.get(&me.id).unwrap();
+        let ctx = malo_server::jobs::job_ctx(&r.state, &user, "t", Default::default());
+        let inbox = user
+            .index
+            .upsert_mailbox(&acc.id, "INBOX", "INBOX", "INBOX", Some("/"), None, 7)
+            .unwrap();
+        let sha = sha256_hex(FIRST);
+        let env = malo_core::index::empty_envelope();
+        let id = user
+            .index
+            .insert_message(&NewMessage {
+                account: &acc.id,
+                run: None,
+                size: FIRST.len() as u64,
+                internaldate: Some(chrono::Utc::now()),
+                message_id_hdr: None,
+                gm_msgid: None,
+                envelope: &env,
+                state: MessageState::Stored,
+                sha256: Some(&sha),
+            })
+            .unwrap();
+        user.index
+            .add_membership(id, inbox.id, 1, &[], &[])
+            .unwrap();
+        ctx.spool_put(id, FIRST).unwrap();
+    }
+    let login: MailLoginCreated = admin
+        .put(
+            &format!("/accounts/{}/mail-login", acc.id),
+            &MailLoginRequest {
+                username: "hostile".into(),
+                password_length: None,
+            },
+        )
+        .await;
+    let pass = login.password.clone();
+
+    // Before login: nesting deeper than the parser allows is refused, not recursed into.
+    let mut c = Raw::open(imap).await;
+    let deep = format!("NOOP {}", "(".repeat(4000));
+    assert_eq!(c.cmd("a", &deep).await, "* BAD Malformed command");
+    // A line over the pre-login limit ends the connection.
+    let long = format!("NOOP {}", "x".repeat(10_000));
+    assert!(c.cmd("b", &long).await.starts_with("* BYE"));
+    // Only LOGIN and AUTHENTICATE may send literals before login.
+    let mut c = Raw::open(imap).await;
+    assert_eq!(c.cmd("c", "ID {5}").await, "c BAD Log in first");
+    assert!(c
+        .cmd("d", "LOGIN {100000}")
+        .await
+        .starts_with("d NO [TOOBIG]"));
+    // A connection can't keep itself open with NOOPs.
+    let mut c = Raw::open(imap).await;
+    let mut last = String::new();
+    for i in 0..40 {
+        last = c.cmd(&format!("n{i}"), "NOOP").await;
+        if last.starts_with("* BYE") {
+            break;
+        }
+    }
+    assert!(last.starts_with("* BYE"), "{last}");
+
+    // The server is still up and serving.
+    let mut c = Raw::open(imap).await;
+    c.log_in(&pass).await;
+    assert!(c.cmd("s", "SELECT INBOX").await.starts_with("s OK"));
+
+    // After login: still no deep nesting, in commands or in searches.
+    let deep = format!("SEARCH {}ALL{}", "(".repeat(100), ")".repeat(100));
+    assert_eq!(c.cmd("a", &deep).await, "* BAD Malformed command");
+    let nots = format!("SEARCH {}ALL", "NOT ".repeat(5000));
+    assert_eq!(c.cmd("b", &nots).await, "b BAD Invalid search criteria");
+    assert!(c.cmd("b2", "SEARCH NOT NOT ALL").await.starts_with("b2 OK"));
+
+    // A pattern that makes a backtracking matcher take forever; and one too long.
+    let started = std::time::Instant::now();
+    let pattern = format!("\"{}\"", "*a".repeat(400) + "b");
+    assert!(c
+        .cmd("c", &format!("LIST \"\" {pattern}"))
+        .await
+        .starts_with("c OK"));
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    let pattern = format!("\"{}\"", "*".repeat(2000));
+    assert_eq!(
+        c.cmd("d", &format!("LIST \"\" {pattern}")).await,
+        "d BAD LIST pattern too long"
+    );
+
+    // A malformed section is an error, not a crash of the connection.
+    let r1 = c.cmd("e", "FETCH 1 BODY[HEADER.FIELDS)(]").await;
+    assert!(r1.starts_with("e BAD"), "{r1}");
+    assert!(c.cmd("f", "NOOP").await.starts_with("f OK"));
+
+    // Flags with CR/LF (or other characters flags can't have) are refused.
+    c.send(b"g STORE 1 +FLAGS ({12+}\r\nx\r\nA1 LOGOUT)\r\n")
+        .await;
+    assert_eq!(c.reply("g").await, "g BAD Invalid flags");
+    assert_eq!(
+        c.cmd("h", "STORE 1 +FLAGS (a\"b)").await,
+        "h BAD Invalid flags"
+    );
+    assert!(c
+        .cmd("i", "STORE 1 +FLAGS ($Ok \\Seen)")
+        .await
+        .starts_with("i OK"));
+    c.send(b"j APPEND INBOX ({12+}\r\nx\r\nA1 LOGOUT) {2+}\r\nhi\r\n")
+        .await;
+    assert_eq!(c.reply("j").await, "j BAD Invalid flags");
+    c.send(b"k APPEND INBOX \"1-Jan-2024\r\nA1 X\" {2+}\r\nhi\r\n")
+        .await;
+    let r2 = c.reply("k").await;
+    assert!(r2.contains("BAD"), "{r2}");
+
+    // Too many lines in one command.
+    let mut many = String::from("m SEARCH");
+    for _ in 0..70 {
+        many.push_str(" TEXT {1+}\r\nx");
+    }
+    many.push_str("\r\n");
+    c.send(many.as_bytes()).await;
+    assert!(c.reply("m").await.starts_with("* BYE"));
+
+    // And the server is still there.
+    let mut c = Raw::open(imap).await;
+    c.log_in(&pass).await;
+    r.shutdown(std::time::Duration::from_secs(5)).await;
+}

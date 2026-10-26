@@ -2,11 +2,10 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use malo_api::SyncEvent;
 use malo_core::ctx::EventSink;
-use tokio::sync::{broadcast, Semaphore};
+use tokio::sync::broadcast;
 
 use crate::config::ServerConfig;
 use crate::db::Db;
@@ -19,9 +18,11 @@ pub struct AppState {
     pub keyring: KeyRing,
     pub events: Arc<EventHub>,
     pub jobs: JobManager,
-    /// Caps concurrent Argon2id runs (256 MiB each).
-    pub kdf_slots: Semaphore,
-    pub login_failures: Mutex<HashMap<String, (u32, Instant)>>,
+    /// Caps Argon2id runs (256 MiB each).
+    pub kdf: crate::limits::KdfGate,
+    /// Failed logins to Malo, and (separately) to the mail services.
+    pub login_failures: crate::limits::Failures,
+    pub mail_failures: crate::limits::Failures,
     pub cert_fingerprint: Option<String>,
     /// Malo's own certificate authority, for devices to install; None with user-provided files.
     pub tls_ca: Option<crate::tlsgen::CaInfo>,

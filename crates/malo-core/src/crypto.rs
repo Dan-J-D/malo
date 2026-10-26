@@ -241,6 +241,11 @@ impl Vault {
             t: u32_at(13),
             p: u32_at(17),
         };
+        if !params.within(MAX_VAULT_KDF) {
+            return Err(CryptoError::Format(
+                "vault key derivation settings out of range".into(),
+            ));
+        }
         let mut salt = [0u8; 16];
         salt.copy_from_slice(&b[21..37]);
         let mut nonce = [0u8; 12];
@@ -273,13 +278,24 @@ impl UserKeys {
 
 // ───────────────────────────── passphrase-sealed files ─────────────────────────────
 
-/// Upper bounds for KDF parameters read from a file: a crafted file can't make the server spend
-/// gigabytes of memory or minutes of CPU.
-pub const MAX_FILE_KDF: KdfParams = KdfParams {
+/// Upper bounds for KDF parameters read from an uploaded file (a recovery kit): what Malo seals
+/// with itself, so a crafted file costs no more than a real one.
+pub const MAX_FILE_KDF: KdfParams = KdfParams::DEFAULT;
+
+/// Upper bounds for the vault's KDF parameters. The vault is the server's own file, but a damaged
+/// or planted one still mustn't make it spend gigabytes of memory or minutes of CPU.
+pub const MAX_VAULT_KDF: KdfParams = KdfParams {
     m_kib: 1024 * 1024,
     t: 10,
     p: 4,
 };
+
+impl KdfParams {
+    /// Within `max`, and usable (t and p of at least 1).
+    pub fn within(&self, max: KdfParams) -> bool {
+        self.m_kib <= max.m_kib && self.t <= max.t && self.p <= max.p && self.t >= 1 && self.p >= 1
+    }
+}
 
 /// Seals `plaintext` under a passphrase (Argon2id, then AES-256-GCM). Returns the salt and the
 /// sealed bytes. Call from a blocking thread.
@@ -302,13 +318,7 @@ pub fn open_with_passphrase(
     params: KdfParams,
     sealed: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
-    let max = MAX_FILE_KDF;
-    if params.m_kib > max.m_kib
-        || params.t > max.t
-        || params.p > max.p
-        || params.t == 0
-        || params.p == 0
-    {
+    if !params.within(MAX_FILE_KDF) {
         return Err(CryptoError::Format(
             "key derivation settings out of range".into(),
         ));
@@ -603,6 +613,41 @@ mod tests {
             open_with_passphrase("correct horse", b"aad", &salt, huge, &sealed),
             Err(CryptoError::Format(_))
         ));
+        // A file can't ask for more than Malo itself seals with.
+        for over in [
+            KdfParams {
+                m_kib: KdfParams::DEFAULT.m_kib + 1,
+                ..KdfParams::DEFAULT
+            },
+            KdfParams {
+                t: KdfParams::DEFAULT.t + 1,
+                ..KdfParams::DEFAULT
+            },
+            KdfParams {
+                p: KdfParams::DEFAULT.p + 1,
+                ..KdfParams::DEFAULT
+            },
+            KdfParams {
+                t: 0,
+                ..KdfParams::TEST
+            },
+        ] {
+            assert!(matches!(
+                open_with_passphrase("correct horse", b"aad", &salt, over, &sealed),
+                Err(CryptoError::Format(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn vault_kdf_bounded() {
+        let v = Vault::seal("u1", "pw", &random_key(), KdfParams::TEST).unwrap();
+        let mut b = v.to_bytes();
+        b[9..13].copy_from_slice(&(64 * 1024 * 1024u32).to_be_bytes());
+        assert!(matches!(Vault::from_bytes(&b), Err(CryptoError::Format(_))));
+        let mut b = v.to_bytes();
+        b[17..21].copy_from_slice(&0u32.to_be_bytes());
+        assert!(matches!(Vault::from_bytes(&b), Err(CryptoError::Format(_))));
     }
 
     #[test]
