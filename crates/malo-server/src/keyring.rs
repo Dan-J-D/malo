@@ -125,6 +125,10 @@ impl UserPaths {
     pub fn vault(&self) -> PathBuf {
         self.dir.join("vault.bin")
     }
+    /// The MDK wrapped with a key derived from the archive key: the recovery kit can set a new password.
+    pub fn recovery(&self) -> PathBuf {
+        self.dir.join("recovery.bin")
+    }
     pub fn config(&self) -> PathBuf {
         self.dir.join("config.bin")
     }
@@ -137,6 +141,62 @@ impl UserPaths {
     pub fn local(&self) -> PathBuf {
         self.dir.join("local")
     }
+}
+
+fn recovery_aad(user_id: &str) -> String {
+    format!("malo/v1/recovery-slot/{user_id}")
+}
+
+/// Writes the recovery slot: the MDK sealed with a key derived from the archive key. Whoever holds
+/// the recovery kit can already read every backup; with the slot they can also set a new password
+/// and keep the user, their accounts and destinations, instead of starting over.
+pub fn write_recovery_slot(
+    paths: &UserPaths,
+    user_id: &str,
+    mdk: &Key,
+    archive_key: &Key,
+) -> anyhow::Result<()> {
+    let wrap = crypto::derive(archive_key.as_ref(), None, "malo/v1/recovery-slot");
+    let blob = crypto::seal_blob(&wrap, recovery_aad(user_id).as_bytes(), mdk.as_ref());
+    write_atomic(&paths.recovery(), &blob)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RecoverError {
+    #[error("this user has no recovery slot yet")]
+    NoSlot,
+    #[error("the recovery kit doesn't belong to this user")]
+    WrongKit,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+/// Sets a new password with the archive key from the recovery kit (Argon2id; call from a blocking
+/// thread). The MDK stays the same, so config, index and backups are untouched.
+pub fn reset_password_with_kit(
+    data_dir: &Path,
+    user_id: &str,
+    archive_key: &Key,
+    new_password: &str,
+) -> Result<(), RecoverError> {
+    let paths = UserPaths::try_new(data_dir, user_id)?;
+    let blob = match std::fs::read(paths.recovery()) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(RecoverError::NoSlot),
+        Err(e) => return Err(anyhow::Error::from(e).into()),
+    };
+    let wrap = crypto::derive(archive_key.as_ref(), None, "malo/v1/recovery-slot");
+    let raw = crypto::open_blob(&wrap, recovery_aad(user_id).as_bytes(), &blob)
+        .map_err(|_| RecoverError::WrongKit)?;
+    if raw.len() != 32 {
+        return Err(anyhow::anyhow!("damaged recovery slot").into());
+    }
+    let mut mdk = zeroize::Zeroizing::new([0u8; 32]);
+    mdk.copy_from_slice(&raw);
+    let vault = Vault::seal(user_id, new_password, &mdk, KdfParams::from_env())
+        .map_err(anyhow::Error::from)?;
+    write_atomic(&paths.vault(), &vault.to_bytes())?;
+    Ok(())
 }
 
 /// Creates the vault, config and index of a new user.
@@ -159,6 +219,7 @@ pub fn provision_user(
     cfg.recovery_kit_exported = imported;
     write_atomic(&paths.config(), &cfg.seal(&keys.config, user_id)?)?;
     Index::open(&paths.index(), &keys.sqlcipher)?;
+    write_recovery_slot(&paths, user_id, &mdk, &archive)?;
     write_atomic(&paths.vault(), &vault.to_bytes())?;
     Ok(())
 }
@@ -215,8 +276,20 @@ impl KeyRing {
         }
         let paths = UserPaths::new(data_dir, user_id);
         let keys = UserKeys::derive(&mdk);
+        let config = UserConfig::open(&keys.config, user_id, &std::fs::read(paths.config())?);
+        // Users created before recovery slots existed get theirs at their next login.
+        if let Ok(cfg) = &config {
+            if !paths.recovery().exists() {
+                if let Err(e) = cfg
+                    .archive_key()
+                    .and_then(|a| write_recovery_slot(&paths, user_id, &mdk, &a))
+                {
+                    tracing::warn!(user = %user_id, "writing the recovery slot failed: {e:#}");
+                }
+            }
+        }
         mdk.zeroize();
-        let config = UserConfig::open(&keys.config, user_id, &std::fs::read(paths.config())?)?;
+        let config = config?;
         let index = Arc::new(Index::open(&paths.index(), &keys.sqlcipher)?);
         let accounts: Vec<String> = config.accounts.iter().map(|a| a.id.clone()).collect();
         let destinations: Vec<String> = config.destinations.iter().map(|d| d.id.clone()).collect();

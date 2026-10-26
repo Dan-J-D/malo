@@ -5,8 +5,8 @@ use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
 use malo_api::{
-    AdminSettings, JobInfo, JobKind, JobProgress, JobState, JobTrigger, Role, ScheduledJob,
-    UserInfo,
+    AdminAuditEntry, AdminSettings, InviteInfo, JobInfo, JobKind, JobProgress, JobState,
+    JobTrigger, Role, ScheduledJob, UserInfo,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -57,6 +57,14 @@ CREATE TABLE IF NOT EXISTS schedules (
     PRIMARY KEY(user_id, key)
 );
 CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS admin_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    target TEXT,
+    detail TEXT NOT NULL DEFAULT '{}'
+);
 "#;
 
 pub struct Db {
@@ -195,6 +203,57 @@ impl Db {
         Ok(())
     }
 
+    /// Deletes the setting only if it still has the value `v`. True when this call removed it, so
+    /// of two concurrent callers exactly one wins.
+    pub fn take_setting(&self, k: &str, v: &str) -> anyhow::Result<bool> {
+        Ok(self.with(|c| c.execute("DELETE FROM settings WHERE k=?1 AND v=?2", [k, v]))? == 1)
+    }
+
+    // ───── admin audit ─────
+
+    pub fn admin_audit(
+        &self,
+        actor: &str,
+        action: &str,
+        target: Option<&str>,
+        detail: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO admin_audit(at, actor, action, target, detail) VALUES(?1,?2,?3,?4,?5)",
+                params![
+                    Utc::now().to_rfc3339(),
+                    actor,
+                    action,
+                    target,
+                    detail.to_string()
+                ],
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn admin_audit_list(&self, limit: u32) -> anyhow::Result<Vec<AdminAuditEntry>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id, at, actor, action, target, detail FROM admin_audit ORDER BY id DESC LIMIT ?1",
+            )?;
+            let rows = stmt
+                .query_map([limit], |r| {
+                    Ok(AdminAuditEntry {
+                        id: r.get(0)?,
+                        at: ts(Some(r.get(1)?)).unwrap_or_else(Utc::now),
+                        actor: r.get(2)?,
+                        action: r.get(3)?,
+                        target: r.get(4)?,
+                        detail: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
+                    })
+                })?
+                .collect();
+            rows
+        })
+    }
+
     pub fn admin_settings(&self) -> anyhow::Result<AdminSettings> {
         Ok(self
             .setting("admin")?
@@ -276,6 +335,8 @@ impl Db {
         max_accounts: Option<Option<u32>>,
     ) -> anyhow::Result<()> {
         self.with(|c| {
+            let tx = c.unchecked_transaction()?;
+            let c = &tx;
             if let Some(d) = disabled {
                 c.execute("UPDATE users SET disabled=?2 WHERE id=?1", params![id, d])?;
             }
@@ -291,7 +352,7 @@ impl Db {
                     params![id, m],
                 )?;
             }
-            Ok(())
+            tx.commit()
         })
     }
 
@@ -412,9 +473,54 @@ impl Db {
             if name.is_some_and(|n| !n.eq_ignore_ascii_case(username)) {
                 return Ok(None);
             }
-            c.execute("UPDATE invites SET used=1 WHERE code_hash=?1", [code_hash])?;
+            // Only one of two concurrent registrations with the same code gets it.
+            if c.execute(
+                "UPDATE invites SET used=1 WHERE code_hash=?1 AND used=0",
+                [code_hash],
+            )? != 1
+            {
+                return Ok(None);
+            }
             Ok(Some(parse_role(&role)))
         })
+    }
+
+    /// Gives back an invite whose registration failed after redeeming it (e.g. the name was taken).
+    pub fn release_invite(&self, code_hash: &str) -> anyhow::Result<()> {
+        self.with(|c| c.execute("UPDATE invites SET used=0 WHERE code_hash=?1", [code_hash]))?;
+        Ok(())
+    }
+
+    pub fn invites(&self) -> anyhow::Result<Vec<InviteInfo>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT code_hash, username, role, expires_at, used FROM invites ORDER BY expires_at DESC",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(InviteInfo {
+                        id: r.get(0)?,
+                        username: r.get(1)?,
+                        role: parse_role(&r.get::<_, String>(2)?),
+                        expires_at: ts(Some(r.get(3)?)).unwrap_or_else(Utc::now),
+                        used: r.get::<_, i32>(4)? != 0,
+                    })
+                })?
+                .collect();
+            rows
+        })
+    }
+
+    /// Revokes an invite. True when it existed.
+    pub fn delete_invite(&self, code_hash: &str) -> anyhow::Result<bool> {
+        Ok(self.with(|c| c.execute("DELETE FROM invites WHERE code_hash=?1", [code_hash]))? == 1)
+    }
+
+    /// Drops invites that expired more than a month ago.
+    pub fn prune_invites(&self) -> anyhow::Result<()> {
+        let cutoff = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+        self.with(|c| c.execute("DELETE FROM invites WHERE expires_at < ?1", [cutoff]))?;
+        Ok(())
     }
 
     // ───── jobs ─────

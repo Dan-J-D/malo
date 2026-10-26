@@ -272,6 +272,18 @@ impl NameKey {
             &format!("{}.jsonl.enc", &h[..32]),
         ])
     }
+    /// The owner's folder inside a shared fs mount. It follows the archive key, not the user id,
+    /// so a user restored with the recovery kit finds the same folder.
+    pub fn owner_dir(&self) -> String {
+        self.mac("owner")[..32].to_string()
+    }
+    /// The encrypted copy of the user's settings at the destination root (see `SettingsBackup`).
+    pub fn settings_backup(&self, root: &str) -> String {
+        join(&[
+            root,
+            &format!("malo-settings-{}.enc", &self.mac("settings")[..24]),
+        ])
+    }
     fn mac(&self, s: &str) -> String {
         crypto::hmac_hex(self.0.as_ref(), s.as_bytes())
     }

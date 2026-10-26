@@ -30,7 +30,19 @@ export type RegisterRequest = { username: string, password: string, invite_code:
 /**
  * Optional recovery kit of a previous user: its archive key is adopted so old encrypted backups stay readable.
  */
-recovery_kit: RecoveryKit | null, };
+recovery_kit: RecoveryKitFile | null, 
+/**
+ * Passphrase of an encrypted kit.
+ */
+kit_passphrase?: string, };
+
+export type RecoverRequest = { username: string, recovery_kit: RecoveryKitFile, 
+/**
+ * Passphrase of an encrypted kit.
+ */
+kit_passphrase?: string, new_password: string, };
+
+export type RecoveryKitRequest = { password: string, passphrase: string, };
 
 export type ServerStatus = { version: string, needs_setup: boolean, self_registration: boolean, 
 /**
@@ -46,7 +58,26 @@ export type RecoveryKit = { format: string, user_id: string, username: string, c
 /**
  * Hex-encoded 256-bit archive key.
  */
-archive_key: string, };
+archive_key: string, 
+/**
+ * Short check value derived from the key, so a mistyped or damaged kit is refused instead of
+ * silently creating a user who can read nothing. Absent in kits saved by older versions.
+ */
+check?: string, };
+
+export type SealedRecoveryKit = { format: string, kdf: KitKdf, 
+/**
+ * Hex.
+ */
+salt: string, 
+/**
+ * Base64 of nonce, ciphertext and tag; the plaintext is a [`RecoveryKit`] as JSON.
+ */
+data: string, };
+
+export type KitKdf = { algorithm: string, m_kib: number, t: number, p: number, };
+
+export type RecoveryKitFile = SealedRecoveryKit | RecoveryKit;
 
 export type TlsMode = "implicit" | "starttls";
 
@@ -206,13 +237,39 @@ export type AuditEntry = { id: number, at: string, kind: string, account_id: str
 
 export type UserInfo = { id: string, username: string, role: Role, disabled: boolean, created_at: string, max_accounts: number | null, unlocked: boolean, };
 
-export type UpdateUserRequest = { disabled: boolean | null, role: Role | null, max_accounts: number | null | null, };
+export type UpdateUserRequest = { disabled?: boolean, role?: Role, 
+/**
+ * Sets the user's own account limit.
+ */
+max_accounts?: number, 
+/**
+ * True drops the user's own limit: they follow the server default again.
+ */
+max_accounts_default?: boolean, };
 
 export type CreateInviteRequest = { username: string | null, role: Role, valid_hours: number, };
 
+export type InviteInfo = { id: string, username: string | null, role: Role, expires_at: string, used: boolean, };
+
+export type AdminAuditEntry = { id: number, at: string, 
+/**
+ * Who did it: an administrator's username, or the user themselves (`self`).
+ */
+actor: string, action: string, 
+/**
+ * The user or invite acted on, when there is one.
+ */
+target: string | null, detail: any, };
+
 export type Invite = { code: string, username: string | null, role: Role, expires_at: string, };
 
-export type AdminSettings = { max_auto_lock_hours: number, allowed_fs_mounts: Array<string>, self_registration: boolean, default_max_accounts: number, max_jobs_per_user: number, };
+export type AdminSettings = { max_auto_lock_hours: number, allowed_fs_mounts: Array<string>, self_registration: boolean, default_max_accounts: number, max_jobs_per_user: number, 
+/**
+ * Refuse mail servers and storage endpoints on loopback, private and link-local addresses,
+ * so users can't make the server probe its own network. Off by default: a self-hosted mail
+ * server or MinIO on the LAN is common.
+ */
+block_private_networks: boolean, };
 
 export type SyncEvent = { "type": "job_queued", job: JobInfo, } | { "type": "job_started", job: JobInfo, } | { "type": "job_progress", job_id: string, progress: JobProgress, } | { "type": "job_finished", job: JobInfo, } | { "type": "new_message_discovered", message: MessageSummary, } | { "type": "message_state_changed", id: number, account_id: string, state: MessageState, stored: number, destinations: number, error: string | null, } | { "type": "check_progress", job_id: string, destination_id: string, done: number, total: number, } | { "type": "check_finished", report: CheckReport, } | { "type": "purge_summary", summary: PurgeSummary, } | { "type": "accounts_changed" } | { "type": "locked", reason: string, } | { "type": "notice", level: string, message: string, };
 

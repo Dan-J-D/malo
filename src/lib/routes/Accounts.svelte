@@ -33,7 +33,24 @@
     authKind === 'password' ? password : [oauth.provider, oauth.auth_url, oauth.token_url, oauth.client_id, oauth.client_secret, oauth.scopes, oauth.refresh_token]]));
   let loadedKey = $state<string | null>(null);
   let testedKey = $state<string | null>(null);
-  const verified = $derived(signInKey === testedKey || (!!editingId && signInKey === loadedKey));
+  const editing = $derived(editingId ? live.accounts.find((x) => x.id === editingId) ?? null : null);
+  // An imported account has no working sign-in yet, so its saved settings vouch for nothing.
+  const verified = $derived(signInKey === testedKey || (!!editing && !editing.imported && signInKey === loadedKey));
+  // The server reuses a saved secret only for the same server and login: moving it elsewhere
+  // must not hand the old password to a new host.
+  const secretMoved = $derived(!!editing && !editing.imported && movedFrom(editing) && keptSecret(editing));
+  function movedFrom(a: T.AccountView): boolean {
+    if (form.host.trim() !== a.host || form.port !== a.port || form.username.trim() !== a.username || form.tls !== a.tls) return true;
+    if (form.accept_invalid_certs && !a.accept_invalid_certs) return true;
+    const o = a.auth;
+    return o.kind === 'oauth2' && authKind === 'oauth2'
+      && (oauth.provider !== o.provider || oauth.auth_url !== o.auth_url || oauth.token_url !== o.token_url || oauth.client_id !== o.client_id);
+  }
+  function keptSecret(a: T.AccountView): boolean {
+    const o = a.auth;
+    if (o.kind === 'password') return authKind === 'password' && password === o.password;
+    return authKind === 'oauth2' && oauth.refresh_token === o.refresh_token;
+  }
   let loadedFor = $state<string | null>(null);
 
   function blank(): T.AccountInput {
@@ -143,7 +160,7 @@
       ]
     : [
         { id: 'account-new', group: 'Accounts', label: 'Add account', keys: 'n', run: () => go('/accounts/new') },
-        ...live.accounts.filter((a) => !a.imported).map((a) => ({ id: `edit-${a.id}`, group: 'Accounts', label: `Edit ${a.name}`, run: () => go(`/accounts/edit/${a.id}`) })),
+        ...live.accounts.map((a) => ({ id: `edit-${a.id}`, group: 'Accounts', label: `Edit ${a.name}`, run: () => go(`/accounts/edit/${a.id}`) })),
       ]);
 </script>
 
@@ -155,7 +172,7 @@
       <tbody>
         {#each live.accounts as a}
           <tr tabindex="0" class="clickable" {@attach contextMenu(() => accountMenu(a))}
-            ondblclick={() => !a.imported && go(`/accounts/edit/${a.id}`)} onkeydown={(e) => e.key === 'Enter' && e.target === e.currentTarget && !a.imported && go(`/accounts/edit/${a.id}`)}>
+            ondblclick={() => go(`/accounts/edit/${a.id}`)} onkeydown={(e) => e.key === 'Enter' && e.target === e.currentTarget && go(`/accounts/edit/${a.id}`)}>
             <td><strong>{a.name}</strong>{#if a.imported} <span class="pill muted">imported</span>{/if}</td>
             <td class="small">{a.username}<br /><span class="muted">{a.host}:{a.port} · {a.tls}</span></td>
             <td>{a.auth.kind === 'oauth2' ? `OAuth2 (${a.auth.provider})` : 'Password'}</td>
@@ -163,7 +180,7 @@
             <td class="small">{ago(a.last_backup)}</td>
             <td class="small">{Number(a.message_count).toLocaleString()} · {bytes(a.stored_bytes)}</td>
             <td class="right">
-              {#if !a.imported}<button onclick={() => go(`/accounts/edit/${a.id}`)}>Edit</button>{/if}
+              <button onclick={() => go(`/accounts/edit/${a.id}`)}>{a.imported ? 'Set up sign-in' : 'Edit'}</button>
               <button onclick={() => removeAccount(a)}>Remove</button>
             </td>
           </tr>
@@ -175,6 +192,7 @@
   </div>
 {:else}
   <div class="row"><h1 class="grow">{editingId ? 'Edit account' : 'Add account'}</h1><button onclick={close}>Cancel</button></div>
+  {#if editing?.imported}<p class="callout">This account was found on a destination without working sign-in details. Enter them and test the connection to resume backups: it keeps its id, folders and backed-up mail.</p>{/if}
   <p class="muted small">Step {step === 1 ? 1 : verified ? 3 : 2} of 3: {step === 1 ? 'provider' : verified ? 'save' : 'sign-in'}</p>
 
   {#if step === 1}
@@ -244,6 +262,7 @@
           {#if oauth.refresh_token}<span class="pill ok">authorized</span>{/if}
         </div>
       {/if}
+      {#if secretMoved}<p class="callout small">The server, login or provider changed: enter the {authKind === 'password' ? 'password' : 'sign-in'} again. Saved secrets are only reused for the same server and login.</p>{/if}
       {#if error}<p class="callout bad">{error}</p>{/if}
       {#if test}
         <div class="callout" class:ok={test.ok} class:bad={!test.ok}>
@@ -256,7 +275,7 @@
       <div class="row" style="margin-top: 1rem">
         <button onclick={runTest} disabled={busy}>Test connection</button>
         <button class="primary" disabled={busy || !verified || !form.name.trim()} onclick={save}>{editingId ? 'Save changes' : 'Add account'}</button>
-        {#if !verified}<span class="muted small">{editingId ? 'Sign-in settings changed: test the connection to save.' : 'Test the connection to continue.'}</span>{/if}
+        {#if !verified}<span class="muted small">{editing?.imported ? 'Test the connection to resume backups.' : editingId ? 'Sign-in settings changed: test the connection to save.' : 'Test the connection to continue.'}</span>{/if}
       </div>
       {#if verified && !editingId}<p class="muted small">After adding: set up a retention rule on the Purge page if you want Malo to delete old mail from the server.</p>{/if}
     </div>

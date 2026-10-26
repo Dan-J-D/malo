@@ -214,6 +214,7 @@ mod tests {
                 user_root: dir.to_path_buf(),
                 allowed_mounts: vec![],
                 user_id: "u".into(),
+                owner_dir: None,
             },
             tokens: Arc::new(crate::oauth::TokenCache::new(Box::new(|_, _| {}))),
             events: Arc::new(NullSink),

@@ -125,6 +125,26 @@ def fill(d, label, value, exact=False):
     raise AssertionError(f"could not type into {label!r} (value is {el.get_attribute('value')!r})")
 
 
+KIT_PASSPHRASE = "correct horse battery kit"
+
+
+def save_kit(d, user):
+    """The kit screen after creating a user: choose a passphrase, save the encrypted file, continue."""
+    wait(lambda: "Save your recovery kit" in text(d), timeout=90, what=f"{user} recovery kit")
+    cont = xp(d, "//button[contains(., 'continue')]")
+    assert not cont.is_enabled(), "continue must be disabled before saving the kit"
+    fill(d, "Kit passphrase", KIT_PASSPHRASE, exact=True)
+    fill(d, "Repeat kit passphrase", KIT_PASSPHRASE)
+    button(d, "Save recovery kit").click()
+    path = f"{SHOTS}/malo-recovery-kit-{user}.json"
+    wait(lambda: os.path.exists(path), timeout=60, what=f"{user} kit file")
+    kit = open(path).read()
+    assert "malo-recovery-kit-v2" in kit and "archive_key" not in kit and user not in kit, "kit must be encrypted"
+    if hasattr(os, "stat"):
+        assert os.stat(path).st_mode & 0o077 == 0, "kit file must be private"
+    button(d, "continue").click()
+
+
 def settings(d):
     """Open Settings and wait until its async content has rendered (the layout shifts until then)."""
     d.execute_script("location.hash = '#/settings'")
@@ -133,7 +153,9 @@ def settings(d):
 
 
 def text(d):
-    return d.find_element(By.TAG_NAME, "body").text
+    # WebKitWebDriver's element text leaves out the content of some <button> rows (Activity's
+    # "Newly found" list), so the DOM text is added for plain "is it on screen" checks.
+    return d.find_element(By.TAG_NAME, "body").text + "\n" + d.execute_script("return document.body.textContent")
 
 
 def shot(d, name):
@@ -160,13 +182,8 @@ def main():
         button(d, "Create").click()
 
         # The recovery kit must be exported before continuing.
-        wait(lambda: "Save your recovery kit" in text(d), timeout=90, what="recovery kit screen")
-        cont = xp(d, "//button[contains(., 'continue')]")
-        assert not cont.is_enabled(), "continue must be disabled before saving the kit"
-        button(d, "Save recovery kit").click()
-        wait(lambda: os.path.exists(f"{SHOTS}/malo-recovery-kit-owner.json"), what="kit file")
-        button(d, "continue").click()
-        wait(lambda: "Dashboard" in text(d) and "Auto-lock in" in text(d), what="dashboard")
+        save_kit(d, "owner")
+        wait(lambda: "Overview" in text(d) and "Keys unlocked" in text(d), what="dashboard")
         shot(d, "03-dashboard")
 
         # Destination: a plain folder in the user's private area.
@@ -270,9 +287,25 @@ def main():
         button(d, "Lock now").click()
         wait(lambda: "Log in to unlock" in text(d) and "Locked" in text(d), what="locked login screen")
         shot(d, "07-locked")
-        fill(d, "Password", "owner-password-1", exact=True)
+        # Forgotten password: the recovery kit resets it, keeping everything else.
+        button(d, "Forgot password?").click()
+        wait(lambda: "Reset password with recovery kit" in text(d), what="recover screen")
+        fill(d, "Username", "owner")
+        button(d, "Choose recovery kit").click()
+        fill(d, "Kit passphrase", "not the passphrase", exact=True)
+        fill(d, "New password", "owner-password-2")
+        fill(d, "Repeat password", "owner-password-2")
+        button(d, "Reset password").click()
+        wait(lambda: xp(d, "//p[contains(@class,'bad')]"), timeout=60, what="wrong kit passphrase refused")
+        fill(d, "Kit passphrase", KIT_PASSPHRASE, exact=True)
+        button(d, "Reset password").click()
+        wait(lambda: "Overview" in text(d), timeout=90, what="dashboard after reset")
+        wait(lambda: "Back up now" in text(d), what="accounts kept after reset")
+        button(d, "Lock now").click()
+        wait(lambda: "Log in to unlock" in text(d), what="locked again")
+        fill(d, "Password", "owner-password-2", exact=True)
         button(d, "Unlock").click()
-        wait(lambda: "Dashboard" in text(d), what="dashboard after unlock")
+        wait(lambda: "Overview" in text(d), what="dashboard after unlock")
 
         # Deleting your own account takes two steps; the last administrator is refused.
         settings(d)
@@ -284,7 +317,7 @@ def main():
         wait(lambda: "Step 2 of 2" in text(d), what="step 2")
         final = xp(d, "//button[normalize-space()='Delete my account' and @type='submit']")
         fill(d, "to confirm", "delete owner?")
-        fill(d, "Your password", "owner-password-1")
+        fill(d, "Your password", "owner-password-2")
         assert not final.is_enabled(), "wrong phrase must keep the button disabled"
         fill(d, "to confirm", "delete owner")
         final.click()
@@ -308,10 +341,8 @@ def main():
         fill(d, "Password", "remote-password-1", exact=True)
         fill(d, "Repeat password", "remote-password-1")
         button(d, "Create").click()
-        wait(lambda: "Save your recovery kit" in text(d), timeout=90, what="remote recovery kit")
-        button(d, "Save recovery kit").click()
-        button(d, "continue").click()
-        wait(lambda: "Dashboard" in text(d) and "127.0.0.1:18443" in text(d), what="remote dashboard")
+        save_kit(d, "remote-admin")
+        wait(lambda: "Overview" in text(d) and "127.0.0.1:18443" in text(d), what="remote dashboard")
         shot(d, "09-remote-dashboard")
 
         # Invite a second user, register through the GUI, then let them delete their own account.
@@ -326,10 +357,8 @@ def main():
         fill(d, "Repeat password", "leaver-password-1")
         fill(d, "Invite code", code)
         button(d, "Create").click()
-        wait(lambda: "Save your recovery kit" in text(d), timeout=90, what="leaver kit")
-        button(d, "Save recovery kit").click()
-        button(d, "continue").click()
-        wait(lambda: "leaver" in text(d) and "Dashboard" in text(d), what="leaver dashboard")
+        save_kit(d, "leaver")
+        wait(lambda: "leaver" in text(d) and "Overview" in text(d), what="leaver dashboard")
         settings(d)
         button(d, "Delete my account").click()
         field(d, "I understand this cannot be undone").click()

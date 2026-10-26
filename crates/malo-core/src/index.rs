@@ -1344,7 +1344,15 @@ fn query_messages_on(
           AND (?7 IS NULL OR g.id<=?7)"
     );
     {
-        let p = params![q.account, q.mailbox, q.new_only as i32, text, states, id, q.max_id];
+        let p = params![
+            q.account,
+            q.mailbox,
+            q.new_only as i32,
+            text,
+            states,
+            id,
+            q.max_id
+        ];
         // The total only matters for paging a list; counting is a full scan.
         let total: i64 = match id {
             Some(_) => 0,
@@ -1639,10 +1647,26 @@ mod tests {
     fn batched_discovery_and_pinned_paging() {
         let idx = Index::open_in_memory().unwrap();
         let all = idx
-            .upsert_mailbox("acc", "[Gmail]/All Mail", "All Mail", "All", Some("/"), Some("\\All"), 1)
+            .upsert_mailbox(
+                "acc",
+                "[Gmail]/All Mail",
+                "All Mail",
+                "All",
+                Some("/"),
+                Some("\\All"),
+                1,
+            )
             .unwrap();
         let trash = idx
-            .upsert_mailbox("acc", "[Gmail]/Trash", "Trash", "Trash", Some("/"), Some("\\Trash"), 1)
+            .upsert_mailbox(
+                "acc",
+                "[Gmail]/Trash",
+                "Trash",
+                "Trash",
+                Some("/"),
+                Some("\\Trash"),
+                1,
+            )
             .unwrap();
         let found = |uids: std::ops::Range<u32>| -> Vec<crate::imap::Discovered> {
             uids.map(|uid| crate::imap::Discovered {
@@ -1660,16 +1684,29 @@ mod tests {
             })
             .collect()
         };
-        let added = idx.record_discovered("acc", all.id, 1, &found(1..251), 2).unwrap();
+        let added = idx
+            .record_discovered("acc", all.id, 1, &found(1..251), 2)
+            .unwrap();
         assert_eq!(added.len(), 250);
         assert_eq!(added[0].destinations, 2);
         // Seen again: nothing new. The same Gmail message in another mailbox: membership only.
-        assert!(idx.record_discovered("acc", all.id, 2, &found(1..251), 2).unwrap().is_empty());
-        assert!(idx.record_discovered("acc", trash.id, 2, &found(1..6), 2).unwrap().is_empty());
+        assert!(idx
+            .record_discovered("acc", all.id, 2, &found(1..251), 2)
+            .unwrap()
+            .is_empty());
+        assert!(idx
+            .record_discovered("acc", trash.id, 2, &found(1..6), 2)
+            .unwrap()
+            .is_empty());
         assert_eq!(idx.live_uids(trash.id).unwrap().len(), 5);
 
         let page = |offset: u32, max_id: Option<i64>| {
-            let q = MessageQuery { limit: 100, offset, max_id, ..Default::default() };
+            let q = MessageQuery {
+                limit: 100,
+                offset,
+                max_id,
+                ..Default::default()
+            };
             idx.list_messages(&q, 2).unwrap()
         };
         let (total, first) = page(0, None);
@@ -1677,13 +1714,18 @@ mod tests {
         let pin = Some(first[0].id);
         let before: Vec<i64> = page(100, pin).1.iter().map(|m| m.id).collect();
         // Mail found after the first page doesn't shift the pinned pages.
-        idx.record_discovered("acc", all.id, 3, &found(251..261), 2).unwrap();
+        idx.record_discovered("acc", all.id, 3, &found(251..261), 2)
+            .unwrap();
         let after: Vec<i64> = page(100, pin).1.iter().map(|m| m.id).collect();
         assert_eq!(before, after);
         assert_eq!(page(0, None).0, 260);
 
         let top = |sort: MessageSort| {
-            let q = MessageQuery { limit: 1, sort, ..Default::default() };
+            let q = MessageQuery {
+                limit: 1,
+                sort,
+                ..Default::default()
+            };
             let m = idx.list_messages(&q, 2).unwrap().1.remove(0);
             (m.size, m.envelope.from_name.unwrap())
         };

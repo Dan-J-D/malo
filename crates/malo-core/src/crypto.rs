@@ -62,6 +62,13 @@ pub fn hmac_hex(key: &[u8], data: &[u8]) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
+/// Check value of an archive key, kept in the recovery kit: a mistyped or damaged kit is refused
+/// instead of creating a user who can read nothing. Reveals nothing usable about the key.
+pub fn kit_check(archive_key: &Key) -> String {
+    let k = derive(archive_key.as_ref(), None, "malo/v1/kit-check");
+    hmac_hex(k.as_ref(), b"malo recovery kit")[..16].to_string()
+}
+
 // ───────────────────────────── vault ─────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -262,6 +269,52 @@ impl UserKeys {
             spool: derive(mdk.as_ref(), None, "malo/v1/spool"),
         }
     }
+}
+
+// ───────────────────────────── passphrase-sealed files ─────────────────────────────
+
+/// Upper bounds for KDF parameters read from a file: a crafted file can't make the server spend
+/// gigabytes of memory or minutes of CPU.
+pub const MAX_FILE_KDF: KdfParams = KdfParams {
+    m_kib: 1024 * 1024,
+    t: 10,
+    p: 4,
+};
+
+/// Seals `plaintext` under a passphrase (Argon2id, then AES-256-GCM). Returns the salt and the
+/// sealed bytes. Call from a blocking thread.
+pub fn seal_with_passphrase(
+    passphrase: &str,
+    aad: &[u8],
+    plaintext: &[u8],
+    params: KdfParams,
+) -> Result<([u8; 16], Vec<u8>), CryptoError> {
+    let salt: [u8; 16] = random_bytes();
+    let key = kek(passphrase, &salt, params)?;
+    Ok((salt, seal_blob(&key, aad, plaintext)))
+}
+
+/// Opens what [`seal_with_passphrase`] sealed. A wrong passphrase is an integrity error.
+pub fn open_with_passphrase(
+    passphrase: &str,
+    aad: &[u8],
+    salt: &[u8; 16],
+    params: KdfParams,
+    sealed: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+    let max = MAX_FILE_KDF;
+    if params.m_kib > max.m_kib
+        || params.t > max.t
+        || params.p > max.p
+        || params.t == 0
+        || params.p == 0
+    {
+        return Err(CryptoError::Format(
+            "key derivation settings out of range".into(),
+        ));
+    }
+    let key = kek(passphrase, salt, params)?;
+    open_blob(&key, aad, sealed)
 }
 
 // ───────────────────────────── small blobs ─────────────────────────────
@@ -526,6 +579,30 @@ mod tests {
         let pt = open_blob(&UserKeys::derive(&mdk2).config, b"cfg", &config_ct).unwrap();
         assert_eq!(&pt[..], b"{\"accounts\":[]}");
         assert!(v.rewrap("u1", "nope", "x", KdfParams::TEST).is_err());
+    }
+
+    #[test]
+    fn passphrase_sealing() {
+        let (salt, sealed) =
+            seal_with_passphrase("correct horse", b"aad", b"secret", KdfParams::TEST).unwrap();
+        let open =
+            open_with_passphrase("correct horse", b"aad", &salt, KdfParams::TEST, &sealed).unwrap();
+        assert_eq!(open.as_slice(), b"secret");
+        assert!(
+            open_with_passphrase("wrong horse", b"aad", &salt, KdfParams::TEST, &sealed).is_err()
+        );
+        assert!(
+            open_with_passphrase("correct horse", b"other", &salt, KdfParams::TEST, &sealed)
+                .is_err()
+        );
+        let huge = KdfParams {
+            m_kib: 64 * 1024 * 1024,
+            ..KdfParams::TEST
+        };
+        assert!(matches!(
+            open_with_passphrase("correct horse", b"aad", &salt, huge, &sealed),
+            Err(CryptoError::Format(_))
+        ));
     }
 
     #[test]

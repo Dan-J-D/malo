@@ -556,8 +556,11 @@ pub fn absorbed_manifests(
     // The account-wide counter stays above every generation seen, so newer is always higher.
     ctx.index
         .kv_bump(&format!("manifest_gen:{account_id}"), generation, 0)?;
-    ctx.index
-        .kv_bump(&dest_generation_key(account_id, destination_id), generation, 0)?;
+    ctx.index.kv_bump(
+        &dest_generation_key(account_id, destination_id),
+        generation,
+        0,
+    )?;
     Ok(())
 }
 

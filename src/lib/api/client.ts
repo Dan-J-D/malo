@@ -57,8 +57,9 @@ export const app = {
     call<string | null>('save_attachment', { messageId, index, filename }),
   saveRaw: (messageId: number) => call<string | null>('save_raw', { messageId }),
   rawSource: (messageId: number) => call<string>('raw_source', { messageId }),
-  saveRecoveryKit: () => call<string | null>('save_recovery_kit'),
-  pickRecoveryKit: () => call<T.RecoveryKit | null>('pick_recovery_kit'),
+  saveRecoveryKit: (username: string, password: string, passphrase: string) =>
+    call<string | null>('save_recovery_kit', { username, password, passphrase }),
+  pickRecoveryKit: () => call<T.RecoveryKitFile | null>('pick_recovery_kit'),
   openExternal: (url: string) => call<void>('open_external', { url }),
   localDataInfo: () => call<LocalDataInfo>('local_data_info'),
   revealLocalData: () => call<void>('reveal_local_data'),

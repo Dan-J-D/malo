@@ -256,6 +256,7 @@ pub async fn new_user(admin: &Api, name: &str) -> Api {
                 password: format!("{name}-password"),
                 invite_code: Some(invite.code),
                 recovery_kit: None,
+                kit_passphrase: None,
             },
         )
         .await;

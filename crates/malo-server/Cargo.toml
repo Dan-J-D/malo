@@ -27,6 +27,7 @@ uuid.workspace = true
 chrono.workspace = true
 rand.workspace = true
 hex.workspace = true
+base64.workspace = true
 sha2.workspace = true
 zeroize.workspace = true
 rustls.workspace = true
@@ -40,6 +41,7 @@ rcgen = "0.13"
 rusqlite = { version = "0.37", features = ["bundled-sqlcipher-vendored-openssl"] }
 toml = "0.8"
 libc = "0.2"
+url = "2"
 memsec = "0.7"
 reqwest.workspace = true
 

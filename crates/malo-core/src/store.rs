@@ -24,8 +24,12 @@ pub struct FsPolicy {
     pub user_root: PathBuf,
     /// Admin allow-listed absolute mount points (each user gets `<mount>/<user-id>/`).
     pub allowed_mounts: Vec<PathBuf>,
-    /// Owner of the destinations; names the per-user subfolder inside shared mounts.
+    /// Owner of the destinations; names the per-user subfolder inside shared mounts that were
+    /// first used before `owner_dir` existed.
     pub user_id: String,
+    /// Keyed folder name of the owner (`NameKey::owner_dir`): the subfolder inside a shared mount
+    /// when there's no older `<mount>/<user-id>/` folder.
+    pub owner_dir: Option<String>,
 }
 
 pub struct Store {
@@ -150,14 +154,23 @@ pub fn confine_fs_root(requested: Option<&str>, policy: &FsPolicy) -> anyhow::Re
             if let Ok(rest) = p.strip_prefix(m) {
                 // First the user's own subfolder (checked against the mount), then everything below
                 // it is checked against that subfolder, so symlinks can't reach other users' folders.
-                let mut comps = Path::new(&policy.user_id).components();
+                // A folder named after the user id predates keyed names and is kept, unless the
+                // keyed folder is already in use: a user-id folder appearing later must not move
+                // the backups somewhere else.
+                let sub = match &policy.owner_dir {
+                    Some(o) if m.join(o).exists() || !m.join(&policy.user_id).exists() => {
+                        o.as_str()
+                    }
+                    _ => policy.user_id.as_str(),
+                };
+                let mut comps = Path::new(sub).components();
                 if !matches!(
                     (comps.next(), comps.next()),
                     (Some(Component::Normal(_)), None)
                 ) {
-                    bail!("invalid user id for a shared mount");
+                    bail!("invalid owner folder for a shared mount");
                 }
-                let own = create_within(m, Path::new(&policy.user_id))?;
+                let own = create_within(m, Path::new(sub))?;
                 return create_within(&own, rest);
             }
         }
@@ -246,6 +259,36 @@ impl Store {
             names: NameKey::new(archive_key),
             archive_key: archive_key.clone(),
         })
+    }
+
+    fn settings_path(&self) -> String {
+        self.portable(self.names.settings_backup(&self.dest.root))
+    }
+
+    /// Writes the encrypted settings copy. Always encrypted with the archive key, also on a plain
+    /// destination: it holds the credentials of every account and destination.
+    pub async fn write_settings_backup(&self, json: &[u8]) -> anyhow::Result<()> {
+        let path = self.settings_path();
+        let path = self.checked(&path)?;
+        self.write_obj(path, crypto::encrypt_object(&self.archive_key, json))
+            .await
+    }
+
+    /// The settings copy, or `None` when the destination has none.
+    pub async fn read_settings_backup(
+        &self,
+    ) -> anyhow::Result<Option<zeroize::Zeroizing<Vec<u8>>>> {
+        let path = self.settings_path();
+        let path = self.checked(&path)?;
+        match self.op.stat(path).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == opendal::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e).with_context(|| format!("stat {path}")),
+        }
+        let raw = self.read_obj(path).await?;
+        let json = crypto::decrypt_object(&self.archive_key, &raw)
+            .map_err(|_| anyhow!("the settings copy on {} can't be decrypted", self.dest.name))?;
+        Ok(Some(zeroize::Zeroizing::new(json)))
     }
 
     /// For tests: wrap an existing operator.
@@ -861,12 +904,18 @@ mod tests {
             &k,
         );
         let a = account();
-        assert!(matches!(store.read_account_marker(&a).await.unwrap(), MarkerRead::Absent));
+        assert!(matches!(
+            store.read_account_marker(&a).await.unwrap(),
+            MarkerRead::Absent
+        ));
         store.write_account_marker(&a, 7).await.unwrap();
         let MarkerRead::Found(back) = store.read_account_marker(&a).await.unwrap() else {
             panic!("marker not found");
         };
-        assert_eq!((back.account_id.as_str(), back.generation), (a.id.as_str(), 7));
+        assert_eq!(
+            (back.account_id.as_str(), back.generation),
+            (a.id.as_str(), 7)
+        );
         let e = ManifestEntry {
             account_id: a.id.clone(),
             mailbox: "INBOX".into(),
@@ -905,7 +954,10 @@ mod tests {
         assert_eq!(entries, vec![(store.account_root(&a), e)]);
         let mpath = store.marker_path(&a);
         store.operator().write(&mpath, vec![1u8; 40]).await.unwrap();
-        assert!(matches!(store.read_account_marker(&a).await.unwrap(), MarkerRead::Damaged));
+        assert!(matches!(
+            store.read_account_marker(&a).await.unwrap(),
+            MarkerRead::Damaged
+        ));
     }
 
     #[test]
@@ -924,6 +976,7 @@ mod tests {
                     user_root: dir.path().join("users/gone/local"),
                     allowed_mounts: vec![],
                     user_id: "gone".into(),
+                    owner_dir: None,
                 }
             )
             .is_err(),
@@ -934,6 +987,7 @@ mod tests {
             user_root: dir.path().join(format!("users/{user}/local")),
             allowed_mounts: vec![mount.clone()],
             user_id: user.into(),
+            owner_dir: None,
         };
         let p1 = policy("u1");
         let r = confine_fs_root(Some("backups/a"), &p1).unwrap();
@@ -960,6 +1014,31 @@ mod tests {
         let real_mount = mount.canonicalize().unwrap();
         assert_eq!(a, real_mount.join("u1/family/backups"));
         assert_eq!(b, real_mount.join("u2/family/backups"));
+
+        // With a keyed owner folder, a new user holding the same archive key (restored from the
+        // recovery kit) finds the same files; an existing `<mount>/<user-id>/` folder is kept.
+        let keyed = |user: &str| FsPolicy {
+            owner_dir: Some("k0ffee".into()),
+            ..policy(user)
+        };
+        assert_eq!(
+            confine_fs_root(Some(shared.to_str().unwrap()), &keyed("u1")).unwrap(),
+            a
+        );
+        assert_eq!(
+            confine_fs_root(Some(shared.to_str().unwrap()), &keyed("u3")).unwrap(),
+            real_mount.join("k0ffee/family/backups")
+        );
+        assert_eq!(
+            confine_fs_root(Some(shared.to_str().unwrap()), &keyed("u4")).unwrap(),
+            real_mount.join("k0ffee/family/backups")
+        );
+        // A user-id folder showing up later doesn't move a keyed user's backups.
+        std::fs::create_dir_all(mount.join("u3")).unwrap();
+        assert_eq!(
+            confine_fs_root(Some(shared.to_str().unwrap()), &keyed("u3")).unwrap(),
+            real_mount.join("k0ffee/family/backups")
+        );
 
         #[cfg(unix)]
         {

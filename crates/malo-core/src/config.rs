@@ -115,6 +115,49 @@ fn aad(user_id: &str) -> String {
     format!("malo/v1/config/{user_id}")
 }
 
+pub const SETTINGS_BACKUP_FORMAT: &str = "malo-settings-v1";
+
+/// The copy of a user's settings kept on every destination, encrypted with the archive key. With
+/// the recovery kit and the credentials of one destination, the accounts and destinations (and
+/// their credentials) come back on a new server, under their old ids.
+#[derive(Serialize, Deserialize)]
+pub struct SettingsBackup {
+    pub format: String,
+    pub saved_at: chrono::DateTime<chrono::Utc>,
+    pub accounts: Vec<Account>,
+    pub destinations: Vec<Destination>,
+    pub settings: UserSettings,
+}
+
+impl UserConfig {
+    /// The settings copy as JSON, and a hash of its content that ignores the time it was made
+    /// (to skip rewriting an unchanged copy).
+    pub fn settings_backup(&self) -> anyhow::Result<(Zeroizing<Vec<u8>>, String)> {
+        let mut b = SettingsBackup {
+            format: SETTINGS_BACKUP_FORMAT.into(),
+            saved_at: chrono::DateTime::UNIX_EPOCH,
+            accounts: self.accounts.clone(),
+            destinations: self.destinations.clone(),
+            settings: self.settings.clone(),
+        };
+        let hash = crypto::sha256_hex(&Zeroizing::new(serde_json::to_vec(&b)?));
+        b.saved_at = chrono::Utc::now();
+        Ok((Zeroizing::new(serde_json::to_vec(&b)?), hash))
+    }
+}
+
+impl SettingsBackup {
+    pub fn parse(json: &[u8]) -> anyhow::Result<SettingsBackup> {
+        let b: SettingsBackup = serde_json::from_slice(json)?;
+        anyhow::ensure!(
+            b.format == SETTINGS_BACKUP_FORMAT,
+            "unsupported settings copy {}",
+            b.format
+        );
+        Ok(b)
+    }
+}
+
 const SECRET_OPTION_HINTS: &[&str] = &[
     "secret",
     "password",
@@ -178,7 +221,17 @@ impl Account {
         input: AccountInput,
         previous: Option<&Account>,
     ) -> anyhow::Result<Account> {
-        let auth = match (input.auth, previous.map(|p| &p.auth)) {
+        // A saved secret only fills in a redacted field while it goes to the same server, user
+        // and kind of connection; otherwise anyone with a session could send it to their own server.
+        let same_server = previous.is_some_and(|p| {
+            p.host == input.host.trim()
+                && p.port == input.port
+                && p.username == input.username
+                && p.tls == input.tls
+                && (p.accept_invalid_certs || !input.accept_invalid_certs)
+        });
+        let saved = previous.filter(|_| same_server).map(|p| &p.auth);
+        let auth = match (input.auth, saved) {
             (AccountAuth::Password { password }, prev) => {
                 let old = match prev {
                     Some(AccountAuth::Password { password }) => Some(password),
@@ -200,12 +253,19 @@ impl Account {
                 },
                 prev,
             ) => {
+                // The token and secret also stay with the provider they were issued by.
                 let (old_secret, old_refresh) = match prev {
                     Some(AccountAuth::OAuth2 {
+                        provider: p,
+                        auth_url: a,
+                        token_url: t,
+                        client_id: c,
                         client_secret,
                         refresh_token,
                         ..
-                    }) => (client_secret.as_ref(), Some(refresh_token)),
+                    }) if (*p, a, t, c) == (provider, &auth_url, &token_url, &client_id) => {
+                        (client_secret.as_ref(), Some(refresh_token))
+                    }
                     _ => (None, None),
                 };
                 AccountAuth::OAuth2 {
@@ -224,9 +284,12 @@ impl Account {
             refresh_token: secret,
             ..
         }) = &auth;
+        anyhow::ensure!(!secret.is_empty(), "credentials are required");
+        let redacted_secret =
+            matches!(&auth, AccountAuth::OAuth2 { client_secret: Some(s), .. } if s == REDACTED);
         anyhow::ensure!(
-            secret != REDACTED && !secret.is_empty(),
-            "credentials are required"
+            secret != REDACTED && !redacted_secret,
+            "enter the password again (or sign in again): the server or sign-in settings changed, so the saved one isn't reused"
         );
         validate_name("name", &input.name)?;
         anyhow::ensure!(!input.host.trim().is_empty(), "host is required");
@@ -324,14 +387,31 @@ impl Destination {
         if let DeepCheckMode::Rotating { slices } = input.deep_check {
             anyhow::ensure!(slices >= 1, "rotating deep check needs at least one slice");
         }
-        let options = input
+        // Saved secrets are only reused for the same storage (scheme and every other option).
+        let public = |o: &BTreeMap<String, String>| {
+            o.iter()
+                .filter(|(k, _)| !is_secret_option(k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let same_storage = previous.is_some_and(|p| {
+            p.scheme == input.scheme && public(&p.options) == public(&input.options)
+        });
+        let options: BTreeMap<String, String> = input
             .options
             .into_iter()
             .map(|(k, v)| {
-                let old = previous.and_then(|p| p.options.get(&k));
+                let old = previous
+                    .filter(|_| same_storage)
+                    .and_then(|p| p.options.get(&k));
                 (k, keep(v, old))
             })
             .collect();
+        if let Some((k, _)) = options.iter().find(|(_, v)| v.as_str() == REDACTED) {
+            anyhow::bail!(
+                "enter '{k}' again: the storage settings changed, so the saved secret isn't reused"
+            );
+        }
         let dest = Destination {
             id,
             name: input.name.trim().to_string(),

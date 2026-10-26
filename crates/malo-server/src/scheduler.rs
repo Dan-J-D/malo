@@ -132,6 +132,7 @@ pub async fn tick(state: &SharedState) {
     }
     reconcile_idle(state);
     let _ = state.db.prune_jobs(90);
+    let _ = state.db.prune_invites();
 }
 
 pub fn spawn(state: SharedState) {

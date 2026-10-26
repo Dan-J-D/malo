@@ -5,6 +5,8 @@
   import { session, attempt, notify, refreshMe, errorText } from '../state.svelte';
   import LocalData from '../components/LocalData.svelte';
   import DangerConfirm from '../components/DangerConfirm.svelte';
+  import Modal from '../components/Modal.svelte';
+  import KitExport from '../components/KitExport.svelte';
   import { commands } from '../commands.svelte';
 
   let settings: T.UserSettings | null = $state(null);
@@ -34,13 +36,9 @@
     if (r !== undefined) oldPw = newPw = newPw2 = '';
   }
 
-  async function exportKit() {
-    try {
-      const p = await app.saveRecoveryKit();
-      if (p) notify(`Recovery kit saved to ${p}`, 'success');
-    } catch (e) {
-      notify(errorText(e), 'error');
-    }
+  let exporting = $state(false);
+  function exportKit() {
+    exporting = true;
   }
 
   async function switchServer() {
@@ -111,7 +109,7 @@
 
 <div class="panel">
   <h2>Recovery kit</h2>
-  <p class="muted">The recovery kit holds your archive key. With it, a new account can read all your encrypted backups if you forget your password. Keep it offline and secret.</p>
+  <p class="muted">The recovery kit holds your archive key, encrypted with a passphrase you choose. With the kit and its passphrase you can reset a forgotten password on this server, or read all your encrypted backups from a new account. Kits saved by older versions are not encrypted: save a new one and delete the old file.</p>
   <button onclick={exportKit}>Save recovery kit…</button>
 </div>
 
@@ -157,3 +155,8 @@
   </DangerConfirm>
 {/if}
 
+{#if exporting && session.me}
+  <Modal title="Save recovery kit" onclose={() => (exporting = false)}>
+    <KitExport username={session.me.username} onsaved={() => (exporting = false)} />
+  </Modal>
+{/if}

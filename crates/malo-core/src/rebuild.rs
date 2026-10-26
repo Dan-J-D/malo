@@ -68,7 +68,11 @@ async fn rebuild(
     let mut absorbed: HashMap<(usize, String), u64> = HashMap::new();
     for (n, id) in destination_ids.iter().enumerate() {
         ctx.check_cancel()?;
-        ctx.progress(n as u64, destination_ids.len() as u64, "scanning destinations");
+        ctx.progress(
+            n as u64,
+            destination_ids.len() as u64,
+            "scanning destinations",
+        );
         let scanned = match ctx.store(id) {
             Ok(store) => store.scan().await.map(|scan| (store, scan)),
             Err(e) => Err(e),
@@ -360,6 +364,7 @@ mod tests {
             user_root: dir.path().join("local"),
             allowed_mounts: vec![],
             user_id: "u".into(),
+            owner_dir: None,
         };
         let ctx = JobCtx {
             job_id: "t".into(),

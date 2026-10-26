@@ -6,6 +6,8 @@ pub mod db;
 pub mod error;
 pub mod jobs;
 pub mod keyring;
+pub mod kit;
+pub mod net;
 pub mod routes;
 pub mod scheduler;
 pub mod state;
@@ -82,12 +84,17 @@ pub fn router(state: SharedState) -> Router {
         GovernorConfigBuilder::default()
             .per_second(2)
             .burst_size(burst)
+            .key_extractor(auth::ClientIpKey {
+                trust_proxy: state.cfg.trust_proxy_headers,
+            })
             .finish()
             .expect("governor config"),
     );
     let limited = Router::new()
         .route("/auth/login", post(auth::login))
         .route("/auth/register", post(auth::register))
+        .route("/auth/recover", post(auth::recover))
+        .route("/recovery-kit", post(auth::recovery_kit))
         .route("/setup", post(auth::setup))
         .layer(GovernorLayer { config: governor });
     Router::new()
@@ -101,7 +108,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/me/delete", post(auth::delete_self))
         .route("/me", get(auth::get_me))
         .route("/settings", get(get_settings).put(put_settings))
-        .route("/recovery-kit", get(recovery_kit))
+        .route("/recovery-kit/saved", post(auth::recovery_kit_saved))
         .route("/accounts", get(list_accounts).post(create_account))
         .route("/accounts/test", post(test_new_account))
         .route(
@@ -140,7 +147,15 @@ pub fn router(state: SharedState) -> Router {
             "/admin/users/{id}",
             put(admin_update_user).delete(admin_delete_user),
         )
-        .route("/admin/invites", post(admin_create_invite))
+        .route(
+            "/admin/invites",
+            get(admin_invites).post(admin_create_invite),
+        )
+        .route(
+            "/admin/invites/{id}",
+            axum::routing::delete(admin_revoke_invite),
+        )
+        .route("/admin/audit", get(admin_audit_log))
         .route(
             "/admin/settings",
             get(admin_get_settings).put(admin_put_settings),

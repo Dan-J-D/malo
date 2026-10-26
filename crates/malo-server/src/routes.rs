@@ -110,30 +110,6 @@ pub async fn put_settings(
     Ok(Json(s))
 }
 
-pub async fn recovery_kit(u: Unlocked) -> ApiResult<Json<RecoveryKit>> {
-    let cfg = u.user.config();
-    let kit = RecoveryKit {
-        format: "malo-recovery-kit-v1".into(),
-        user_id: u.user.user_id.clone(),
-        username: u.user.username.clone(),
-        created_at: Utc::now(),
-        archive_key: cfg.archive_key.clone(),
-    };
-    u.user
-        .update_config(|c| {
-            c.recovery_kit_exported = true;
-            Ok(())
-        })
-        .await?;
-    best_effort(
-        u.user
-            .index
-            .audit("recovery_kit_exported", None, &serde_json::json!({})),
-        "audit",
-    );
-    Ok(Json(kit))
-}
-
 // ───────────────────────────── accounts ─────────────────────────────
 
 fn account_view(
@@ -217,21 +193,27 @@ pub async fn create_account(
         .user
         .max_accounts
         .unwrap_or(state.db.admin_settings()?.default_max_accounts);
-    if u.user.config().accounts.len() as u32 >= limit {
+    let id = uuid::Uuid::new_v4().to_string();
+    let account = Account::from_input(id.clone(), input, None)
+        .map_err(|e| ApiErr::bad_request(format!("{e:#}")))?;
+    crate::net::check_account(&state, &account).await?;
+    let acc2 = account.clone();
+    // Counted under the config lock, so two requests at once can't both pass the limit.
+    let added = u
+        .user
+        .update_config(move |cfg| {
+            if cfg.accounts.len() as u32 >= limit {
+                return Ok(false);
+            }
+            cfg.accounts.push(acc2);
+            Ok(true)
+        })
+        .await?;
+    if !added {
         return Err(ApiErr::forbidden(format!(
             "account limit of {limit} reached"
         )));
     }
-    let id = uuid::Uuid::new_v4().to_string();
-    let account = Account::from_input(id.clone(), input, None)
-        .map_err(|e| ApiErr::bad_request(format!("{e:#}")))?;
-    let acc2 = account.clone();
-    u.user
-        .update_config(move |cfg| {
-            cfg.accounts.push(acc2);
-            Ok(())
-        })
-        .await?;
     scheduler::sync_schedules(&state, &u.user)?;
     state
         .events
@@ -248,6 +230,12 @@ pub async fn update_account(
     Path(id): Path<String>,
     Json(input): Json<AccountInput>,
 ) -> ApiResult<Json<AccountView>> {
+    if let Some(prev) = u.user.config().account(&id) {
+        let mut probe = prev.clone();
+        probe.host = input.host.trim().to_string();
+        probe.port = input.port;
+        crate::net::check_account(&state, &probe).await?;
+    }
     let updated = u
         .user
         .update_config(move |cfg| {
@@ -262,7 +250,9 @@ pub async fn update_account(
                 next.policy.armed = false;
                 next.policy.armed_at = None;
             }
-            next.imported = prev.imported && next.host == prev.host;
+            // An imported account (found on a destination, without credentials) becomes a normal
+            // one once it has sign-in details again, and keeps its id, folder and history.
+            next.imported = prev.imported && next.auth == prev.auth;
             *cfg.account_mut(&id).unwrap() = next.clone();
             Ok(next)
         })
@@ -299,6 +289,11 @@ pub async fn delete_account(
         })
         .await?;
     best_effort(u.user.index.delete_account(&id), "index cleanup");
+    // A settings copy written before the removal must not bring the account back in a rebuild.
+    best_effort(
+        u.user.index.kv_set(&format!("removed:{id}"), "1"),
+        "removal record",
+    );
     best_effort(
         u.user
             .index
@@ -359,6 +354,7 @@ async fn test_account(user: &UnlockedUser, account: &Account) -> ConnectionTest 
 }
 
 pub async fn test_saved_account(
+    State(state): State<SharedState>,
     u: Unlocked,
     Path(id): Path<String>,
 ) -> ApiResult<Json<ConnectionTest>> {
@@ -366,6 +362,7 @@ pub async fn test_saved_account(
     let a = cfg
         .account(&id)
         .ok_or_else(|| ApiErr::not_found("account"))?;
+    crate::net::check_account(&state, a).await?;
     Ok(Json(test_account(&u.user, a).await))
 }
 
@@ -376,6 +373,7 @@ pub struct TestQuery {
 }
 
 pub async fn test_new_account(
+    State(state): State<SharedState>,
     u: Unlocked,
     Query(q): Query<TestQuery>,
     Json(input): Json<AccountInput>,
@@ -385,6 +383,7 @@ pub async fn test_new_account(
     let id = format!("test-{}", uuid::Uuid::new_v4());
     let account = Account::from_input(id.clone(), input, prev)
         .map_err(|e| ApiErr::bad_request(format!("{e:#}")))?;
+    crate::net::check_account(&state, &account).await?;
     let res = test_account(&u.user, &account).await;
     u.user.tokens.invalidate(&id);
     Ok(Json(res))
@@ -554,11 +553,12 @@ pub async fn create_destination(
     let id = uuid::Uuid::new_v4().to_string();
     let d = Destination::from_input(id, input, None)
         .map_err(|e| ApiErr::bad_request(format!("{e:#}")))?;
+    crate::net::check_destination(&state, &d).await?;
     // Validate configuration (including fs confinement) before saving.
     Store::open(
         &d,
         &u.user.secrets.archive_key,
-        &jobs::fs_policy(&state, &u.user.user_id),
+        &jobs::fs_policy(&state, &u.user),
     )
     .map_err(|e| ApiErr::bad_request(format!("{e:#}")))?;
     // Existing verified messages need a replica on the new destination. Done before the config
@@ -598,10 +598,11 @@ pub async fn update_destination(
     if next.encrypt != prev.encrypt || next.scheme != prev.scheme || next.root != prev.root {
         return Err(ApiErr::bad_request("scheme, root and encryption can't change on an existing destination; add a new one instead"));
     }
+    crate::net::check_destination(&state, &next).await?;
     Store::open(
         &next,
         &u.user.secrets.archive_key,
-        &jobs::fs_policy(&state, &u.user.user_id),
+        &jobs::fs_policy(&state, &u.user),
     )
     .map_err(|e| ApiErr::bad_request(format!("{e:#}")))?;
     let n2 = next.clone();
@@ -652,6 +653,10 @@ pub async fn delete_destination(
         "index cleanup",
     );
     best_effort(
+        u.user.index.kv_set(&format!("removed:{id}"), "1"),
+        "removal record",
+    );
+    best_effort(
         u.user.index.audit(
             "destination_removed",
             None,
@@ -672,6 +677,7 @@ pub async fn test_saved_destination(
     let d = cfg
         .destination(&id)
         .ok_or_else(|| ApiErr::not_found("destination"))?;
+    crate::net::check_destination(&state, d).await?;
     Ok(Json(test_destination(&state, &u.user, d).await))
 }
 
@@ -685,6 +691,7 @@ pub async fn test_new_destination(
     let prev = q.id.as_deref().and_then(|id| cfg.destination(id));
     let d = Destination::from_input("test".into(), input, prev)
         .map_err(|e| ApiErr::bad_request(format!("{e:#}")))?;
+    crate::net::check_destination(&state, &d).await?;
     Ok(Json(test_destination(&state, &u.user, &d).await))
 }
 
@@ -693,11 +700,7 @@ async fn test_destination(
     user: &UnlockedUser,
     d: &Destination,
 ) -> DestinationTest {
-    match Store::open(
-        d,
-        &user.secrets.archive_key,
-        &jobs::fs_policy(state, &user.user_id),
-    ) {
+    match Store::open(d, &user.secrets.archive_key, &jobs::fs_policy(state, user)) {
         Ok(store) => store.test().await,
         Err(e) => DestinationTest {
             ok: false,
@@ -865,7 +868,11 @@ pub async fn list_messages(
             limit: q.limit.unwrap_or(100),
             offset: q.offset.unwrap_or(0),
             max_id: q.max_id,
-            sort: q.sort.as_deref().map(MessageSort::parse).unwrap_or_default(),
+            sort: q
+                .sort
+                .as_deref()
+                .map(MessageSort::parse)
+                .unwrap_or_default(),
         },
         dests,
     )?;
@@ -1090,32 +1097,68 @@ pub async fn admin_update_user(
     if id == me.user.id && (req.disabled == Some(true) || req.role == Some(Role::User)) {
         return Err(ApiErr::bad_request("you can't disable or demote yourself"));
     }
-    state
+    let before = state
         .db
         .user(&id)?
         .ok_or_else(|| ApiErr::not_found("user"))?;
+    let max_accounts = match (req.max_accounts_default, req.max_accounts) {
+        (Some(true), _) => Some(None),
+        (_, Some(n)) => Some(Some(n)),
+        _ => None,
+    };
     state
         .db
-        .update_user(&id, req.disabled, req.role, req.max_accounts)?;
+        .update_user(&id, req.disabled, req.role, max_accounts)?;
     if req.disabled == Some(true) {
         scheduler::lock_user(&state, &id, "disabled by an administrator");
     }
     let u = state.db.user(&id)?.unwrap();
+    auth::admin_audit(
+        &state,
+        &me.user.username,
+        "user_updated",
+        Some(&before.username),
+        serde_json::json!({
+            "disabled": req.disabled, "role": req.role, "max_accounts": max_accounts,
+        }),
+    );
     Ok(Json(u.info(state.keyring.get(&id).is_some())))
+}
+
+#[derive(Deserialize)]
+pub struct DeleteUserQuery {
+    /// Also delete backups in the user's local folder destinations (they can't be restored).
+    #[serde(default)]
+    pub delete_local_backups: bool,
 }
 
 pub async fn admin_delete_user(
     State(state): State<SharedState>,
     Admin(me): Admin,
     Path(id): Path<String>,
+    Query(q): Query<DeleteUserQuery>,
 ) -> ApiResult<StatusCode> {
     if id == me.user.id {
         return Err(ApiErr::bad_request("you can't delete yourself"));
     }
-    state
+    let target = state
         .db
         .user(&id)?
         .ok_or_else(|| ApiErr::not_found("user"))?;
+    // Local folder backups live in the user's data folder and go with it. They may be the only
+    // copy of mail already purged from the server, so this needs its own confirmation.
+    let local = crate::keyring::UserPaths::try_new(&state.cfg.data_dir, &id)?.local();
+    let has_local = std::fs::read_dir(&local).is_ok_and(|mut d| d.next().is_some());
+    if has_local && !q.delete_local_backups {
+        return Err(ApiErr::new(
+            StatusCode::CONFLICT,
+            "local_backups",
+            format!(
+                "{} has backups in a local folder on this server; deleting the user deletes them too. A forgotten password can be reset with the recovery kit instead.",
+                target.username
+            ),
+        ));
+    }
     scheduler::lock_user(&state, &id, "deleted");
     if !state
         .jobs
@@ -1129,22 +1172,75 @@ pub async fn admin_delete_user(
     if dir.starts_with(state.cfg.data_dir.join("users")) {
         let _ = std::fs::remove_dir_all(dir);
     }
+    auth::admin_audit(
+        &state,
+        &me.user.username,
+        "user_deleted",
+        Some(&target.username),
+        serde_json::json!({
+            "local_backups_deleted": has_local,
+        }),
+    );
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn admin_invites(
+    State(state): State<SharedState>,
+    _a: Admin,
+) -> ApiResult<Json<Vec<InviteInfo>>> {
+    Ok(Json(state.db.invites()?))
+}
+
+pub async fn admin_revoke_invite(
+    State(state): State<SharedState>,
+    Admin(me): Admin,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    if !state.db.delete_invite(&id)? {
+        return Err(ApiErr::not_found("invite"));
+    }
+    auth::admin_audit(
+        &state,
+        &me.user.username,
+        "invite_revoked",
+        Some(&id[..12.min(id.len())]),
+        serde_json::json!({}),
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn admin_audit_log(
+    State(state): State<SharedState>,
+    _a: Admin,
+    Query(q): Query<LimitQuery>,
+) -> ApiResult<Json<Vec<AdminAuditEntry>>> {
+    Ok(Json(
+        state
+            .db
+            .admin_audit_list(q.limit.unwrap_or(200).min(1000))?,
+    ))
 }
 
 pub async fn admin_create_invite(
     State(state): State<SharedState>,
-    _a: Admin,
+    Admin(me): Admin,
     Json(req): Json<CreateInviteRequest>,
 ) -> ApiResult<Json<Invite>> {
     let code = auth::random_token()[..24].to_string();
     let expires = Utc::now() + chrono::Duration::hours(req.valid_hours.clamp(1, 24 * 30) as i64);
-    state.db.create_invite(
-        &auth::hash_token(&code),
-        req.username.as_deref(),
-        req.role,
-        expires,
-    )?;
+    let hash = auth::hash_token(&code);
+    state
+        .db
+        .create_invite(&hash, req.username.as_deref(), req.role, expires)?;
+    auth::admin_audit(
+        &state,
+        &me.user.username,
+        "invite_created",
+        Some(&hash[..12]),
+        serde_json::json!({
+            "username": req.username, "role": req.role, "expires_at": expires,
+        }),
+    );
     Ok(Json(Invite {
         code,
         username: req.username,
@@ -1162,7 +1258,7 @@ pub async fn admin_get_settings(
 
 pub async fn admin_put_settings(
     State(state): State<SharedState>,
-    _a: Admin,
+    Admin(me): Admin,
     Json(mut s): Json<AdminSettings>,
 ) -> ApiResult<Json<AdminSettings>> {
     s.max_auto_lock_hours = s
@@ -1181,5 +1277,12 @@ pub async fn admin_put_settings(
         }
     }
     state.db.set_admin_settings(&s)?;
+    auth::admin_audit(
+        &state,
+        &me.user.username,
+        "settings_changed",
+        None,
+        serde_json::to_value(&s).unwrap_or_default(),
+    );
     Ok(Json(s))
 }

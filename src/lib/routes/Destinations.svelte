@@ -65,6 +65,18 @@
     open = true;
   }
 
+  // Saved secrets are only reused while every other option stays the same, so a changed endpoint
+  // or bucket can't be handed the old key. Lists the secret fields that need typing again.
+  const secretsToReenter = $derived.by(() => {
+    if (!editing) return [];
+    const fields = schemes[kind].fields;
+    const secret = new Set(fields.filter((f) => f.secret).map((f) => f.key));
+    const now = input().options;
+    const keys = new Set([...Object.keys(now), ...Object.keys(editing.options)]);
+    const moved = [...keys].some((k) => !secret.has(k) && (now[k] ?? '') !== (editing!.options[k] ?? ''));
+    return moved ? fields.filter((f) => f.secret && now[f.key] && now[f.key] === editing!.options[f.key]).map((f) => f.label) : [];
+  });
+
   function input(): T.DestinationInput {
     const known: Record<string, string> = {};
     for (const f of schemes[kind].fields) {
@@ -104,12 +116,12 @@
   }
 
   function rebuild(d: T.DestinationView) {
-    if (!confirm(`Rebuild the index from the manifests on "${d.name}"? Existing entries are kept; missing ones are imported.`)) return;
+    if (!confirm(`Rebuild the index from the manifests on "${d.name}"? Existing entries are kept; missing ones are imported. Accounts and destinations saved in the encrypted settings copy there are restored too (without purge arming); ones you removed stay removed.`)) return;
     attempt(() => api.post('/jobs', { kind: { type: 'rebuild_index', destination_id: d.id } }), 'Index rebuild queued');
   }
 
   function rebuildAll() {
-    if (!confirm('Rebuild the index from every destination? All mail found anywhere is imported; folders and flags come from the newest copy of each account. Existing entries are kept.')) return;
+    if (!confirm('Rebuild the index from every destination? All mail found anywhere is imported; folders and flags come from the newest copy of each account. Existing entries are kept. Accounts and destinations from the newest encrypted settings copy are restored too (without purge arming); ones you removed stay removed.')) return;
     attempt(() => api.post('/jobs', { kind: { type: 'rebuild_index_all' } }), 'Index rebuild queued');
   }
 
@@ -206,6 +218,7 @@
         <label>Slices <input type="number" min="2" value={form.deep_check.slices} oninput={(e) => (form.deep_check = { mode: 'rotating', slices: Number((e.target as HTMLInputElement).value) || 7 })} /></label>
       {/if}
     </div>
+    {#if secretsToReenter.length}<p class="callout small">The storage settings changed: enter {secretsToReenter.join(', ')} again. Saved secrets are only reused for unchanged settings.</p>{/if}
     {#if !form.encrypt}<p class="callout">Plain destinations store readable .eml files with mailbox names visible. Anyone with access to the storage can read your mail.</p>{/if}
     {#if error}<p class="callout bad">{error}</p>{/if}
     {#if test}<p class="callout" class:ok={test.ok} class:bad={!test.ok}>{test.ok ? `Write/read/delete OK (${test.write_ms} ms / ${test.read_ms} ms)` : test.error}</p>{/if}

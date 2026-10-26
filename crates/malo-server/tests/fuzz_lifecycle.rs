@@ -827,6 +827,9 @@ struct UserModel {
     released: HashSet<String>,
     /// The index (with its audit log of purges) was lost at least once.
     lost_index: bool,
+    /// Name of the user's folder in the shared mount, derived from their archive key (known
+    /// once they were unlocked).
+    owner_dir: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1122,6 +1125,21 @@ impl World {
             self.login(u).await?;
         }
         Ok(self.session(u))
+    }
+
+    /// Remembers the user's shared-mount folder while their keys are in memory: after a deletion
+    /// it can't be derived any more.
+    fn note_owner_dir(&mut self, u: usize) {
+        if self.users[u].owner_dir.is_some() {
+            return;
+        }
+        let Some(id) = self.users[u].id.clone() else {
+            return;
+        };
+        if let Some(k) = self.state().keyring.get(&id) {
+            self.users[u].owner_dir =
+                Some(malo_core::layout::NameKey::new(&k.secrets.archive_key).owner_dir());
+        }
     }
 
     /// Marks a user's session(s) as dead and records when their keys were sealed.
@@ -2034,6 +2052,7 @@ impl World {
                     drop(old);
                 }
                 self.users[u].sealed_at = None;
+                self.note_owner_dir(u);
                 self.subscribe(u).await;
             }
             Err((s, t)) if is_server_error(s) => {
@@ -2084,6 +2103,7 @@ impl World {
                             password: pw,
                             invite_code: Some(invite.code),
                             recovery_kit: None,
+                            kit_passphrase: None,
                         }),
                     )
                     .await?;
@@ -2267,6 +2287,7 @@ impl World {
                     disabled: Some(disabled),
                     role: None,
                     max_accounts: None,
+                    max_accounts_default: None,
                 };
                 let (st, _) = self
                     .call(
@@ -2373,10 +2394,11 @@ impl World {
                     }
                     DestKind::Symlink => {
                         // The user's own mount folder holds a link to the outside.
-                        let Some(id) = self.users[u].id.clone() else {
+                        self.note_owner_dir(u);
+                        let Some(own) = self.users[u].owner_dir.clone() else {
                             return Ok(());
                         };
-                        let own = self.mount.join(&id);
+                        let own = self.mount.join(own);
                         let _ = std::fs::create_dir_all(&own);
                         let link = own.join(format!("link{}", self.msg_counter));
                         #[cfg(unix)]
@@ -3140,8 +3162,10 @@ impl World {
             ));
         }
         // Shared-mount backups of a deleted user may stay, but must never change again.
-        self.deleted_snapshots
-            .insert(id.clone(), snapshot(&self.mount.join(&id)));
+        if let Some(own) = self.users[u].owner_dir.clone() {
+            let snap = snapshot(&self.mount.join(&own));
+            self.deleted_snapshots.insert(own, snap);
+        }
         Ok(())
     }
 
@@ -3584,25 +3608,38 @@ impl World {
         }
 
         // Files: user folders only for users that exist; shared mount split per user, nothing else.
-        let ids: HashSet<String> = self.users.iter().filter_map(|u| u.id.clone()).collect();
+        for u in 0..USERS {
+            self.note_owner_dir(u);
+        }
+        let owners: HashSet<String> = self
+            .users
+            .iter()
+            .filter_map(|u| u.owner_dir.clone())
+            .collect();
+        // A user never unlocked so far has no folder to account for yet, but if one shows up it
+        // may be theirs.
+        let all_known = self
+            .users
+            .iter()
+            .all(|u| u.id.is_none() || u.owner_dir.is_some());
         for e in std::fs::read_dir(self.mount.as_path())
             .into_iter()
             .flatten()
             .flatten()
         {
             let name = e.file_name().to_string_lossy().to_string();
-            if !ids.contains(&name) {
+            if all_known && !owners.contains(&name) {
                 return Err(violation(
                     "shared_mount_layout",
                     format!("unexpected entry {name} at the top of the shared mount"),
                 ));
             }
         }
-        for (id, snap) in &self.deleted_snapshots {
-            if &snapshot(&self.mount.join(id)) != snap {
+        for (own, snap) in &self.deleted_snapshots {
+            if &snapshot(&self.mount.join(own)) != snap {
                 return Err(violation(
                     "zombie_writes",
-                    format!("files of deleted user {id} changed after the deletion"),
+                    format!("files in {own} of a deleted user changed after the deletion"),
                 ));
             }
         }
@@ -3643,6 +3680,7 @@ impl World {
                     disabled: Some(false),
                     role: None,
                     max_accounts: None,
+                    max_accounts_default: None,
                 };
                 self.call(
                     &admin,
@@ -3758,7 +3796,10 @@ impl World {
                             x.lost_index && !x.deleted && x.ever_mailboxes.contains(&m)
                         })
                         .collect();
-                    if candidates.iter().any(|u| self.users[*u].released.contains(&token)) {
+                    if candidates
+                        .iter()
+                        .any(|u| self.users[*u].released.contains(&token))
+                    {
                         continue;
                     }
                     let mut found = candidates.is_empty();
@@ -3775,13 +3816,14 @@ impl World {
                                 None::<&()>,
                             )
                             .await?;
-                        let list: MessageList =
-                            serde_json::from_value(v).unwrap_or(MessageList {
-                                total: 0,
-                                messages: vec![],
-                            });
+                        let list: MessageList = serde_json::from_value(v).unwrap_or(MessageList {
+                            total: 0,
+                            messages: vec![],
+                        });
                         for msg in list.messages {
-                            if raw_bytes(&api, msg.id).await.as_deref() == Some(truth.raw.as_slice()) {
+                            if raw_bytes(&api, msg.id).await.as_deref()
+                                == Some(truth.raw.as_slice())
+                            {
                                 found = true;
                                 break;
                             }
@@ -3874,13 +3916,22 @@ impl World {
                                         let markers: Vec<_> = scan
                                             .markers
                                             .iter()
-                                            .map(|(d, m)| (d.clone(), m.account_id.clone(), m.generation))
+                                            .map(|(d, m)| {
+                                                (d.clone(), m.account_id.clone(), m.generation)
+                                            })
                                             .collect();
                                         let hits: Vec<_> = scan
                                             .entries
                                             .iter()
                                             .filter(|(_, e)| e.envelope.subject.starts_with(&token))
-                                            .map(|(d, e)| (d.clone(), e.mailbox.clone(), e.uid, e.object_path.clone()))
+                                            .map(|(d, e)| {
+                                                (
+                                                    d.clone(),
+                                                    e.mailbox.clone(),
+                                                    e.uid,
+                                                    e.object_path.clone(),
+                                                )
+                                            })
                                             .collect();
                                         self.trace.push(format!(
                                             "  diag: destination {} markers {markers:?}; manifest lines for {token}: {hits:?}",

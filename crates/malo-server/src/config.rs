@@ -29,6 +29,10 @@ pub struct ServerConfig {
     pub session_idle_minutes: i64,
     /// Development/test only: auto-lock after this many seconds instead of hours (`MALO_AUTO_LOCK_SECONDS`).
     pub auto_lock_seconds: Option<i64>,
+    /// `MALO_TRUST_PROXY_HEADERS=1`: take the client address from `X-Real-IP` / `X-Forwarded-For`
+    /// (set by the reverse proxy) for rate limits. Only behind a proxy that sets these headers:
+    /// otherwise clients could pick their own address.
+    pub trust_proxy_headers: bool,
 }
 
 impl Default for ServerConfig {
@@ -45,6 +49,7 @@ impl Default for ServerConfig {
             sidecar_secret: None,
             session_idle_minutes: 12 * 60,
             auto_lock_seconds: None,
+            trust_proxy_headers: false,
         }
     }
 }
@@ -86,6 +91,9 @@ impl ServerConfig {
         }
         if let Some(v) = env("MALO_AUTO_LOCK_SECONDS") {
             cfg.auto_lock_seconds = Some(v.parse()?);
+        }
+        if let Some(v) = env("MALO_TRUST_PROXY_HEADERS") {
+            cfg.trust_proxy_headers = matches!(v.as_str(), "1" | "true" | "on" | "yes");
         }
         if let Some(v) = env("MALO_SIDECAR_SECRET") {
             cfg.sidecar_secret = Some(v);

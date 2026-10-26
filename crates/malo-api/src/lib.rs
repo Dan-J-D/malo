@@ -51,6 +51,27 @@ pub struct Me {
     pub skipped_while_locked: u32,
 }
 
+/// Sets a new password with the recovery kit when the old one is forgotten. The user, their
+/// accounts, destinations and settings stay as they are.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct RecoverRequest {
+    pub username: String,
+    pub recovery_kit: RecoveryKitFile,
+    /// Passphrase of an encrypted kit.
+    #[serde(default)]
+    #[ts(optional)]
+    pub kit_passphrase: Option<String>,
+    pub new_password: String,
+}
+
+/// Asks for the recovery kit: the account password again, and the passphrase that will encrypt
+/// the kit file (the kit is for when the password is forgotten, so it can't be the password).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct RecoveryKitRequest {
+    pub password: String,
+    pub passphrase: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct ChangePasswordRequest {
     pub old_password: String,
@@ -80,7 +101,11 @@ pub struct RegisterRequest {
     pub password: String,
     pub invite_code: Option<String>,
     /// Optional recovery kit of a previous user: its archive key is adopted so old encrypted backups stay readable.
-    pub recovery_kit: Option<RecoveryKit>,
+    pub recovery_kit: Option<RecoveryKitFile>,
+    /// Passphrase of an encrypted kit.
+    #[serde(default)]
+    #[ts(optional)]
+    pub kit_passphrase: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -127,8 +152,42 @@ pub struct RecoveryKit {
     pub created_at: Timestamp,
     /// Hex-encoded 256-bit archive key.
     pub archive_key: String,
+    /// Short check value derived from the key, so a mistyped or damaged kit is refused instead of
+    /// silently creating a user who can read nothing. Absent in kits saved by older versions.
+    #[serde(default)]
+    #[ts(optional)]
+    pub check: Option<String>,
 }
 
+pub const SEALED_KIT_FORMAT: &str = "malo-recovery-kit-v2";
+
+/// A recovery kit file encrypted with a passphrase (Argon2id + AES-256-GCM). Only the format and
+/// the key derivation settings are readable; the username and key are inside `data`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct SealedRecoveryKit {
+    pub format: String,
+    pub kdf: KitKdf,
+    /// Hex.
+    pub salt: String,
+    /// Base64 of nonce, ciphertext and tag; the plaintext is a [`RecoveryKit`] as JSON.
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct KitKdf {
+    pub algorithm: String,
+    pub m_kib: u32,
+    pub t: u32,
+    pub p: u32,
+}
+
+/// A kit file as read from disk: encrypted (current) or plain (saved by older versions).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(untagged)]
+pub enum RecoveryKitFile {
+    Sealed(SealedRecoveryKit),
+    Plain(RecoveryKit),
+}
 // ───────────────────────────── accounts ─────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -148,7 +207,7 @@ pub enum OAuthProvider {
     Custom,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AccountAuth {
     Password {
@@ -394,12 +453,25 @@ pub enum CheckScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum JobKind {
-    Backup { account_id: String },
-    Check { scope: CheckScope, deep: bool },
-    PurgeDryRun { account_id: String },
-    Purge { account_id: String },
-    Repair { scope: CheckScope },
-    RebuildIndex { destination_id: String },
+    Backup {
+        account_id: String,
+    },
+    Check {
+        scope: CheckScope,
+        deep: bool,
+    },
+    PurgeDryRun {
+        account_id: String,
+    },
+    Purge {
+        account_id: String,
+    },
+    Repair {
+        scope: CheckScope,
+    },
+    RebuildIndex {
+        destination_id: String,
+    },
     /// From every destination: all mail, with each account's newest manifests first.
     RebuildIndexAll,
 }
@@ -706,11 +778,23 @@ pub struct UserInfo {
     pub unlocked: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+/// Every field is optional: only the fields sent are changed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 pub struct UpdateUserRequest {
+    #[serde(default)]
+    #[ts(optional)]
     pub disabled: Option<bool>,
+    #[serde(default)]
+    #[ts(optional)]
     pub role: Option<Role>,
-    pub max_accounts: Option<Option<u32>>,
+    /// Sets the user's own account limit.
+    #[serde(default)]
+    #[ts(optional)]
+    pub max_accounts: Option<u32>,
+    /// True drops the user's own limit: they follow the server default again.
+    #[serde(default)]
+    #[ts(optional)]
+    pub max_accounts_default: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -728,6 +812,31 @@ pub struct Invite {
     pub expires_at: Timestamp,
 }
 
+/// An invite as listed for administrators. The code itself is never stored; `id` is its hash.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct InviteInfo {
+    pub id: String,
+    pub username: Option<String>,
+    pub role: Role,
+    pub expires_at: Timestamp,
+    pub used: bool,
+}
+
+/// One administrative action, kept in the server database.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct AdminAuditEntry {
+    #[ts(type = "number")]
+    pub id: i64,
+    pub at: Timestamp,
+    /// Who did it: an administrator's username, or the user themselves (`self`).
+    pub actor: String,
+    pub action: String,
+    /// The user or invite acted on, when there is one.
+    pub target: Option<String>,
+    #[ts(type = "any")]
+    pub detail: serde_json::Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct AdminSettings {
     pub max_auto_lock_hours: u32,
@@ -735,6 +844,11 @@ pub struct AdminSettings {
     pub self_registration: bool,
     pub default_max_accounts: u32,
     pub max_jobs_per_user: u32,
+    /// Refuse mail servers and storage endpoints on loopback, private and link-local addresses,
+    /// so users can't make the server probe its own network. Off by default: a self-hosted mail
+    /// server or MinIO on the LAN is common.
+    #[serde(default)]
+    pub block_private_networks: bool,
 }
 
 impl Default for AdminSettings {
@@ -745,6 +859,7 @@ impl Default for AdminSettings {
             self_registration: false,
             default_max_accounts: 20,
             max_jobs_per_user: 2,
+            block_private_networks: false,
         }
     }
 }
@@ -834,10 +949,15 @@ pub fn typescript_bindings() -> String {
         DeleteAccountRequest,
         SetupRequest,
         RegisterRequest,
+        RecoverRequest,
+        RecoveryKitRequest,
         ServerStatus,
         Health,
         UserSettings,
         RecoveryKit,
+        SealedRecoveryKit,
+        KitKdf,
+        RecoveryKitFile,
         TlsMode,
         OAuthProvider,
         AccountAuth,
@@ -878,6 +998,8 @@ pub fn typescript_bindings() -> String {
         UserInfo,
         UpdateUserRequest,
         CreateInviteRequest,
+        InviteInfo,
+        AdminAuditEntry,
         Invite,
         AdminSettings,
         SyncEvent,

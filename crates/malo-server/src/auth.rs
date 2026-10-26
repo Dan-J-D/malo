@@ -1,17 +1,18 @@
 //! Login = unlock, sessions, registration, bootstrap and the auth extractors.
 
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-use axum::extract::{FromRequestParts, State};
+use axum::extract::{ConnectInfo, FromRequestParts, State};
 use axum::http::request::Parts;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use chrono::Utc;
 use malo_api::{
-    ChangePasswordRequest, DeleteAccountRequest, LoginRequest, LoginResponse, Me, RegisterRequest,
-    Role, SetupRequest,
+    ChangePasswordRequest, DeleteAccountRequest, LoginRequest, LoginResponse, Me, RecoverRequest,
+    RecoveryKitRequest, RegisterRequest, Role, SealedRecoveryKit, SetupRequest,
 };
 use malo_core::crypto;
 use rand::RngCore;
@@ -19,7 +20,8 @@ use zeroize::Zeroizing;
 
 use crate::db::UserRow;
 use crate::error::{ApiErr, ApiResult};
-use crate::keyring::{self, UnlockedUser};
+use crate::keyring::{self, RecoverError, UnlockedUser};
+use crate::kit;
 use crate::scheduler;
 use crate::state::{AppState, SharedState};
 
@@ -91,6 +93,70 @@ impl FromRequestParts<SharedState> for Unlocked {
     }
 }
 
+/// The client's address: the TCP peer, or (with `MALO_TRUST_PROXY_HEADERS`) the address the
+/// reverse proxy reports. Rate limits and failed-login backoff are counted per client.
+pub struct ClientIp(pub IpAddr);
+
+pub fn client_ip(headers: &HeaderMap, peer: Option<IpAddr>, trust_proxy: bool) -> IpAddr {
+    if trust_proxy {
+        let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+        if let Some(ip) = header("x-real-ip").and_then(|v| v.trim().parse().ok()) {
+            return ip;
+        }
+        // The right-most entry is the one the proxy itself added; earlier ones are client-supplied.
+        if let Some(ip) = header("x-forwarded-for")
+            .and_then(|v| v.rsplit(',').next())
+            .and_then(|v| v.trim().parse().ok())
+        {
+            return ip;
+        }
+    }
+    peer.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+}
+
+impl FromRequestParts<SharedState> for ClientIp {
+    type Rejection = ApiErr;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &SharedState,
+    ) -> Result<Self, Self::Rejection> {
+        let peer = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|c| c.0.ip());
+        Ok(ClientIp(client_ip(
+            &parts.headers,
+            peer,
+            state.cfg.trust_proxy_headers,
+        )))
+    }
+}
+
+/// Key for the request rate limit (`tower_governor`), the same client address as [`ClientIp`].
+#[derive(Clone)]
+pub struct ClientIpKey {
+    pub trust_proxy: bool,
+}
+
+impl tower_governor::key_extractor::KeyExtractor for ClientIpKey {
+    type Key = IpAddr;
+
+    fn extract<T>(
+        &self,
+        req: &axum::http::Request<T>,
+    ) -> Result<IpAddr, tower_governor::GovernorError> {
+        let peer = req
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|c| c.0.ip());
+        if peer.is_none() && !self.trust_proxy {
+            return Err(tower_governor::GovernorError::UnableToExtractKey);
+        }
+        Ok(client_ip(req.headers(), peer, self.trust_proxy))
+    }
+}
+
 pub struct Admin(pub AuthUser);
 
 impl FromRequestParts<SharedState> for Admin {
@@ -143,6 +209,7 @@ pub fn max_lock_hours(state: &AppState) -> u32 {
     state.cfg.max_auto_lock_hours.min(admin.max(1))
 }
 
+/// Backoff for one client guessing one user's password: steep after five misses.
 fn failure_delay(n: u32) -> Duration {
     if n < 5 {
         Duration::ZERO
@@ -151,25 +218,80 @@ fn failure_delay(n: u32) -> Duration {
     }
 }
 
-fn check_failures(state: &AppState, key: &str) -> ApiResult<()> {
+/// Backoff for one user across all clients: it slows guessing spread over many addresses, but is
+/// short enough that nobody can keep a user locked out by failing on purpose.
+fn user_failure_delay(n: u32) -> Duration {
+    if n < 20 {
+        Duration::ZERO
+    } else {
+        Duration::from_secs((5u64 << ((n - 20) / 5).min(4)).min(60))
+    }
+}
+
+/// How long to wait after `n` failures.
+type Backoff = fn(u32) -> Duration;
+
+/// Failures count per name and client, and per name alone.
+fn failure_keys(name: &str, ip: IpAddr) -> [(String, Backoff); 2] {
+    let name = name.to_lowercase();
+    [
+        (format!("{name}|{ip}"), failure_delay),
+        (name, user_failure_delay),
+    ]
+}
+
+fn check_failures(state: &AppState, name: &str, ip: IpAddr) -> ApiResult<()> {
     let map = state.login_failures.lock().unwrap();
-    if let Some((n, at)) = map.get(key) {
-        let wait = failure_delay(*n);
-        if at.elapsed() < wait {
-            return Err(ApiErr::too_many(format!(
-                "too many failed attempts; try again in {}s",
-                (wait - at.elapsed()).as_secs() + 1
-            )));
+    for (key, delay) in failure_keys(name, ip) {
+        if let Some((n, at)) = map.get(&key) {
+            let wait = delay(*n);
+            if at.elapsed() < wait {
+                return Err(ApiErr::too_many(format!(
+                    "too many failed attempts; try again in {}s",
+                    (wait - at.elapsed()).as_secs() + 1
+                )));
+            }
         }
     }
     Ok(())
 }
 
-fn record_failure(state: &AppState, key: &str) {
+/// Most entries are for names that don't exist; old ones are dropped so the map stays small.
+const FAILURES_KEPT: usize = 10_000;
+
+fn record_failure(state: &AppState, name: &str, ip: IpAddr) {
     let mut map = state.login_failures.lock().unwrap();
-    let e = map.entry(key.to_string()).or_insert((0, Instant::now()));
-    e.0 += 1;
-    e.1 = Instant::now();
+    if map.len() >= FAILURES_KEPT {
+        map.retain(|_, (_, at)| at.elapsed() < Duration::from_secs(3600));
+        if map.len() >= FAILURES_KEPT {
+            map.clear();
+        }
+    }
+    for (key, _) in failure_keys(name, ip) {
+        let e = map.entry(key).or_insert((0, Instant::now()));
+        e.0 += 1;
+        e.1 = Instant::now();
+    }
+}
+
+fn clear_failures(state: &AppState, name: &str, ip: IpAddr) {
+    let mut map = state.login_failures.lock().unwrap();
+    for (key, _) in failure_keys(name, ip) {
+        map.remove(&key);
+    }
+}
+
+/// Records an administrative action; failures are logged, never returned.
+pub fn admin_audit(
+    state: &AppState,
+    actor: &str,
+    action: &str,
+    target: Option<&str>,
+    detail: serde_json::Value,
+) {
+    if let Err(e) = state.db.admin_audit(actor, action, target, &detail) {
+        tracing::warn!("admin audit: {e:#}");
+    }
 }
 
 async fn run_kdf<T: Send + 'static>(
@@ -217,10 +339,11 @@ fn rotation_handler(state: Weak<AppState>, user_id: String) -> malo_core::oauth:
 
 pub async fn login(
     State(state): State<SharedState>,
+    ClientIp(ip): ClientIp,
     Json(req): Json<LoginRequest>,
 ) -> ApiResult<Json<LoginResponse>> {
     let key = req.username.to_lowercase();
-    check_failures(&state, &key)?;
+    check_failures(&state, &key, ip)?;
     let user = state.db.user_by_name(&req.username)?;
     let password = Zeroizing::new(req.password);
     let Some(user) = user.filter(|u| !u.disabled) else {
@@ -235,7 +358,7 @@ pub async fn login(
             );
         })
         .await?;
-        record_failure(&state, &key);
+        record_failure(&state, &key, ip);
         return Err(ApiErr::unauthorized("invalid username or password"));
     };
     let data_dir = state.cfg.data_dir.clone();
@@ -245,11 +368,11 @@ pub async fn login(
     let mdk = match mdk {
         Ok(k) => k,
         Err(_) => {
-            record_failure(&state, &key);
+            record_failure(&state, &key, ip);
             return Err(ApiErr::unauthorized("invalid username or password"));
         }
     };
-    state.login_failures.lock().unwrap().remove(&key);
+    clear_failures(&state, &key, ip);
     let unlocked = state.keyring.unlock(
         &state.cfg.data_dir,
         &user.id,
@@ -320,6 +443,7 @@ pub fn delete_confirmation(username: &str) -> String {
 /// Remote destinations are not touched.
 pub async fn delete_self(
     State(state): State<SharedState>,
+    ClientIp(ip): ClientIp,
     auth: AuthUser,
     Json(req): Json<DeleteAccountRequest>,
 ) -> ApiResult<StatusCode> {
@@ -336,7 +460,7 @@ pub async fn delete_self(
         ));
     }
     let key = user.username.to_lowercase();
-    check_failures(&state, &key)?;
+    check_failures(&state, &key, ip)?;
     let data_dir = state.cfg.data_dir.clone();
     let uid = user.id.clone();
     let pw = Zeroizing::new(req.password);
@@ -345,7 +469,7 @@ pub async fn delete_self(
     })
     .await?;
     if !ok {
-        record_failure(&state, &key);
+        record_failure(&state, &key, ip);
         return Err(ApiErr::unauthorized("password is wrong"));
     }
     scheduler::lock_user(&state, &user.id, "account deleted");
@@ -368,27 +492,41 @@ pub async fn delete_self(
             }
         })?;
     }
+    admin_audit(
+        &state,
+        "self",
+        "user_deleted_by_owner",
+        Some(&user.username),
+        serde_json::json!({}),
+    );
     tracing::info!(user = %user.username, "account deleted by its owner");
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn change_password(
     State(state): State<SharedState>,
+    ClientIp(ip): ClientIp,
     auth: AuthUser,
     Json(req): Json<ChangePasswordRequest>,
 ) -> ApiResult<StatusCode> {
     validate_credentials(&auth.user.username, &req.new_password)?;
+    let name = auth.user.username.clone();
+    check_failures(&state, &name, ip)?;
     let data_dir = state.cfg.data_dir.clone();
     let uid = auth.user.id.clone();
     let (old, new) = (
         Zeroizing::new(req.old_password),
         Zeroizing::new(req.new_password),
     );
-    run_kdf(&state, move || {
+    let changed = run_kdf(&state, move || {
         keyring::change_password(&data_dir, &uid, &old, &new)
     })
-    .await?
-    .map_err(|_| ApiErr::unauthorized("current password is wrong"))?;
+    .await?;
+    if changed.is_err() {
+        record_failure(&state, &name, ip);
+        return Err(ApiErr::unauthorized("current password is wrong"));
+    }
+    clear_failures(&state, &name, ip);
     // Other sessions must log in again with the new password.
     state.db.delete_user_sessions(&auth.user.id)?;
     let token = auth.token_hash.clone();
@@ -421,11 +559,8 @@ async fn provision(
     })
     .await?
     .map_err(ApiErr::from)
-    .and_then(|()| {
-        let max = state.db.admin_settings()?.default_max_accounts;
-        state.db.create_user(&id, username, role, Some(max))?;
-        Ok(())
-    });
+    // No own account limit: the user follows the server default, also when it changes later.
+    .and_then(|()| Ok(state.db.create_user(&id, username, role, None)?));
     if let Err(e) = created {
         // A half-created user (full disk, I/O error) leaves nothing behind.
         let _ = std::fs::remove_dir_all(&dir);
@@ -449,42 +584,192 @@ pub async fn setup(
         return Err(ApiErr::forbidden("invalid setup token"));
     }
     validate_credentials(&req.username, &req.password)?;
-    provision(&state, &req.username, req.password, Role::Admin, None).await?;
-    state.db.delete_setting("setup_token_hash")?;
+    // Claimed before the slow key derivation: of two setups with the token, only one goes on.
+    if !state.db.take_setting("setup_token_hash", &expected)? {
+        return Err(ApiErr::conflict("already set up"));
+    }
+    if let Err(e) = provision(&state, &req.username, req.password, Role::Admin, None).await {
+        state.db.set_setting("setup_token_hash", &expected)?;
+        return Err(e);
+    }
+    admin_audit(
+        &state,
+        &req.username,
+        "setup",
+        Some(&req.username),
+        serde_json::json!({}),
+    );
     tracing::info!("first admin {} created", req.username);
     Ok(StatusCode::CREATED)
 }
 
 pub async fn register(
     State(state): State<SharedState>,
+    ClientIp(ip): ClientIp,
     Json(req): Json<RegisterRequest>,
 ) -> ApiResult<StatusCode> {
     validate_credentials(&req.username, &req.password)?;
-    let role = match &req.invite_code {
-        Some(code) => state
+    if state.db.user_by_name(&req.username)?.is_some() {
+        return Err(ApiErr::conflict("username taken"));
+    }
+    // The kit is opened before the invite is used, so a wrong passphrase doesn't use it up.
+    let archive = match req.recovery_kit.clone() {
+        Some(file) => {
+            check_failures(&state, "recovery kit", ip)?;
+            let pass = req.kit_passphrase.clone().map(Zeroizing::new);
+            let opened = run_kdf(&state, move || {
+                kit::open(&file, pass.as_deref().map(String::as_str))
+            })
+            .await?;
+            match opened {
+                Ok(k) => Some(k),
+                Err(e) => {
+                    record_failure(&state, "recovery kit", ip);
+                    return Err(e);
+                }
+            }
+        }
+        None => None,
+    };
+    let invite = req.invite_code.as_deref().map(|c| hash_token(c.trim()));
+    let role = match &invite {
+        Some(hash) => state
             .db
-            .redeem_invite(&hash_token(code.trim()), &req.username)?
+            .redeem_invite(hash, &req.username)?
             .ok_or_else(|| ApiErr::forbidden("invalid or expired invite"))?,
         None if state.db.admin_settings()?.self_registration => Role::User,
         None => return Err(ApiErr::forbidden("registration requires an invite")),
     };
-    let archive = match &req.recovery_kit {
-        Some(kit) => {
-            let bytes = Zeroizing::new(
-                hex::decode(kit.archive_key.trim())
-                    .map_err(|_| ApiErr::bad_request("bad recovery kit"))?,
-            );
-            if bytes.len() != 32 {
-                return Err(ApiErr::bad_request("bad recovery kit"));
-            }
-            let mut k = Zeroizing::new([0u8; 32]);
-            k.copy_from_slice(&bytes);
-            Some(k)
+    if let Err(e) = provision(&state, &req.username, req.password, role, archive).await {
+        if let Some(hash) = &invite {
+            state.db.release_invite(hash)?;
         }
-        None => None,
-    };
-    provision(&state, &req.username, req.password, role, archive).await?;
+        return Err(e);
+    }
+    admin_audit(
+        &state,
+        "self",
+        "registered",
+        Some(&req.username),
+        serde_json::json!({
+            "role": role, "invite": invite.as_deref().map(|h| &h[..12]),
+        }),
+    );
     Ok(StatusCode::CREATED)
+}
+
+/// Forgotten password: the recovery kit sets a new one. The user keeps their id, accounts,
+/// destinations, index and local backups; every session ends and the keys are locked.
+pub async fn recover(
+    State(state): State<SharedState>,
+    ClientIp(ip): ClientIp,
+    Json(req): Json<RecoverRequest>,
+) -> ApiResult<StatusCode> {
+    validate_credentials(&req.username, &req.new_password)?;
+    let name = req.username.to_lowercase();
+    check_failures(&state, &name, ip)?;
+    let wrong = || ApiErr::unauthorized("unknown user, or the recovery kit isn't theirs");
+    let user = state
+        .db
+        .user_by_name(&req.username)?
+        .filter(|u| !u.disabled);
+    let data_dir = state.cfg.data_dir.clone();
+    let uid = user.as_ref().map(|u| u.id.clone());
+    let (file, pass) = (req.recovery_kit, req.kit_passphrase.map(Zeroizing::new));
+    let pw = Zeroizing::new(req.new_password);
+    let res = run_kdf(&state, move || -> ApiResult<()> {
+        let key = kit::open(&file, pass.as_deref().map(String::as_str))?;
+        let Some(uid) = uid else { return Err(wrong()) };
+        keyring::reset_password_with_kit(&data_dir, &uid, &key, &pw).map_err(|e| match e {
+            RecoverError::WrongKit => wrong(),
+            RecoverError::NoSlot => ApiErr::conflict(
+                "this user hasn't logged in since recovery by kit became available, so the kit can't reset their password; register a new user with the kit instead",
+            ),
+            RecoverError::Other(e) => ApiErr::from(e),
+        })
+    })
+    .await?;
+    if let Err(e) = res {
+        record_failure(&state, &name, ip);
+        return Err(e);
+    }
+    clear_failures(&state, &name, ip);
+    let user = user.expect("checked in the reset");
+    scheduler::lock_user(&state, &user.id, "password reset with the recovery kit");
+    admin_audit(
+        &state,
+        "self",
+        "password_reset_with_kit",
+        Some(&user.username),
+        serde_json::json!({}),
+    );
+    tracing::info!(user = %user.username, "password reset with the recovery kit");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Hands out the recovery kit, sealed with the passphrase the user picked. The password is asked
+/// again: an unattended unlocked session alone isn't enough to take the archive key away.
+pub async fn recovery_kit(
+    State(state): State<SharedState>,
+    ClientIp(ip): ClientIp,
+    u: Unlocked,
+    Json(req): Json<RecoveryKitRequest>,
+) -> ApiResult<Json<SealedRecoveryKit>> {
+    kit::check_passphrase(&req.passphrase)?;
+    if req.passphrase == req.password {
+        return Err(ApiErr::bad_request(
+            "pick a kit passphrase that differs from your password: the kit is for when the password is forgotten",
+        ));
+    }
+    let name = u.auth.user.username.clone();
+    check_failures(&state, &name, ip)?;
+    let data_dir = state.cfg.data_dir.clone();
+    let user = u.user.clone();
+    let (pw, pass) = (Zeroizing::new(req.password), Zeroizing::new(req.passphrase));
+    let sealed = run_kdf(&state, move || -> ApiResult<Option<SealedRecoveryKit>> {
+        if keyring::open_vault(&data_dir, &user.user_id, &pw).is_err() {
+            return Ok(None);
+        }
+        let archive = user.config().archive_key()?;
+        Ok(Some(kit::seal(
+            &user.user_id,
+            &user.username,
+            &archive,
+            &pass,
+        )?))
+    })
+    .await??;
+    let Some(sealed) = sealed else {
+        record_failure(&state, &name, ip);
+        return Err(ApiErr::unauthorized("password is wrong"));
+    };
+    clear_failures(&state, &name, ip);
+    if let Err(e) = u
+        .user
+        .index
+        .audit("recovery_kit_created", None, &serde_json::json!({}))
+    {
+        tracing::warn!("audit: {e:#}");
+    }
+    Ok(Json(sealed))
+}
+
+/// The app confirms the kit file was written; only then the reminder to save it goes away.
+pub async fn recovery_kit_saved(u: Unlocked) -> ApiResult<StatusCode> {
+    u.user
+        .update_config(|c| {
+            c.recovery_kit_exported = true;
+            Ok(())
+        })
+        .await?;
+    if let Err(e) = u
+        .user
+        .index
+        .audit("recovery_kit_exported", None, &serde_json::json!({}))
+    {
+        tracing::warn!("audit: {e:#}");
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]

@@ -397,6 +397,7 @@ async fn auto_lock_stops_jobs_and_restart_seals() {
                 password: format!("{name}-password"),
                 invite_code: Some(invite.code),
                 recovery_kit: None,
+                kit_passphrase: None,
             },
         )
         .await;
@@ -1152,6 +1153,7 @@ async fn rebuild_index_and_recovery_kit() {
     let admin = bootstrap(&server).await;
     let name = uniq("fran");
     let fran = new_user(&admin, &name).await;
+    let fran_password = format!("{name}-password");
     let prefix = uniq("kit");
     let s3_input = s3_dest("rustfs", "malo-b", &prefix, true);
     let _: DestinationView = fran.post("/destinations", &s3_input).await;
@@ -1169,9 +1171,94 @@ async fn rebuild_index_and_recovery_kit() {
     );
     let me: Me = fran.get("/me").await;
     assert!(me.recovery_kit_pending);
-    let kit: RecoveryKit = fran.get("/recovery-kit").await;
+    let kit: SealedRecoveryKit = fran
+        .post(
+            "/recovery-kit",
+            &RecoveryKitRequest {
+                password: fran_password.clone(),
+                passphrase: "kit passphrase for fran".into(),
+            },
+        )
+        .await;
+    assert_eq!(kit.format, malo_api::SEALED_KIT_FORMAT);
+    // Fetching the kit alone doesn't count as saved; the app confirms after writing the file.
+    let me: Me = fran.get("/me").await;
+    assert!(me.recovery_kit_pending);
+    let _: serde_json::Value = fran
+        .post("/recovery-kit/saved", &serde_json::json!({}))
+        .await;
     let me: Me = fran.get("/me").await;
     assert!(!me.recovery_kit_pending);
+    // The kit file doesn't contain the key, the username or the user id in the clear.
+    let file = serde_json::to_string(&kit).unwrap();
+    assert!(!file.contains(&name) && !file.contains(&me.id), "{file}");
+
+    // A forgotten password: the kit resets it in place, keeping accounts and backups.
+    let anon = Api {
+        token: None,
+        ..admin.clone()
+    };
+    let recover = |passphrase: &str, new_password: &str| RecoverRequest {
+        username: name.clone(),
+        recovery_kit: RecoveryKitFile::Sealed(kit.clone()),
+        kit_passphrase: Some(passphrase.into()),
+        new_password: new_password.into(),
+    };
+    let wrong = anon
+        .call::<_, serde_json::Value>(
+            Method::POST,
+            "/auth/recover",
+            Some(&recover("not the passphrase", "fran-new-password-1")),
+        )
+        .await;
+    assert_eq!(wrong.unwrap_err().0, 401);
+    // Someone else's kit can't reset fran's password.
+    let other = new_user(&admin, &uniq("other")).await;
+    let other_kit: SealedRecoveryKit = other
+        .post(
+            "/recovery-kit",
+            &RecoveryKitRequest {
+                password: format!("{}-password", other_name(&other).await),
+                passphrase: "kit passphrase for other".into(),
+            },
+        )
+        .await;
+    let foreign = anon
+        .call::<_, serde_json::Value>(
+            Method::POST,
+            "/auth/recover",
+            Some(&RecoverRequest {
+                recovery_kit: RecoveryKitFile::Sealed(other_kit),
+                kit_passphrase: Some("kit passphrase for other".into()),
+                ..recover("", "fran-new-password-1")
+            }),
+        )
+        .await;
+    assert_eq!(foreign.unwrap_err().0, 401);
+    let _: serde_json::Value = anon
+        .post(
+            "/auth/recover",
+            &recover("kit passphrase for fran", "fran-new-password-1"),
+        )
+        .await;
+    // Every session was logged out, the old password is gone, and the data is unchanged.
+    assert_eq!(fran.status_of(Method::GET, "/me").await, 401);
+    let old = anon
+        .call::<_, LoginResponse>(
+            Method::POST,
+            "/auth/login",
+            Some(&LoginRequest {
+                username: name.clone(),
+                password: fran_password.clone(),
+            }),
+        )
+        .await;
+    assert!(old.is_err());
+    let fran = anon.login(&name, "fran-new-password-1").await;
+    let accounts: Vec<AccountView> = fran.get("/accounts").await;
+    assert_eq!(accounts.len(), 1);
+    let list: MessageList = fran.get("/messages?limit=100").await;
+    assert_eq!(list.total, 5);
 
     // A brand-new user created from the kit can rebuild an index from the encrypted destination.
     let invite: Invite = admin
@@ -1184,10 +1271,6 @@ async fn rebuild_index_and_recovery_kit() {
             },
         )
         .await;
-    let anon = Api {
-        token: None,
-        ..admin.clone()
-    };
     let heir = uniq("heir");
     let _: serde_json::Value = anon
         .post(
@@ -1196,7 +1279,8 @@ async fn rebuild_index_and_recovery_kit() {
                 username: heir.clone(),
                 password: "heir-password-1".into(),
                 invite_code: Some(invite.code),
-                recovery_kit: Some(kit),
+                recovery_kit: Some(RecoveryKitFile::Sealed(kit)),
+                kit_passphrase: Some("kit passphrase for fran".into()),
             },
         )
         .await;
@@ -1209,9 +1293,15 @@ async fn rebuild_index_and_recovery_kit() {
             })
             .await,
     );
+    // The encrypted settings copy on the destination brings the account back with its sign-in
+    // details (purge disarmed), and the destination isn't added twice.
     let accounts: Vec<AccountView> = heir_api.get("/accounts").await;
     assert_eq!(accounts.len(), 1);
-    assert!(accounts[0].imported);
+    assert!(!accounts[0].imported);
+    assert_eq!(accounts[0].name, "kit");
+    assert!(!accounts[0].policy.armed);
+    let dests: Vec<DestinationView> = heir_api.get("/destinations").await;
+    assert_eq!(dests.len(), 1);
     let list: MessageList = heir_api.get("/messages?limit=100").await;
     let subjects: Vec<_> = list
         .messages
@@ -1555,6 +1645,7 @@ async fn path_traversal_is_rejected_everywhere() {
                     password: "long-enough-password".into(),
                     invite_code: Some(invite.code.clone()),
                     recovery_kit: None,
+                    kit_passphrase: None,
                 }),
             )
             .await;
@@ -1604,20 +1695,24 @@ async fn path_traversal_is_rejected_everywhere() {
         walk(&mount.join(user), &mut v);
         v
     };
-    let kim_files = files(&kim_me.id);
-    let lee_files = files(&lee_me.id);
-    assert!(
-        kim_files
-            .iter()
-            .any(|p| p.extension().is_some_and(|e| e == "eml")),
-        "{kim_files:?}"
-    );
-    assert!(
-        lee_files
-            .iter()
-            .any(|p| p.extension().is_some_and(|e| e == "eml")),
-        "{lee_files:?}"
-    );
+    // Each user gets their own folder in the shared mount, named by a key only they hold, so the
+    // mount shows neither user ids nor how many folders belong to whom.
+    let owners: Vec<String> = std::fs::read_dir(&mount)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(owners.len(), 2, "{owners:?}");
+    for id in [&kim_me.id, &lee_me.id] {
+        assert!(!owners.contains(id), "{owners:?}");
+    }
+    for owner in &owners {
+        let f = files(owner);
+        assert!(
+            f.iter().any(|p| p.extension().is_some_and(|e| e == "eml")),
+            "{f:?}"
+        );
+    }
     assert!(
         !mount.join("family").exists(),
         "nothing written to the shared path itself"
@@ -1794,7 +1889,11 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
 }
 
 /// Stops the server, deletes the user's index (a lost or corrupted disk), starts it again.
-async fn lose_index(server: malo_server::Running, data: &std::path::Path, user_id: &str) -> malo_server::Running {
+async fn lose_index(
+    server: malo_server::Running,
+    data: &std::path::Path,
+    user_id: &str,
+) -> malo_server::Running {
     server.shutdown(Duration::from_secs(10)).await;
     for f in ["index.db", "index.db-wal", "index.db-shm"] {
         let _ = std::fs::remove_file(data.join("users").join(user_id).join(f));
@@ -1825,7 +1924,10 @@ async fn lost_index_recovers_all_mail_with_newest_flags() {
     let me: Me = gail.get("/me").await;
     let s3_prefix = uniq("gen");
     let _: DestinationView = gail
-        .post("/destinations", &s3_dest("rustfs", "malo-b", &s3_prefix, true))
+        .post(
+            "/destinations",
+            &s3_dest("rustfs", "malo-b", &s3_prefix, true),
+        )
         .await;
     let _: DestinationView = gail.post("/destinations", &fs_dest("local", "b")).await;
     let fs_root = dir.path().join("users").join(&me.id).join("local/b");
@@ -1859,7 +1961,10 @@ async fn lost_index_recovers_all_mail_with_newest_flags() {
     backup(gail.clone(), acc.id.clone()).await;
     let before = subjects_and_flags(&gail).await;
     assert_eq!(before.len(), 4, "{before:?}");
-    assert!(before["gen 0"].iter().any(|f| f == "\\Flagged"), "{before:?}");
+    assert!(
+        before["gen 0"].iter().any(|f| f == "\\Flagged"),
+        "{before:?}"
+    );
 
     // 1. Index lost, local destination restored from its old copy: a rebuild from all
     //    destinations brings back every message, with the flags of the newest manifests.
@@ -1875,7 +1980,10 @@ async fn lost_index_recovers_all_mail_with_newest_flags() {
         .map(|s| s["generation"].as_u64().unwrap())
         .collect();
     assert_eq!(gens.len(), 2, "{stats}");
-    assert_ne!(gens[0], gens[1], "the stale copy must have an older generation: {stats}");
+    assert_ne!(
+        gens[0], gens[1],
+        "the stale copy must have an older generation: {stats}"
+    );
     let after = subjects_and_flags(&gail).await;
     assert_eq!(after.len(), 4, "{after:?}");
     assert!(after["gen 0"].iter().any(|f| f == "\\Flagged"), "{after:?}");
@@ -1888,7 +1996,11 @@ async fn lost_index_recovers_all_mail_with_newest_flags() {
     let stats = backup(gail.clone(), acc.id.clone()).await;
     assert_eq!(stats["errors"], serde_json::json!([]), "{stats}");
     let after = subjects_and_flags(&gail).await;
-    assert_eq!(after.len(), 4, "the backup absorbed the manifests first: {after:?}");
+    assert_eq!(
+        after.len(),
+        4,
+        "the backup absorbed the manifests first: {after:?}"
+    );
     server = lose_index(server, dir.path(), &me.id).await;
     let gail = Api::new(&server).login(&name, &password).await;
     job_result::<serde_json::Value>(&gail.run_job(JobKind::RebuildIndexAll).await);
@@ -1899,7 +2011,11 @@ async fn lost_index_recovers_all_mail_with_newest_flags() {
     // 3. Markers gone (an interrupted write), manifests still there, index lost, then a backup:
     //    a destination this index never wrote to is imported first, marker or not.
     let op = s3_operator("malo-b");
-    let mut lister = op.lister_with(&format!("{s3_prefix}/")).recursive(true).await.unwrap();
+    let mut lister = op
+        .lister_with(&format!("{s3_prefix}/"))
+        .recursive(true)
+        .await
+        .unwrap();
     while let Some(e) = futures::TryStreamExt::try_next(&mut lister).await.unwrap() {
         if e.path().ends_with("/account.json.enc") {
             op.delete(e.path()).await.unwrap();
@@ -1926,4 +2042,161 @@ async fn lost_index_recovers_all_mail_with_newest_flags() {
     let after = subjects_and_flags(&gail).await;
     assert_eq!(after.len(), 4, "markers lost, mail kept: {after:?}");
     server.shutdown(Duration::from_secs(5)).await;
+}
+
+async fn other_name(api: &Api) -> String {
+    let me: Me = api.get("/me").await;
+    me.username
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn admin_invites_limits_and_deletion() {
+    if !enabled() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let server = start_server(dir.path(), |_| {}).await;
+    let admin = bootstrap(&server).await;
+    let anon = Api {
+        token: None,
+        ..admin.clone()
+    };
+    // The setup token works once.
+    let again = anon
+        .call::<_, serde_json::Value>(
+            Method::POST,
+            "/setup",
+            Some(&SetupRequest {
+                setup_token: server.setup_token.clone().unwrap(),
+                username: "second-admin".into(),
+                password: "second-password-1".into(),
+            }),
+        )
+        .await;
+    assert!(again.is_err());
+
+    // Invites are listed without their codes and can be revoked before use.
+    let invite: Invite = admin
+        .post(
+            "/admin/invites",
+            &CreateInviteRequest {
+                username: Some("nobody".into()),
+                role: Role::User,
+                valid_hours: 1,
+            },
+        )
+        .await;
+    let list: Vec<InviteInfo> = admin.get("/admin/invites").await;
+    let open = list
+        .iter()
+        .find(|i| i.username.as_deref() == Some("nobody"))
+        .expect("listed");
+    assert!(!open.used);
+    assert!(!serde_json::to_string(&list).unwrap().contains(&invite.code));
+    assert_eq!(
+        admin
+            .status_of(Method::DELETE, &format!("/admin/invites/{}", open.id))
+            .await,
+        204
+    );
+    let revoked = anon
+        .call::<_, serde_json::Value>(
+            Method::POST,
+            "/auth/register",
+            Some(&RegisterRequest {
+                username: "nobody".into(),
+                password: "nobody-password".into(),
+                invite_code: Some(invite.code.clone()),
+                recovery_kit: None,
+                kit_passphrase: None,
+            }),
+        )
+        .await;
+    assert!(revoked.is_err(), "a revoked invite can't be redeemed");
+
+    // Partial updates change only what is sent; an explicit default clears the limit.
+    let name = uniq("jo");
+    let jo = new_user(&admin, &name).await;
+    let me: Me = jo.get("/me").await;
+    let user = |users: Vec<UserInfo>| users.into_iter().find(|u| u.id == me.id).unwrap();
+    let _: serde_json::Value = admin
+        .put(
+            &format!("/admin/users/{}", me.id),
+            &UpdateUserRequest {
+                max_accounts: Some(0),
+                ..Default::default()
+            },
+        )
+        .await;
+    let u = user(admin.get("/admin/users").await);
+    assert_eq!(
+        (u.max_accounts, u.disabled, u.role),
+        (Some(0), false, Role::User)
+    );
+    let over = jo
+        .call::<_, AccountView>(
+            Method::POST,
+            "/accounts",
+            Some(&imap_input("x", &uniq("jom"), IMAP_PORT)),
+        )
+        .await;
+    assert!(over.is_err(), "account limit enforced");
+    let _: serde_json::Value = admin
+        .put(
+            &format!("/admin/users/{}", me.id),
+            &UpdateUserRequest {
+                max_accounts_default: Some(true),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert_eq!(user(admin.get("/admin/users").await).max_accounts, None);
+
+    // Deleting a user whose local folder holds backups needs a second, explicit confirmation.
+    let _: DestinationView = jo.post("/destinations", &fs_dest("local", "d")).await;
+    let imap_user = uniq("jom");
+    seed_standard(&imap_user).await;
+    let acc: AccountView = jo
+        .post("/accounts", &imap_input("jo", &imap_user, IMAP_PORT))
+        .await;
+    job_result::<serde_json::Value>(
+        &jo.run_job(JobKind::Backup {
+            account_id: acc.id.clone(),
+        })
+        .await,
+    );
+    let refused = admin
+        .call::<_, serde_json::Value>(
+            Method::DELETE,
+            &format!("/admin/users/{}", me.id),
+            None::<&()>,
+        )
+        .await;
+    let (status, body) = refused.unwrap_err();
+    assert_eq!(status, 409);
+    assert!(body.contains("local_backups"), "{body}");
+    assert!(dir.path().join("users").join(&me.id).exists());
+    assert_eq!(
+        admin
+            .status_of(
+                Method::DELETE,
+                &format!("/admin/users/{}?delete_local_backups=true", me.id)
+            )
+            .await,
+        204
+    );
+    assert!(!dir.path().join("users").join(&me.id).exists());
+
+    // Everything above is in the admin log.
+    let log: Vec<AdminAuditEntry> = admin.get("/admin/audit").await;
+    let actions: Vec<&str> = log.iter().map(|e| e.action.as_str()).collect();
+    for a in [
+        "setup",
+        "invite_created",
+        "invite_revoked",
+        "user_updated",
+        "user_deleted",
+    ] {
+        assert!(actions.contains(&a), "{a} missing from {actions:?}");
+    }
 }

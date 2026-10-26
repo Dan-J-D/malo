@@ -152,7 +152,9 @@ function handle(ev: T.SyncEvent) {
       );
       break;
     case 'accounts_changed':
+      // Also sent when a rebuild restores destinations from a settings copy.
       void refreshAccounts();
+      void refreshDestinations();
       break;
     case 'locked':
       toLogin(ev.reason);

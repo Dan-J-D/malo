@@ -55,6 +55,9 @@ The server is configured with environment variables. They can also go in a TOML 
 | `MALO_MAX_AUTO_LOCK_HOURS` | `24` | Upper limit on any user's auto-lock |
 | `MALO_ALLOWED_FS_MOUNTS` | – | Absolute paths, colon-separated, that `fs` destinations may use besides the user's own directory |
 | `MALO_WORKERS` | `4` | Number of jobs that can run at once across all users |
+| `MALO_TRUST_PROXY_HEADERS` | off | Take the client address for rate limits from `X-Real-IP` / the last `X-Forwarded-For` entry. Turn it on only behind a reverse proxy that sets these headers; otherwise clients pick their own address and every client shares the proxy's limit |
+
+Administrators set the remaining options in the app (*Admin*): self-registration, the default and per-user account limits, the maximum auto-lock, extra `fs` mounts, and **Block private networks**. That last one refuses mail servers and storage endpoints on loopback, private and link-local addresses. It is checked when an account or destination is saved or tested, and again when a job starts. Turn it on when users you don't fully trust share the server, so they can't make it connect to hosts on its own network. It's off by default because a LAN mail server or MinIO is a common setup. The *Admin* page also lists open invites (which can be revoked) and a log of administrative actions: user changes and deletions, invites, settings, password resets with a kit, and settings restored by a rebuild.
 
 Behind a reverse proxy with a public certificate, the app detects that the certificate is publicly trusted and doesn't pin it.
 
@@ -89,14 +92,19 @@ random 256-bit MDK ◄───────────────────�
 - running jobs stop at the next message boundary;
 - scheduled jobs that come due are recorded as *skipped (locked)*, and the app shows how many on your next login.
 
-**There is no admin backdoor.** If you forget your password, your data is lost unless you kept the **recovery kit**. The app makes you save it on your first login. When you create a new account, you can import a kit so the new account can read the old encrypted backups: run *Rebuild index* on a destination to import them.
+**There is no admin backdoor.** If you forget your password, your data is lost unless you kept the **recovery kit**. The app makes you save it on your first login, and you can save a new one anytime in *Settings*. It asks for your password again, and you choose a separate **kit passphrase**.
+
+- **The kit file is encrypted.** It holds your user id, username and archive key, sealed with AES-256-GCM under an Argon2id key from the kit passphrase. Without the passphrase its content reveals nothing, not even whose it is. Only the suggested file name contains your username, and you can rename it. The app writes it readable only by you, and it counts as saved only after the file was written. Kits from older versions (`malo-recovery-kit-v1`) are plain JSON and still accepted; replace them with a new kit and delete the old file.
+- **Forgot your password, same server:** on the login screen, choose *Forgot password?*. Enter your username, pick the kit, type its passphrase and a new password. The server keeps a recovery slot (`users/<id>/recovery.bin`): your master data key, sealed with a key derived from the archive key. Unsealing it proves the kit is yours, and the vault is re-wrapped under the new password. Accounts, destinations, index and backups stay as they are, and every session is logged out. Users created before this feature get their slot on their next login.
+- **Lost the server, or deleted the user:** create a new account (on any Malo server), import the kit on the registration screen, add one of your old destinations with the same settings, and run *Rebuild index*. The rebuild imports all mail. It also restores your accounts and destinations from the encrypted settings copy that every backup and check leaves on each destination (`malo-settings-<hmac>.enc`, sealed with the archive key). Accounts come back with their sign-in details but with purging disarmed. Accounts and destinations you removed on purpose stay removed. Accounts found only in manifests show as *imported* until you enter their sign-in details.
+- **Key changes:** changing your password doesn't change the kit. The archive key is never rotated, so an old kit and its passphrase keep working. Treat any kit as valid for as long as its backups exist.
 
 **On encrypted destinations, names reveal nothing.** Objects are stored at `<root>/<hmac(account)>/objects/<xx>/<hmac(sha256)>.enc` and manifests at `manifest/<hmac(mailbox)>.jsonl.enc`. No mailbox names or subjects appear. Plain destinations keep a browsable layout instead: `<root>/<Account>_<id>/mailboxes/<Mailbox/Sub>/<uidvalidity>/<uid>.eml`.
 
 **No path can leave its area.**
 - Every storage path passes one check before it reaches a storage backend: no `..` or `.` segments, backslashes, NUL or drive letters. This applies to destination prefixes, `*root` options and object paths read back from manifests during an index rebuild.
 - `fs` destinations are created one directory at a time inside the user's own folder, checking symlinks at every step.
-- Inside admin-allowed mounts each user gets `<mount>/<user-id>/`, so users who pick the same path never share files.
+- Inside admin-allowed mounts each user gets their own folder, `<mount>/<hmac(archive key, "owner")>/`, so users who pick the same path never share files. The mount shows neither user ids nor which folders belong together. A folder from older versions (`<mount>/<user-id>/`) keeps being used.
 - Options that would make the server read one of its own files (`credential_path`, `*_file`) are refused, and S3 and GCS never load the server's own config files.
 - Server data paths only accept UUID user ids, and usernames can't start with `.` or contain `..`.
 - In the desktop app, file names from emails are reduced to a plain name before saving, and the app's API bridge rejects traversal in server paths.
@@ -171,16 +179,16 @@ The integration suite covers:
 - auto-lock stopping a running job, skipped-while-locked jobs, resuming after login, and a restart sealing every user;
 - quick and deep checks detecting deleted and corrupted objects, repair, and purge blocked until repair;
 - purge eligibility, decoys left alone, UIDVALIDITY change, missing replica, no UIDPLUS, and purges that only run on schedule once armed;
-- STARTTLS, IDLE-triggered backups, recovery-kit import and index rebuild;
+- STARTTLS, IDLE-triggered backups, the encrypted recovery kit (password reset with it, refusal of a wrong passphrase or someone else's kit), kit import, and an index rebuild that restores accounts and destinations from the settings copy;
 - OAuth2 against a local provider: an authorization-code + PKCE flow yields a refresh token, the server refreshes it into access tokens and logs in with `AUTHENTICATE XOAUTH2` to a Dovecot that accepts nothing else, then backs up. It also checks that secrets are redacted, kept when you edit, and refused for the wrong mailbox.
 
 The GUI test drives the app through:
 
-- local-server setup and saving the recovery kit;
+- local-server setup and saving the encrypted recovery kit (checking the file is encrypted and private);
 - adding a destination, a password account, and an OAuth2 account through the browser sign-in;
 - watching the live "Newly found" list;
 - the sandboxed viewer: phishing warning, de-fanged links, blocked tracker and attachment warnings;
-- *Lock now* and unlocking again;
+- *Lock now*, resetting the password with the recovery kit (a wrong kit passphrase is refused), and unlocking again;
 - remote mode against the Docker image, including the TOFU fingerprint check.
 
 ### Fuzzing

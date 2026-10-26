@@ -11,7 +11,10 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use futures::StreamExt;
-use malo_api::{EventBatch, LoginRequest, LoginResponse, Me, RecoveryKit, ServerStatus, SyncEvent};
+use malo_api::{
+    EventBatch, LoginRequest, LoginResponse, Me, RecoveryKitFile, RecoveryKitRequest,
+    SealedRecoveryKit, ServerStatus, SyncEvent, SEALED_KIT_FORMAT,
+};
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
@@ -465,6 +468,8 @@ fn valid_api_path(path: &str) -> bool {
     path.starts_with('/')
         && !path.contains("://")
         && !path.starts_with("/auth/login")
+        // The archive key leaves the server only through `save_recovery_kit`, straight to a file.
+        && lower.trim_end_matches('/') != "/recovery-kit"
         && !route.contains('\\')
         && !lower.contains("%2e")
         && !lower.contains("%2f")
@@ -708,14 +713,44 @@ async fn raw_source(state: State<'_, AppState>, message_id: i64) -> CmdResult<St
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+/// Writes a file only its owner can read: the kit is encrypted, but its passphrase is all that
+/// stands between the file and every backup.
+fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        opts.mode(0o600);
+        // An existing file keeps its mode on open; tighten it first.
+        if path.exists() {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(data)?;
+    f.sync_all()
+}
+
+/// Asks the server for the kit (the password again, and the passphrase that encrypts the file),
+/// saves it, and only then tells the server it was saved. Cancelling or a failed write leaves the
+/// reminder to save it in place.
 #[tauri::command]
 async fn save_recovery_kit(
     app: AppHandle,
     state: State<'_, AppState>,
+    username: String,
+    password: String,
+    passphrase: String,
 ) -> CmdResult<Option<String>> {
     let c = conn(&state)?;
-    let kit: RecoveryKit = check(
-        request(&c, reqwest::Method::GET, "/recovery-kit")
+    let kit: SealedRecoveryKit = check(
+        request(&c, reqwest::Method::POST, "/recovery-kit")
+            .json(&RecoveryKitRequest {
+                password,
+                passphrase,
+            })
             .send()
             .await
             .map_err(err)?,
@@ -724,29 +759,43 @@ async fn save_recovery_kit(
     .json()
     .await
     .map_err(err)?;
-    let Some(target) = save_target(&app, &format!("malo-recovery-kit-{}.json", kit.username))
-    else {
+    let Some(target) = save_target(&app, &format!("malo-recovery-kit-{username}.json")) else {
         return Ok(None);
     };
-    std::fs::write(&target, serde_json::to_vec_pretty(&kit).map_err(err)?).map_err(err)?;
+    write_private(&target, &serde_json::to_vec_pretty(&kit).map_err(err)?).map_err(err)?;
+    check(
+        request(&c, reqwest::Method::POST, "/recovery-kit/saved")
+            .send()
+            .await
+            .map_err(err)?,
+    )
+    .await?;
     Ok(Some(target.display().to_string()))
 }
 
 #[tauri::command]
-async fn pick_recovery_kit(app: AppHandle) -> CmdResult<Option<RecoveryKit>> {
-    let mut dialog = app.dialog().file().add_filter("Recovery kit", &["json"]);
-    if let Some(dir) = dialog_dir(&app) {
-        dialog = dialog.set_directory(dir);
-    }
-    let Some(path) = dialog
-        .blocking_pick_file()
-        .and_then(|p| p.into_path().ok())
-    else {
+async fn pick_recovery_kit(app: AppHandle) -> CmdResult<Option<RecoveryKitFile>> {
+    // `MALO_AUTOPICK_FILE` skips the dialog (headless end-to-end tests).
+    let picked = match std::env::var_os("MALO_AUTOPICK_FILE") {
+        Some(p) => Some(PathBuf::from(p)),
+        None => {
+            let mut dialog = app.dialog().file().add_filter("Recovery kit", &["json"]);
+            if let Some(dir) = dialog_dir(&app) {
+                dialog = dialog.set_directory(dir);
+            }
+            dialog.blocking_pick_file().and_then(|p| p.into_path().ok())
+        }
+    };
+    let Some(path) = picked else {
         return Ok(None);
     };
-    let kit: RecoveryKit = serde_json::from_slice(&std::fs::read(path).map_err(err)?)
+    let kit: RecoveryKitFile = serde_json::from_slice(&std::fs::read(path).map_err(err)?)
         .map_err(|_| "not a Malo recovery kit".to_string())?;
-    if kit.format != "malo-recovery-kit-v1" {
+    let format = match &kit {
+        RecoveryKitFile::Sealed(k) => k.format.as_str(),
+        RecoveryKitFile::Plain(k) => k.format.as_str(),
+    };
+    if format != SEALED_KIT_FORMAT && format != "malo-recovery-kit-v1" {
         return Err("unsupported recovery kit format".into());
     }
     Ok(Some(kit))
@@ -904,6 +953,8 @@ mod tests {
             "messages",
             "https://evil/x",
             "/auth/login",
+            "/recovery-kit",
+            "/Recovery-Kit/",
         ] {
             assert!(!valid_api_path(bad), "{bad}");
         }

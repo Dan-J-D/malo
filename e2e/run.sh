@@ -20,6 +20,7 @@ docker run --rm --network host \
   -e MALO_INSECURE_FAST_KDF=1 \
   -v "$PWD/e2e/out:/tmp/saved" \
   -e MALO_AUTOSAVE_DIR=/tmp/saved \
+  -e MALO_AUTOPICK_FILE=/tmp/saved/malo-recovery-kit-owner.json \
   -e MALO_E2E_OAUTH_USER="gui-oauth-$(date +%s%N)" \
   -e MALO_REMOTE_URL=https://127.0.0.1:18443 \
   -e MALO_REMOTE_TOKEN="$REMOTE_TOKEN" \

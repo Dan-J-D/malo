@@ -113,15 +113,16 @@ impl JobManager {
     }
 }
 
-pub fn fs_policy(state: &SharedState, user_id: &str) -> FsPolicy {
+pub fn fs_policy(state: &SharedState, user: &UnlockedUser) -> FsPolicy {
     let mut mounts = state.cfg.allowed_fs_mounts.clone();
     if let Ok(s) = state.db.admin_settings() {
         mounts.extend(s.allowed_fs_mounts.iter().map(PathBuf::from));
     }
     FsPolicy {
-        user_root: UserPaths::new(&state.cfg.data_dir, user_id).local(),
+        user_root: UserPaths::new(&state.cfg.data_dir, &user.user_id).local(),
         allowed_mounts: mounts,
-        user_id: user_id.to_string(),
+        user_id: user.user_id.clone(),
+        owner_dir: Some(malo_core::layout::NameKey::new(&user.secrets.archive_key).owner_dir()),
     }
 }
 
@@ -163,7 +164,7 @@ pub fn job_ctx(
         index: user.index.clone(),
         spool_dir: paths.spool(),
         spool_key: user.secrets.spool_key.clone(),
-        fs: fs_policy(state, &user.user_id),
+        fs: fs_policy(state, user),
         tokens: user.tokens.clone(),
         sealed: user.cancel.clone(),
         manual: false,
@@ -359,6 +360,21 @@ async fn execute(
     kind: &JobKind,
 ) -> anyhow::Result<serde_json::Value> {
     use malo_core::{purge, rebuild, sync, verify};
+    // Addresses are checked again when the job runs: a name may resolve differently by now.
+    let refused = |e: crate::error::ApiErr| anyhow::anyhow!(e.message);
+    if let JobKind::Backup { account_id }
+    | JobKind::Purge { account_id }
+    | JobKind::PurgeDryRun { account_id } = kind
+    {
+        crate::net::check_account(state, ctx.account(account_id)?)
+            .await
+            .map_err(refused)?;
+    }
+    for d in &ctx.config.destinations {
+        crate::net::check_destination(state, d)
+            .await
+            .map_err(refused)?;
+    }
     Ok(match kind {
         JobKind::Backup { account_id } => {
             let account = ctx.account(account_id)?;
@@ -366,11 +382,15 @@ async fn execute(
                 !account.imported,
                 "imported accounts have no server to back up"
             );
-            serde_json::to_value(sync::run_backup(ctx, account_id).await?)?
+            let r = serde_json::to_value(sync::run_backup(ctx, account_id).await?)?;
+            save_settings_copies(ctx).await;
+            r
         }
         JobKind::Check { scope, deep } => {
             let repair = ctx.config.settings.auto_repair;
-            serde_json::to_value(verify::run_check(ctx, scope, *deep, repair).await?)?
+            let r = serde_json::to_value(verify::run_check(ctx, scope, *deep, repair).await?)?;
+            save_settings_copies(ctx).await;
+            r
         }
         JobKind::Repair { scope } => {
             serde_json::to_value(verify::run_check(ctx, scope, true, true).await?)?
@@ -388,6 +408,21 @@ async fn execute(
             serde_json::to_value(purge::run_purge(ctx, account_id).await?)?
         }
         JobKind::RebuildIndex { .. } | JobKind::RebuildIndexAll => {
+            let from = match kind {
+                JobKind::RebuildIndex { destination_id } => vec![destination_id.clone()],
+                _ => ctx.destination_ids(),
+            };
+            let (restored_accounts, restored_destinations) =
+                restore_settings(state, user, ctx, &from).await?;
+            // Destinations that came back with the settings are scanned too, in a second pass.
+            if restored_destinations > 0 && matches!(kind, JobKind::RebuildIndex { .. }) {
+                submit(
+                    state,
+                    &user.user_id,
+                    JobKind::RebuildIndexAll,
+                    JobTrigger::Manual,
+                )?;
+            }
             let stats = match kind {
                 JobKind::RebuildIndex { destination_id } => {
                     rebuild::rebuild_index(ctx, destination_id).await?
@@ -424,9 +459,126 @@ async fn execute(
                 .await?;
                 state.events.emit(&user.user_id, SyncEvent::AccountsChanged);
             }
-            serde_json::to_value(&stats)?
+            let mut v = serde_json::to_value(&stats)?;
+            v["restored_accounts"] = restored_accounts.into();
+            v["restored_destinations"] = restored_destinations.into();
+            v
         }
     })
+}
+
+/// Keeps the encrypted settings copy on every destination current (best effort, after backups
+/// and checks). A copy is only rewritten when the settings changed since it was written.
+async fn save_settings_copies(ctx: &JobCtx) {
+    let (json, hash) = match ctx.config.settings_backup() {
+        Ok(x) => x,
+        Err(e) => return tracing::warn!("settings copy: {e:#}"),
+    };
+    for d in &ctx.config.destinations {
+        let key = format!("settings_copy:{}", d.id);
+        if ctx.index.kv_get(&key).ok().flatten().as_deref() == Some(hash.as_str()) {
+            continue;
+        }
+        let written = async { ctx.store(&d.id)?.write_settings_backup(&json).await }.await;
+        match written {
+            Ok(()) => {
+                let _ = ctx.index.kv_set(&key, &hash);
+            }
+            Err(e) => {
+                tracing::warn!(destination = %d.name, "writing the settings copy failed: {e:#}")
+            }
+        }
+    }
+}
+
+/// Same storage: scheme, prefix and every non-secret option match.
+fn same_storage(a: &malo_core::config::Destination, b: &malo_core::config::Destination) -> bool {
+    let public = |d: &malo_core::config::Destination| {
+        d.options
+            .iter()
+            .filter(|(k, _)| !malo_core::config::is_secret_option(k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<Vec<_>>()
+    };
+    a.scheme == b.scheme && a.root == b.root && public(a) == public(b)
+}
+
+/// Brings back accounts and destinations from the newest settings copy on the given destinations:
+/// with the recovery kit and one destination re-added by hand, everything else returns with its
+/// old id (so backups continue in the same folders) and its credentials. Accounts found only as
+/// "imported" are replaced by the full account. Purges always come back disarmed.
+async fn restore_settings(
+    state: &SharedState,
+    user: &Arc<UnlockedUser>,
+    ctx: &JobCtx,
+    from: &[String],
+) -> anyhow::Result<(u64, u64)> {
+    use malo_core::config::SettingsBackup;
+    let mut newest: Option<SettingsBackup> = None;
+    for id in from {
+        let read = async { ctx.store(id)?.read_settings_backup().await }.await;
+        match read.and_then(|j| j.map(|j| SettingsBackup::parse(&j)).transpose()) {
+            Ok(Some(b)) if newest.as_ref().is_none_or(|n| b.saved_at > n.saved_at) => {
+                newest = Some(b)
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(destination = %id, "reading the settings copy failed: {e:#}"),
+        }
+    }
+    let Some(mut backup) = newest else {
+        return Ok((0, 0));
+    };
+    let saved_at = backup.saved_at;
+    let removed = |id: &str| {
+        user.index
+            .kv_get(&format!("removed:{id}"))
+            .ok()
+            .flatten()
+            .is_some()
+    };
+    backup.accounts.retain(|a| !removed(&a.id));
+    backup.destinations.retain(|d| !removed(&d.id));
+    let (accounts, destinations) = user
+        .update_config(move |cfg| {
+            let (mut na, mut nd) = (0u64, 0u64);
+            for d in backup.destinations {
+                if cfg.destination(&d.id).is_some()
+                    || cfg.destinations.iter().any(|x| same_storage(x, &d))
+                {
+                    continue;
+                }
+                cfg.destinations.push(d);
+                nd += 1;
+            }
+            for mut a in backup.accounts {
+                a.policy.armed = false;
+                a.policy.armed_at = None;
+                match cfg.account_mut(&a.id) {
+                    Some(cur) if cur.imported => {
+                        a.revision = cur.revision + 1;
+                        *cur = a;
+                        na += 1;
+                    }
+                    Some(_) => {}
+                    None => {
+                        cfg.accounts.push(a);
+                        na += 1;
+                    }
+                }
+            }
+            Ok((na, nd))
+        })
+        .await?;
+    if accounts + destinations > 0 {
+        crate::scheduler::sync_schedules(state, user)?;
+        state.events.emit(&user.user_id, SyncEvent::AccountsChanged);
+        let _ = user.index.audit(
+            "settings_restored",
+            None,
+            &serde_json::json!({"accounts": accounts, "destinations": destinations, "saved_at": saved_at}),
+        );
+    }
+    Ok((accounts, destinations))
 }
 
 /// Identifies a policy version; arming requires a dry run of exactly this version.
