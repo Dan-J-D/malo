@@ -154,7 +154,8 @@
 
 <section bind:this={section} class="border-b border-line last:border-b-0" {@attach contextMenu(menu)}>
   <!-- The header line opens and closes the message. -->
-  <button class="flex w-full items-start gap-3 rounded-none bg-transparent px-6 pt-4 text-left hover:bg-transparent! active:scale-100! {expanded ? 'pb-2' : 'pb-4'}"
+  <!-- No press effect: the whole row shrinking and springing back reads as a bounce. -->
+  <button class="flex w-full items-start gap-3 rounded-none bg-transparent px-6 py-4 text-left hover:bg-transparent! active:transform-none!"
     onclick={ontoggle} aria-expanded={expanded}>
     <Avatar name={sender} seed={m.envelope.from} size={36} />
     <span class="min-w-0 flex-1">
@@ -166,13 +167,13 @@
     </span>
   </button>
 
-  {#if expanded}
-    <div class="pb-5 pl-[4.75rem] pr-6" transition:slide={{ duration: ms(220), easing: ease }}>
+  <!-- Opens once the message is loaded (a local request: no visible wait), so it slides open to
+       its full height in one go instead of to a "Loading…" line that then jumps. -->
+  {#if expanded && (view || error)}
+    <div class="-mt-2 pb-5 pl-[4.75rem] pr-6" transition:slide={{ duration: ms(240), easing: ease }}>
       {#if error}
         <p class="callout bad my-2">{error}</p>
-      {:else if !view}
-        <p class="my-2 text-muted">Loading…</p>
-      {:else}
+      {:else if view}
         {#if view.warnings.length}
           <div class="mb-3 flex flex-col gap-2">
             {#each view.warnings as w}
