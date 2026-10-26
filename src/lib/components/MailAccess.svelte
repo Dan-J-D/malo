@@ -42,6 +42,10 @@
     }
   });
   const enabled = $derived(!!info && (info.imap_port !== null || info.smtp_port !== null));
+  /** Whether mail apps will accept the certificate for the address used here. */
+  const covered = $derived(!info?.authority || !host || info.certificate_names.includes(host.toLowerCase().replace(/^\[|\]$/g, '')));
+  /** The server's own page for installing its certificate, opened on the device. */
+  const trustLink = $derived(`${session.url.replace(/\/$/, '')}/`);
 
   onMount(load);
 
@@ -165,12 +169,28 @@
       <h3>Settings for the mail app</h3>
       <table class="small">
         <tbody>
-          {#if info.imap_port !== null}<tr><td>Incoming (IMAP)</td><td><code>{host || 'this server'}</code> port <code>{info.imap_port}</code>, SSL/TLS on</td></tr>{/if}
-          {#if info.smtp_port !== null}<tr><td>Outgoing (SMTP)</td><td><code>{host || 'this server'}</code> port <code>{info.smtp_port}</code>, SSL/TLS on</td></tr>{/if}
+          {#if info.imap_port !== null}<tr><td>Incoming (IMAP)</td><td><code>{host || 'this server'}</code> port <code>{info.imap_port}</code>, SSL/TLS (or STARTTLS) on</td></tr>{/if}
+          {#if info.smtp_port !== null}<tr><td>Outgoing (SMTP)</td><td><code>{host || 'this server'}</code> port <code>{info.smtp_port}</code>, SSL/TLS (or STARTTLS) on</td></tr>{/if}
           <tr><td>Username / password</td><td>the mail login above, for both</td></tr>
-          {#if info.fingerprint}<tr><td>Certificate SHA-256</td><td class="mono" style="word-break: break-all">{info.fingerprint}</td></tr>{/if}
+          {#if info.fingerprint}<tr><td>{info.authority ? 'Certificate authority SHA-256' : 'Certificate SHA-256'}</td><td class="mono" style="word-break: break-all">{info.fingerprint}</td></tr>{/if}
         </tbody>
       </table>
+
+      {#if info.authority}
+        <h3>Trust this server on the device</h3>
+        {#if !covered}
+          <p class="callout small">The server's certificate doesn't cover <code>{host}</code>, the address you use for it, so mail apps will refuse it.
+            Add <code>MALO_TLS_HOSTNAMES: "{host}"</code> to the server's settings and restart it, then install the certificate authority (again).</p>
+        {/if}
+        {#if session.local}
+          <p class="muted small">This is the server bundled with the app: mail apps on this computer can use it, other devices can't reach it.</p>
+        {/if}
+        <p class="muted small">Malo issues its own certificate. Install its certificate authority once on each device with a mail app; it can only vouch for this server{info.certificate_names.length ? ` (${info.certificate_names.join(', ')})` : ''}, nothing else.</p>
+        <p class="small">On each device, open <code>{trustLink}</code> in its browser. The page offers the right download for iPhone, iPad, Mac, Android, Windows and Linux, with the steps. If the browser warns about the connection, continue anyway: that warning is what installing the certificate fixes.</p>
+        <div class="flex flex-wrap gap-2">
+          <button class="small" onclick={() => copy(trustLink, 'Link copied')}><Icon name="copy" size={14} /> Copy link</button>
+        </div>
+      {/if}
       {#if view}
         <h3>Folders</h3>
         <p class="muted small">Choose what the mail app shows. Moving a message in the mail app (to Spam, a category, Trash or any folder) files it there in Malo's view; the backup and the mail server stay as they are.</p>
@@ -201,7 +221,7 @@
           <li>Mail → Settings → Accounts → <strong>+</strong> → <em>Other Mail Account…</em>. Enter a name, the account's email address and the mail login's password.</li>
           <li>When Mail can't find the server, enter the username above, account type <strong>IMAP</strong>, and <code>{host || 'this server'}</code> as incoming and outgoing server.</li>
           <li>In the account's <em>Server Settings</em>, turn off <em>Automatically manage connection settings</em>, set the ports above and keep <em>Use TLS/SSL</em> on.</li>
-          <li>If Mail warns that it can't verify the server's identity, compare the certificate's SHA-256 fingerprint with the one shown here before trusting it.</li>
+          <li>{#if info.authority}Install the certificate authority first (above), so Mail trusts the server.{:else}If Mail warns that it can't verify the server's identity, compare the certificate's SHA-256 fingerprint with the one shown here before trusting it.{/if}</li>
           <li>Under <em>Mailbox Behaviors</em>, turn off <em>Store draft messages on the server</em>: drafts aren't kept on the backup server.</li>
         </ol>
         <p>Mail is readable while you're unlocked in Malo. After the auto-lock, mail apps show a sign-in error until you log in to Malo again.</p>

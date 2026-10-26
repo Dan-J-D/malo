@@ -144,6 +144,19 @@ async fn smtp_dialog(addr: std::net::SocketAddr, steps: &[&str]) -> Vec<String> 
     replies
 }
 
+/// Upgrades a plain-text connection after STARTTLS was accepted.
+async fn upgrade(io: BufReader<TcpStream>) -> tokio_rustls::client::TlsStream<TcpStream> {
+    assert!(io.buffer().is_empty());
+    tokio_rustls::TlsConnector::from(malo_core::tls::insecure_config())
+        .connect(ServerName::try_from("localhost").unwrap(), io.into_inner())
+        .await
+        .unwrap()
+}
+
+async fn send_line<W: AsyncWriteExt + Unpin>(w: &mut W, line: &str) {
+    w.write_all(format!("{line}\r\n").as_bytes()).await.unwrap();
+}
+
 async fn read_reply<R: tokio::io::AsyncBufRead + Unpin>(io: &mut R) -> String {
     loop {
         let mut l = String::new();
@@ -234,6 +247,30 @@ async fn mail_apps_read_backups_and_send() {
     let info: MailAccessInfo = admin.get("/mail-access").await;
     assert_eq!(info.imap_port, Some(imap.port()));
     assert!(info.logins.is_empty());
+    // Malo's certificate authority: what the services present chains to it, and devices can
+    // download it to install.
+    assert!(info.authority);
+    assert!(info.certificate_names.contains(&"localhost".to_string()));
+    let ca = admin.bytes("/tls/malo-ca.crt").await;
+    assert_eq!(
+        Some(malo_core::tls::fingerprint(&ca)),
+        info.fingerprint,
+        "the services' pin is the authority"
+    );
+    let profile = String::from_utf8(admin.bytes("/tls/malo-ca.mobileconfig").await).unwrap();
+    assert!(profile.contains("com.apple.security.root"));
+    assert!(profile.contains(&base64::engine::general_purpose::STANDARD.encode(&ca)));
+    let pem = String::from_utf8(admin.bytes("/tls/malo-ca.pem").await).unwrap();
+    assert!(pem.starts_with("-----BEGIN CERTIFICATE-----"));
+    let chain = tls(imap)
+        .await
+        .get_ref()
+        .1
+        .peer_certificates()
+        .unwrap()
+        .to_vec();
+    assert_eq!(chain.len(), 2);
+    assert_eq!(chain[1].as_ref(), &ca[..]);
     let login: MailLoginCreated = admin
         .put(
             &format!("/accounts/{}/mail-login", acc.id),
@@ -286,6 +323,33 @@ async fn mail_apps_read_backups_and_send() {
     assert!(imap_login(imap, "test-email", "admin-password-1")
         .await
         .is_err());
+
+    // Apps set to STARTTLS (or "SSL off") connect in plain text and wait for a greeting: they
+    // can't log in until they start TLS, and then the session goes on without a second greeting.
+    {
+        let mut io = BufReader::new(TcpStream::connect(imap).await.unwrap());
+        let greeting = read_reply(&mut io).await;
+        assert!(
+            greeting.contains("STARTTLS") && greeting.contains("LOGINDISABLED"),
+            "{greeting}"
+        );
+        send_line(
+            io.get_mut(),
+            &format!("a LOGIN test-email {}", login.password),
+        )
+        .await;
+        let refused = read_reply(&mut io).await;
+        assert!(refused.starts_with("a NO [PRIVACYREQUIRED]"), "{refused}");
+        send_line(io.get_mut(), "b STARTTLS").await;
+        assert!(read_reply(&mut io).await.starts_with("b OK"));
+        let mut s = async_imap::Client::new(upgrade(io).await)
+            .login("test-email", &login.password)
+            .await
+            .map_err(|(e, _)| e)
+            .unwrap();
+        assert_eq!(s.select("INBOX").await.unwrap().exists, 2);
+        s.logout().await.unwrap();
+    }
 
     let mut s = imap_login(imap, "test-email", &login.password)
         .await
@@ -498,6 +562,23 @@ async fn mail_apps_read_backups_and_send() {
     }
     let unauth = smtp_dialog(smtp, &["EHLO mac", "MAIL FROM:<me@example.com>"]).await;
     assert!(unauth[2].starts_with("530"), "{unauth:?}");
+    // SMTP with STARTTLS: offered in EHLO, required before AUTH.
+    {
+        let mut io = BufReader::new(TcpStream::connect(smtp).await.unwrap());
+        assert!(read_reply(&mut io).await.starts_with("220"));
+        send_line(io.get_mut(), "EHLO mac").await;
+        assert_eq!(read_reply(&mut io).await, "250 STARTTLS");
+        send_line(io.get_mut(), &format!("AUTH PLAIN {plain}")).await;
+        assert!(read_reply(&mut io).await.starts_with("530"));
+        send_line(io.get_mut(), "STARTTLS").await;
+        assert!(read_reply(&mut io).await.starts_with("220"));
+        let mut io = BufReader::new(upgrade(io).await);
+        send_line(io.get_mut(), "EHLO mac").await;
+        assert!(read_reply(&mut io).await.starts_with("250"));
+        send_line(io.get_mut(), &format!("AUTH PLAIN {plain}")).await;
+        let authed = read_reply(&mut io).await;
+        assert!(authed.starts_with("235"), "{authed}");
+    }
 
     // Writing in Malo: a reply that takes the original's attachments along, through the account's
     // SMTP server. Bcc recipients get it without showing up in the headers.

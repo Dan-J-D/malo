@@ -173,7 +173,16 @@ async fn probe_server(url: String) -> CmdResult<Probe> {
         .await
         .map_err(|e| format!("cannot reach server: {e}"))?;
     let status: ServerStatus = check(r).await?.json().await.map_err(err)?;
-    let fp = seen.lock().unwrap().clone();
+    // Pin the authority the server names as its own (Malo's, so renewals keep the pin) when it
+    // sent it; otherwise the certificate itself. Never an authority the server doesn't name:
+    // that could be a public one that vouches for anyone.
+    let chain = seen.lock().unwrap().clone().unwrap_or_default();
+    let fp = match &status.cert_fingerprint {
+        Some(own) if chain.iter().skip(1).any(|c| c == &net::normalize(own)) => {
+            Some(net::normalize(own))
+        }
+        _ => chain.first().cloned(),
+    };
     Ok(Probe {
         url,
         fingerprint: fp,

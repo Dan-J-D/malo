@@ -27,6 +27,46 @@ const CAPABILITIES: &str =
 const MAX_LINE: usize = 64 * 1024;
 /// How many messages a command reads at once (they may come from a remote destination).
 const LOAD_CONCURRENCY: usize = 8;
+/// Commands slower than this are logged even without tracing.
+const SLOW: Duration = Duration::from_secs(10);
+/// With tracing, how many responses of one command are logged (the tagged result always is).
+const TRACE_RESPONSES: u32 = 5;
+
+/// `MALO_MAIL_TRACE=1` logs each IMAP command (without passwords), the first lines Malo answers
+/// with, how each command ended and how long it took: to see where a mail app gets stuck.
+pub(crate) fn tracing_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("MALO_MAIL_TRACE").is_ok_and(|v| !v.is_empty() && v != "0" && v != "false")
+    })
+}
+
+/// A command as the trace shows it: literals as their size, passwords left out.
+fn describe(segs: &[Seg], tag: &str, cmd: &str, args: &[Tok]) -> String {
+    let s = match cmd {
+        "LOGIN" => format!(
+            "{tag} LOGIN {} [password hidden]",
+            args.first().and_then(Tok::string).unwrap_or_default()
+        ),
+        "AUTHENTICATE" => format!("{tag} AUTHENTICATE [credentials hidden]"),
+        _ => segs
+            .iter()
+            .map(|s| match s {
+                Seg::Text(t) => String::from_utf8_lossy(t).trim_end().to_string(),
+                Seg::Literal(l) => format!("[{} bytes]", l.len()),
+            })
+            .collect::<Vec<_>>()
+            .join(""),
+    };
+    shorten(&s, 300)
+}
+
+fn shorten(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((i, _)) => format!("{}…", &s[..i]),
+        None => s.to_string(),
+    }
+}
 const MAX_LITERAL: usize = super::smtp::MAX_MESSAGE;
 /// RFC 3501: at least 30 minutes for an authenticated client.
 const AUTOLOGOUT: Duration = Duration::from_secs(31 * 60);
@@ -639,11 +679,19 @@ struct Selected {
 
 struct Session<S> {
     io: BufReader<S>,
+    /// Whether to send the greeting (not after STARTTLS).
+    greet: bool,
     state: SharedState,
     ip: IpAddr,
     user: Option<MailUser>,
     sel: Option<Selected>,
     failed_logins: u32,
+    /// Connection number in the trace (see [`tracing_on`]).
+    trace: Option<u64>,
+    /// The command being answered, and what has been sent for it.
+    current: Option<String>,
+    responses: u32,
+    sent: usize,
 }
 
 /// What a command handler wants next.
@@ -656,9 +704,37 @@ type CmdResult = anyhow::Result<Flow>;
 
 impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
     async fn send(&mut self, data: &[u8]) -> std::io::Result<()> {
+        self.responses += 1;
+        self.sent += data.len();
+        if let Some(n) = self.trace {
+            self.trace_sent(n, data);
+        }
         let w = self.io.get_mut();
         w.write_all(data).await?;
         w.flush().await
+    }
+
+    /// Logs what was sent: each line, or just the first of a response carrying message data.
+    fn trace_sent(&self, n: u64, data: &[u8]) {
+        let text = String::from_utf8_lossy(data);
+        let has_literal = text.contains("}\r\n");
+        let lines: Vec<&str> = text.trim_end_matches("\r\n").split("\r\n").collect();
+        let shown = if has_literal { &lines[..1] } else { &lines[..] };
+        for (i, l) in shown.iter().enumerate() {
+            let tagged = self
+                .current
+                .as_deref()
+                .is_some_and(|t| l.strip_prefix(t).is_some_and(|r| r.starts_with(' ')));
+            if !tagged && self.responses > TRACE_RESPONSES {
+                continue;
+            }
+            let more = if has_literal && i == 0 && data.len() > l.len() + 2 {
+                format!(" (+{} bytes)", data.len() - l.len() - 2)
+            } else {
+                String::new()
+            };
+            tracing::info!("IMAP #{n} S: {}{more}", shorten(l, 300));
+        }
     }
 
     async fn line(&mut self, s: &str) -> std::io::Result<()> {
@@ -679,11 +755,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
             {
                 Ok(l) => l?,
                 Err(_) => {
+                    if let Some(n) = self.trace {
+                        tracing::info!("IMAP #{n}: no command for {timeout:?}, logging out");
+                    }
                     let _ = self.line("* BYE Autologout; idle for too long").await;
                     return Ok(None);
                 }
             };
-            let Some(line) = line else { return Ok(None) };
+            let Some(line) = line else {
+                if let Some(n) = self.trace {
+                    tracing::info!("IMAP #{n}: the app closed the connection");
+                }
+                return Ok(None);
+            };
             match literal_marker(&line) {
                 Some((n, sync)) => {
                     let mut text = line.clone();
@@ -740,8 +824,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
     }
 
     async fn run(&mut self) -> anyhow::Result<()> {
-        self.line(&format!("* OK [CAPABILITY {CAPABILITIES}] Malo IMAP ready"))
-            .await?;
+        // Not again after STARTTLS: the client goes on with its next command.
+        if self.greet {
+            self.line(&format!("* OK [CAPABILITY {CAPABILITIES}] Malo IMAP ready"))
+                .await?;
+        }
         while let Some(segs) = self.read_command().await? {
             if segs.is_empty() {
                 continue;
@@ -759,10 +846,38 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
                 continue;
             };
             let args = &toks[2..];
-            let flow = match self.dispatch(&tag, &cmd, args).await {
+            if let Some(n) = self.trace {
+                tracing::info!("IMAP #{n} C: {}", describe(&segs, &tag, &cmd, args));
+            }
+            self.current = Some(tag.clone());
+            (self.responses, self.sent) = (0, 0);
+            let started = std::time::Instant::now();
+            let result = self.dispatch(&tag, &cmd, args).await;
+            let took = started.elapsed();
+            if (took > SLOW && cmd != "IDLE") || self.trace.is_some() {
+                let what = if cmd == "UID" {
+                    let sub = args.first().and_then(Tok::atom).unwrap_or_default();
+                    format!("UID {}", sub.to_ascii_uppercase())
+                } else {
+                    cmd.clone()
+                };
+                tracing::info!(
+                    "IMAP{} {what} took {:.1}s: {} responses, {} bytes",
+                    self.trace.map(|n| format!(" #{n}")).unwrap_or_default(),
+                    took.as_secs_f64(),
+                    self.responses,
+                    self.sent,
+                );
+            }
+            self.current = None;
+            let flow = match result {
                 Ok(f) => f,
                 Err(e) => {
-                    tracing::debug!("IMAP {cmd} failed: {e:#}");
+                    if self.trace.is_some() {
+                        tracing::info!("IMAP {cmd} failed: {e:#}");
+                    } else {
+                        tracing::debug!("IMAP {cmd} failed: {e:#}");
+                    }
                     let msg = format!("{e:#}").replace(['\r', '\n'], " ");
                     self.line(&format!("{tag} NO {msg}")).await?;
                     Flow::Continue
@@ -1938,14 +2053,25 @@ pub async fn session<S: AsyncRead + AsyncWrite + Unpin>(
     state: SharedState,
     stream: S,
     ip: IpAddr,
+    greet: bool,
 ) -> anyhow::Result<()> {
     Session {
         io: BufReader::new(stream),
         state,
         ip,
+        greet,
         user: None,
         sel: None,
         failed_logins: 0,
+        trace: tracing_on().then(|| {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::info!("IMAP #{n}: connection from {ip}");
+            n
+        }),
+        current: None,
+        responses: 0,
+        sent: 0,
     }
     .run()
     .await

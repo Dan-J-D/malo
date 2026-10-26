@@ -19,6 +19,8 @@ const IDLE: Duration = Duration::from_secs(5 * 60);
 
 struct Session<S> {
     io: BufReader<S>,
+    /// Whether to send the greeting (not after STARTTLS).
+    greet: bool,
     state: SharedState,
     ip: IpAddr,
     user: Option<MailUser>,
@@ -250,7 +252,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
     }
 
     async fn run(&mut self) -> anyhow::Result<()> {
-        self.reply("220 malo ESMTP Malo mail submission").await?;
+        // Not again after STARTTLS: the client goes on with its next command.
+        if self.greet {
+            self.reply("220 malo ESMTP Malo mail submission").await?;
+        }
         while let Some(line) = self.line().await? {
             let (verb, args) = match line.split_once(' ') {
                 Some((v, a)) => (v.to_ascii_uppercase(), a.trim().to_string()),
@@ -343,11 +348,13 @@ pub async fn session<S: AsyncRead + AsyncWrite + Unpin>(
     state: SharedState,
     stream: S,
     ip: IpAddr,
+    greet: bool,
 ) -> anyhow::Result<()> {
     Session {
         io: BufReader::new(stream),
         state,
         ip,
+        greet,
         user: None,
         from: None,
         to: vec![],

@@ -10,6 +10,7 @@
 pub mod imap;
 pub use malo_core::mime;
 pub mod smtp;
+mod starttls;
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -295,26 +296,85 @@ fn serve(
                     continue;
                 }
             };
+            let name = match service {
+                Service::Imap => "IMAP",
+                Service::Smtp => "SMTP",
+            };
+            if imap::tracing_on() {
+                tracing::info!("mail: {name} connection from {peer}");
+            }
             let Ok(permit) = slots.clone().try_acquire_owned() else {
+                tracing::warn!(
+                    "mail: refused a {name} connection from {peer}: all {MAX_CONNECTIONS} connections are in use"
+                );
                 drop(tcp);
                 continue;
             };
             let (state, acceptor) = (state.clone(), acceptor.clone());
             tokio::spawn(async move {
                 let _permit = permit;
+                let mut tcp = tcp;
                 tcp.set_nodelay(true).ok();
+                let greet = match starttls::opening(&tcp).await {
+                    Ok(Some(starttls::Opening::Tls)) => true,
+                    Ok(Some(starttls::Opening::Plain)) => {
+                        if imap::tracing_on() {
+                            tracing::info!("mail: {peer} connected without TLS; offering STARTTLS");
+                        }
+                        let outcome = match service {
+                            Service::Imap => starttls::imap(&mut tcp).await,
+                            Service::Smtp => starttls::smtp(&mut tcp).await,
+                        };
+                        match outcome {
+                            Ok(starttls::Outcome::StartTls) => {
+                                if imap::tracing_on() {
+                                    tracing::info!("mail: {peer} started TLS with STARTTLS");
+                                }
+                                // The session continues without a second greeting.
+                                false
+                            }
+                            Ok(starttls::Outcome::TriedPlainLogin) => {
+                                tracing::warn!(
+                                    "mail: an app at {peer} tried to log in to {name} without TLS and was refused; turn on SSL/TLS (or STARTTLS) in its account settings"
+                                );
+                                return;
+                            }
+                            Ok(starttls::Outcome::Closed) => return,
+                            Err(e) => {
+                                tracing::debug!("mail: plain-text {name} from {peer}: {e:#}");
+                                return;
+                            }
+                        }
+                    }
+                    _ => return,
+                };
                 let stream =
                     match tokio::time::timeout(Duration::from_secs(30), acceptor.accept(tcp)).await
                     {
                         Ok(Ok(s)) => s,
-                        _ => return,
+                        failed => {
+                            let why = match failed {
+                                Ok(Err(e)) => format!("{e}"),
+                                _ => "timed out".into(),
+                            };
+                            if imap::tracing_on() {
+                                tracing::info!("mail TLS handshake with {peer} failed: {why}");
+                            } else {
+                                tracing::debug!("mail TLS handshake with {peer} failed: {why}");
+                            }
+                            return;
+                        }
                     };
                 let res = match service {
-                    Service::Imap => imap::session(state, stream, peer.ip()).await,
-                    Service::Smtp => smtp::session(state, stream, peer.ip()).await,
+                    Service::Imap => imap::session(state, stream, peer.ip(), greet).await,
+                    Service::Smtp => smtp::session(state, stream, peer.ip(), greet).await,
                 };
                 if let Err(e) = res {
-                    tracing::debug!("mail session from {peer}: {e:#}");
+                    if imap::tracing_on() {
+                        tracing::info!("mail session from {peer} ended: {e:#}");
+                    } else {
+                        tracing::debug!("mail session from {peer}: {e:#}");
+                    }
                 }
             });
         }

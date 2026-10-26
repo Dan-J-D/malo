@@ -36,26 +36,66 @@ pub fn normalize(fp: &str) -> String {
 struct Verifier {
     /// None: record only (probe). Some: require this fingerprint.
     pin: Option<String>,
-    seen: Arc<Mutex<Option<String>>>,
+    seen: Seen,
+}
+
+/// Fingerprints of what the server sent: its certificate, then the rest of the chain.
+pub type Seen = Arc<Mutex<Option<Vec<String>>>>;
+
+/// The server's certificate matches the pin, or an authority in the chain it sent does and
+/// issued the certificate (Malo's own authority, which renews the certificate without changing
+/// the pin). Names aren't checked: the pin is the server's identity.
+fn check_pin(
+    pin: &str,
+    end_entity: &CertificateDer<'_>,
+    intermediates: &[CertificateDer<'_>],
+    now: UnixTime,
+) -> Result<(), rustls::Error> {
+    let fp = fingerprint(end_entity.as_ref());
+    if fp == pin {
+        return Ok(());
+    }
+    let Some(ca) = intermediates
+        .iter()
+        .find(|c| fingerprint(c.as_ref()) == pin)
+    else {
+        return Err(rustls::Error::General(format!(
+            "server certificate changed (expected {pin}, got {fp}) — refusing to connect"
+        )));
+    };
+    let mut roots = RootCertStore::empty();
+    roots.add(ca.clone().into_owned())?;
+    let others: Vec<CertificateDer<'_>> =
+        intermediates.iter().filter(|c| *c != ca).cloned().collect();
+    let parsed = rustls::server::ParsedCertificate::try_from(end_entity)?;
+    rustls::client::verify_server_cert_signed_by_trust_anchor(
+        &parsed,
+        &roots,
+        &others,
+        now,
+        provider().signature_verification_algorithms.all,
+    )
 }
 
 impl ServerCertVerifier for Verifier {
     fn verify_server_cert(
         &self,
         end_entity: &CertificateDer<'_>,
-        _: &[CertificateDer<'_>],
+        intermediates: &[CertificateDer<'_>],
         _: &ServerName<'_>,
         _: &[u8],
-        _: UnixTime,
+        now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        let fp = fingerprint(end_entity.as_ref());
-        *self.seen.lock().unwrap() = Some(fp.clone());
-        match &self.pin {
-            Some(pin) if *pin != fp => Err(rustls::Error::General(format!(
-                "server certificate changed (expected {pin}, got {fp}) — refusing to connect"
-            ))),
-            _ => Ok(ServerCertVerified::assertion()),
+        *self.seen.lock().unwrap() = Some(
+            std::iter::once(end_entity)
+                .chain(intermediates)
+                .map(|c| fingerprint(c.as_ref()))
+                .collect(),
+        );
+        if let Some(pin) = &self.pin {
+            check_pin(pin, end_entity, intermediates, now)?;
         }
+        Ok(ServerCertVerified::assertion())
     }
 
     fn verify_tls12_signature(
@@ -123,8 +163,9 @@ pub fn tls_config(pin: Option<&str>) -> Arc<ClientConfig> {
     }
 }
 
-/// Accepts any certificate but records its fingerprint (first contact, shown to the user to confirm).
-pub fn probe_config() -> (Arc<ClientConfig>, Arc<Mutex<Option<String>>>) {
+/// Accepts any certificate but records the fingerprints of the chain (first contact: what to
+/// pin is shown to the user to confirm).
+pub fn probe_config() -> (Arc<ClientConfig>, Seen) {
     let seen = Arc::new(Mutex::new(None));
     let cfg = builder()
         .dangerous()

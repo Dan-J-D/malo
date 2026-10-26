@@ -129,17 +129,26 @@ tls: TlsMode, };
 
 export type MailAccessInfo = { 
 /**
- * Port of the IMAP service (implicit TLS); None when the server doesn't run it.
+ * Port of the IMAP service (TLS or STARTTLS); None when the server doesn't run it.
  */
 imap_port: number | null, 
 /**
- * Port of the SMTP submission service (implicit TLS); None when the server doesn't run it.
+ * Port of the SMTP submission service (TLS or STARTTLS); None when the server doesn't run it.
  */
 smtp_port: number | null, 
 /**
- * SHA-256 fingerprint of the certificate both services present.
+ * SHA-256 fingerprint of the certificate both services present, or of Malo's certificate
+ * authority that issues it.
  */
-fingerprint: string | null, logins: Array<MailLoginView>, };
+fingerprint: string | null, 
+/**
+ * Malo issues its own certificates: devices install its authority (`/tls/malo-ca.*`).
+ */
+authority: boolean, 
+/**
+ * The names and addresses the certificate covers; mail apps must use one of them.
+ */
+certificate_names: Array<string>, logins: Array<MailLoginView>, };
 
 export type MailLoginView = { account_id: string, username: string, created_at: string, last_used: string | null, };
 

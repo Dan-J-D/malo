@@ -38,7 +38,7 @@ docker compose logs malo | grep -E "setup token|certificate SHA-256"
 
 On first start the server does two things:
 
-- It generates a self-signed TLS certificate and logs its **SHA-256 fingerprint**. The desktop app shows this fingerprint when you first connect. Compare the two before you trust the server; the app then pins it.
+- It creates its own **certificate authority** in `/data/tls` and logs its **SHA-256 fingerprint**. The desktop app shows this fingerprint when you first connect. Compare the two before you trust the server; the app then pins it. The authority issues the server's certificate: valid for 397 days, for the names in `MALO_TLS_HOSTNAMES`, and renewed automatically while the server runs, without changing the pin. It may only vouch for those names (name constraints), so a phone that trusts it can't be fooled about other sites. Servers that used the earlier self-signed certificate switch over on first start, and the desktop app asks once to confirm the new fingerprint.
 - It logs a one-time **setup token**. Use it in the app to create the first administrator. After that, administrators invite users, or turn on self-registration.
 
 ### Configuration
@@ -49,14 +49,15 @@ The server is configured with environment variables. They can also go in a TOML 
 |---|---|---|
 | `MALO_LISTEN` | `0.0.0.0:8443` | Address the server listens on |
 | `MALO_DATA_DIR` | `/data` | Where `server.db`, the per-user vaults, indexes and spool, and fs destinations live |
-| `MALO_TLS_CERT`, `MALO_TLS_KEY` | – | PEM files to use your own certificate instead of the self-signed one |
-| `MALO_TLS_HOSTNAMES` | – | Extra SANs for the self-signed certificate, comma-separated |
+| `MALO_TLS_CERT`, `MALO_TLS_KEY` | – | PEM files to use your own certificate instead of Malo's authority |
+| `MALO_TLS_HOSTNAMES` | – | Names and addresses mail apps and browsers use for this server (e.g. `10.0.0.1,backup.lan`), comma-separated; the certificate covers them and `localhost`. A name the authority doesn't cover yet creates a new authority, to be installed again |
 | `MALO_TLS=off` | on | Serve plain HTTP. Only do this behind a TLS-terminating reverse proxy |
 | `MALO_MAX_AUTO_LOCK_HOURS` | `24` | Upper limit on any user's auto-lock |
 | `MALO_ALLOWED_FS_MOUNTS` | – | Absolute paths, colon-separated, that `fs` destinations may use besides the user's own directory |
 | `MALO_WORKERS` | `4` | Number of jobs that can run at once across all users |
 | `MALO_IMAP_LISTEN` | off | Address of the IMAP service for mail apps, e.g. `0.0.0.0:1993` (implicit TLS). See [Mail apps](#mail-apps-imap-and-smtp) |
 | `MALO_SMTP_LISTEN` | off | Address of the SMTP submission service for mail apps, e.g. `0.0.0.0:1465` (implicit TLS) |
+| `MALO_MAIL_TRACE` | off | `1` logs every IMAP command (passwords hidden), Malo's replies and how long each took, to find where a mail app gets stuck. Commands slower than 10 s are logged anyway |
 | `MALO_TRUST_PROXY_HEADERS` | off | Take the client address for rate limits from `X-Real-IP` / the last `X-Forwarded-For` entry. Turn it on only behind a reverse proxy that sets these headers; otherwise clients pick their own address and every client shares the proxy's limit |
 
 Administrators set the remaining options in the app (*Admin*): self-registration, the default and per-user account limits, the maximum auto-lock, extra `fs` mounts, and **Block private networks**. That last one refuses mail servers and storage endpoints on loopback, private and link-local addresses. It is checked when an account or destination is saved or tested, and again when a job starts. Turn it on when users you don't fully trust share the server, so they can't make it connect to hosts on its own network. It's off by default because a LAN mail server or MinIO is a common setup. The *Admin* page also lists open invites (which can be revoked) and a log of administrative actions: user changes and deletions, invites, settings, password resets with a kit, and settings restored by a rebuild.
@@ -168,7 +169,7 @@ With `MALO_IMAP_LISTEN` and `MALO_SMTP_LISTEN` set, Apple Mail, Thunderbird or a
 - **Fast listing.** Mail apps download headers and structure for every message first. Malo stores that data when it indexes a message for search, so listing a folder never downloads the messages from a destination. Mail backed up before this existed is indexed by the *Index mail for search* job, which starts when a mail app signs in. Until it finishes, those messages are read from the destinations (eight at a time), so a large mailbox lists slowly the first time.
 - **The archive is read-only.** Flags (read, flagged…), deleting, and moving or copying between folders (*Move to Junk*, into a category, to Trash…) only change what mail apps see; the backups and the mail server stay untouched. Gmail doesn't let other apps set categories, so filing a message into a category stays in Malo. *Show every message again* undoes all of it. Creating, renaming and deleting folders are refused.
 - **Sending.** Add the account's outgoing server (*Edit account → Outgoing mail*; presets fill it in). Each message is relayed unchanged, signed in with the account's IMAP credentials (password or OAuth2; Microsoft also needs the `SMTP.Send` scope), and the recipient list is all-or-nothing: if the server refuses one recipient, nothing is sent and the app gets the server's answer. *Block private networks* applies to SMTP servers too. Saving to *Sent* in the app stores the copy on the account's server, so the next backup picks it up (Gmail keeps sent mail by itself). Drafts aren't kept on the backup server: turn off *Store draft messages on the server* in Apple Mail.
-- **Setup in Apple Mail:** *Other Mail Account…*, account type IMAP, this server as incoming and outgoing server, the mail login for both, the two ports with *Use TLS/SSL*. Both services present the server's certificate; with the self-signed one, compare its SHA-256 fingerprint (shown in the app) before trusting it, or set `MALO_TLS_HOSTNAMES` / your own certificate.
+- **Setup in Apple Mail:** *Other Mail Account…*, account type IMAP, this server as incoming and outgoing server, the mail login for both, the two ports with *Use TLS/SSL*. Both services present the server's certificate. Install Malo's certificate authority on the device first: open the server's address (e.g. `https://10.0.0.1:9443/`) in the device's browser: the page offers the download and the steps for iPhone, iPad, Mac, Android, Windows and Linux, with this device's first. On iPhone, also turn it on under Settings → General → About → *Certificate Trust Settings*. Use one of the names in `MALO_TLS_HOSTNAMES` as the server name. Apps set to *STARTTLS* (or with SSL off) work on the same ports: Malo greets them in plain text, offers only STARTTLS, and refuses logins until TLS is on. If an app gets nowhere, set `MALO_MAIL_TRACE=1` and watch the log.
 
 ## Desktop app
 

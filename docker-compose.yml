@@ -21,6 +21,7 @@ services:
       MALO_MAX_AUTO_LOCK_HOURS: "24"
       MALO_IMAP_LISTEN: 0.0.0.0:1993              # remove both to turn mail app access off
       MALO_SMTP_LISTEN: 0.0.0.0:1465
+      MALO_MAIL_TRACE: "0"                        # "1" logs every mail app command, to debug a stuck app
       # MALO_TLS_HOSTNAMES: backup.example.com     # extra SANs for the self-signed cert
       # MALO_TLS_CERT: /data/tls/real-cert.pem      # or bring your own certificate
       # MALO_TLS_KEY: /data/tls/real-key.pem

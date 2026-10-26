@@ -36,7 +36,8 @@ pub fn insecure_config() -> Arc<ClientConfig> {
     )
 }
 
-/// Accepts exactly the certificate whose SHA-256 fingerprint matches `pin` (TOFU pinning).
+/// Accepts the server whose certificate, or the authority that issued it, has the SHA-256
+/// fingerprint `pin` (TOFU pinning; see [`check_pin`]).
 pub fn pinned_config(pin: &str) -> Arc<ClientConfig> {
     Arc::new(
         ClientConfig::builder_with_provider(provider())
@@ -57,6 +58,41 @@ pub fn fingerprint(der: &[u8]) -> String {
         .map(|b| format!("{b:02X}"))
         .collect::<Vec<_>>()
         .join(":")
+}
+
+/// Whether a server's certificate matches a pin: the certificate itself (self-signed or
+/// user-provided), or an authority in the chain the server sent that issued it (Malo's own
+/// authority, which renews the server certificate without changing the pin). Names aren't
+/// checked: the pin is the server's identity.
+pub fn check_pin(
+    pin: &str,
+    end_entity: &CertificateDer<'_>,
+    intermediates: &[CertificateDer<'_>],
+    now: UnixTime,
+) -> Result<(), rustls::Error> {
+    if fingerprint(end_entity.as_ref()) == pin {
+        return Ok(());
+    }
+    let Some(ca) = intermediates
+        .iter()
+        .find(|c| fingerprint(c.as_ref()) == pin)
+    else {
+        return Err(rustls::Error::General(
+            "certificate fingerprint does not match the pinned one".into(),
+        ));
+    };
+    let mut roots = RootCertStore::empty();
+    roots.add(ca.clone().into_owned())?;
+    let others: Vec<CertificateDer<'_>> =
+        intermediates.iter().filter(|c| *c != ca).cloned().collect();
+    let parsed = rustls::server::ParsedCertificate::try_from(end_entity)?;
+    rustls::client::verify_server_cert_signed_by_trust_anchor(
+        &parsed,
+        &roots,
+        &others,
+        now,
+        provider().signature_verification_algorithms.all,
+    )
 }
 
 pub fn normalize_fingerprint(s: &str) -> String {
@@ -81,20 +117,15 @@ impl ServerCertVerifier for Verifier {
     fn verify_server_cert(
         &self,
         end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
+        intermediates: &[CertificateDer<'_>],
         _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: UnixTime,
+        now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        match &self.pin {
-            None => Ok(ServerCertVerified::assertion()),
-            Some(pin) if *pin == fingerprint(end_entity.as_ref()) => {
-                Ok(ServerCertVerified::assertion())
-            }
-            Some(_) => Err(rustls::Error::General(
-                "certificate fingerprint does not match the pinned one".into(),
-            )),
+        if let Some(pin) = &self.pin {
+            check_pin(pin, end_entity, intermediates, now)?;
         }
+        Ok(ServerCertVerified::assertion())
     }
 
     fn verify_tls12_signature(

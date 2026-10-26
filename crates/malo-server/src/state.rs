@@ -23,6 +23,8 @@ pub struct AppState {
     pub kdf_slots: Semaphore,
     pub login_failures: Mutex<HashMap<String, (u32, Instant)>>,
     pub cert_fingerprint: Option<String>,
+    /// Malo's own certificate authority, for devices to install; None with user-provided files.
+    pub tls_ca: Option<crate::tlsgen::CaInfo>,
     /// Ports and certificate of the IMAP/SMTP services.
     pub mail: crate::mail::MailInfo,
     /// Background IMAP IDLE watchers per (user, account).

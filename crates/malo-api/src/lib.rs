@@ -320,12 +320,17 @@ pub struct AccountPreset {
 /// How mail apps reach this server, and the logins of the user's accounts.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct MailAccessInfo {
-    /// Port of the IMAP service (implicit TLS); None when the server doesn't run it.
+    /// Port of the IMAP service (TLS or STARTTLS); None when the server doesn't run it.
     pub imap_port: Option<u16>,
-    /// Port of the SMTP submission service (implicit TLS); None when the server doesn't run it.
+    /// Port of the SMTP submission service (TLS or STARTTLS); None when the server doesn't run it.
     pub smtp_port: Option<u16>,
-    /// SHA-256 fingerprint of the certificate both services present.
+    /// SHA-256 fingerprint of the certificate both services present, or of Malo's certificate
+    /// authority that issues it.
     pub fingerprint: Option<String>,
+    /// Malo issues its own certificates: devices install its authority (`/tls/malo-ca.*`).
+    pub authority: bool,
+    /// The names and addresses the certificate covers; mail apps must use one of them.
+    pub certificate_names: Vec<String>,
     pub logins: Vec<MailLoginView>,
 }
 

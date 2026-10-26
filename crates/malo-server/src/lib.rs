@@ -13,6 +13,7 @@ pub mod routes;
 pub mod scheduler;
 pub mod state;
 pub mod tlsgen;
+pub mod trust_page;
 pub mod ws;
 
 use std::collections::HashMap;
@@ -103,6 +104,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/status", get(status))
         .route("/healthz", get(healthz))
         .route("/presets", get(presets))
+        .route("/", get(trust_page::page))
+        .route("/tls/{file}", get(authority))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/lock", post(auth::lock))
         .route("/auth/password", post(auth::change_password))
@@ -246,12 +249,16 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<Running> {
     // Mail apps always get TLS, also when the API sits behind a TLS-terminating proxy.
     let mail_tls = match (&tls, mail_listeners.any()) {
         (_, false) => None,
-        (Some(t), true) => Some((t.config.clone(), t.fingerprint.clone())),
+        (Some(t), true) => Some((t.config.clone(), t.fingerprint.clone(), t.ca.clone())),
         (None, true) => {
             let t = tlsgen::load_or_create(&cfg)?;
-            Some((t.config, t.fingerprint))
+            Some((t.config, t.fingerprint, t.ca))
         }
     };
+    let tls_ca = tls
+        .as_ref()
+        .and_then(|t| t.ca.clone())
+        .or_else(|| mail_tls.as_ref().and_then(|t| t.2.clone()));
     let state: SharedState = Arc::new(AppState {
         db,
         keyring: KeyRing::default(),
@@ -260,6 +267,7 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<Running> {
         kdf_slots: tokio::sync::Semaphore::new(2),
         login_failures: Mutex::new(HashMap::new()),
         cert_fingerprint: tls.as_ref().map(|t| t.fingerprint.clone()),
+        tls_ca,
         mail: mail::MailInfo {
             imap_port: imap_addr.map(|a| a.port()),
             smtp_port: smtp_addr.map(|a| a.port()),
@@ -270,13 +278,18 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<Running> {
         cfg: cfg.clone(),
     });
     scheduler::spawn(state.clone());
-    if let Some((config, _)) = mail_tls {
+    if let Some((config, _, _)) = mail_tls {
         mail_listeners.spawn(state.clone(), config)?;
         if let Some(a) = imap_addr {
-            tracing::info!("IMAP service on {a} (TLS)");
+            tracing::info!("IMAP service on {a} (TLS or STARTTLS)");
+            if mail::imap::tracing_on() {
+                tracing::info!(
+                    "mail tracing is on (MALO_MAIL_TRACE): every mail app command is logged"
+                );
+            }
         }
         if let Some(a) = smtp_addr {
-            tracing::info!("SMTP submission service on {a} (TLS)");
+            tracing::info!("SMTP submission service on {a} (TLS or STARTTLS)");
         }
     }
     let app = router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();

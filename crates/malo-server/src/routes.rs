@@ -1299,8 +1299,104 @@ pub async fn mail_access(
         imap_port: state.mail.imap_port,
         smtp_port: state.mail.smtp_port,
         fingerprint: state.mail.fingerprint.clone(),
+        authority: state.tls_ca.is_some(),
+        certificate_names: state
+            .tls_ca
+            .as_ref()
+            .map(|c| c.names.clone())
+            .unwrap_or_default(),
         logins,
     }))
+}
+
+/// Malo's certificate authority, for devices to install (public, like any certificate):
+/// `malo-ca.mobileconfig` (an iPhone/iPad/Mac profile), `malo-ca.crt` (DER, Android and
+/// Windows) or `malo-ca.pem`.
+pub async fn authority(
+    State(state): State<SharedState>,
+    Path(file): Path<String>,
+) -> ApiResult<Response> {
+    let Some(ca) = &state.tls_ca else {
+        return Err(ApiErr::not_found("certificate authority"));
+    };
+    let b64 = |der: &[u8]| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, der);
+    let (content_type, body) = match file.as_str() {
+        "malo-ca.crt" => ("application/x-x509-ca-cert", ca.der.clone()),
+        "malo-ca.pem" => {
+            let lines: Vec<String> = b64(&ca.der)
+                .as_bytes()
+                .chunks(64)
+                .map(|c| String::from_utf8_lossy(c).into_owned())
+                .collect();
+            let pem = format!(
+                "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+                lines.join("\n")
+            );
+            ("application/x-pem-file", pem.into_bytes())
+        }
+        "malo-ca.mobileconfig" => (
+            "application/x-apple-aspen-config",
+            mobileconfig(&ca.der, &b64(&ca.der)).into_bytes(),
+        ),
+        _ => return Err(ApiErr::not_found("file")),
+    };
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, content_type)
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{file}\""),
+        )
+        .body(Body::from(body))
+        .unwrap())
+}
+
+/// A configuration profile that installs the authority as a root certificate. Its identifiers
+/// come from the certificate, so installing it again replaces the profile instead of adding one.
+fn mobileconfig(der: &[u8], b64: &str) -> String {
+    let fp = crypto::sha256_hex(der);
+    let uuid = |salt: &str| {
+        let h = crypto::sha256_hex(format!("{salt}{fp}").as_bytes());
+        format!(
+            "{}-{}-{}-{}-{}",
+            &h[0..8],
+            &h[8..12],
+            &h[12..16],
+            &h[16..20],
+            &h[20..32]
+        )
+        .to_uppercase()
+    };
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>PayloadContent</key>
+  <array>
+    <dict>
+      <key>PayloadCertificateFileName</key><string>malo-ca.crt</string>
+      <key>PayloadContent</key><data>{b64}</data>
+      <key>PayloadDescription</key><string>Lets this device trust your Malo server (mail apps and the Malo app). It can only vouch for that server's names.</string>
+      <key>PayloadDisplayName</key><string>Malo certificate authority</string>
+      <key>PayloadIdentifier</key><string>app.malo.ca.{fp_short}</string>
+      <key>PayloadType</key><string>com.apple.security.root</string>
+      <key>PayloadUUID</key><string>{inner}</string>
+      <key>PayloadVersion</key><integer>1</integer>
+    </dict>
+  </array>
+  <key>PayloadDisplayName</key><string>Malo server certificate</string>
+  <key>PayloadIdentifier</key><string>app.malo.profile.{fp_short}</string>
+  <key>PayloadRemovalDisallowed</key><false/>
+  <key>PayloadType</key><string>Configuration</string>
+  <key>PayloadUUID</key><string>{outer}</string>
+  <key>PayloadVersion</key><integer>1</integer>
+</dict>
+</plist>
+"#,
+        fp_short = &fp[..16],
+        inner = uuid("payload"),
+        outer = uuid("profile"),
+    )
 }
 
 /// Creates or replaces the mail login of an account. The password is generated here and shown
