@@ -6,6 +6,8 @@
   import { session, route } from './state.svelte';
   import Notices from './components/Notices.svelte';
   import Nav from './components/Nav.svelte';
+  import Resizer from './components/Resizer.svelte';
+  import { panes, savePanes, navWidth, NAV_DEFAULT, NAV_RAIL, NAV_MAX } from './layout.svelte';
   import Connect from './routes/Connect.svelte';
   import Login from './routes/Login.svelte';
   import Dashboard from './routes/Dashboard.svelte';
@@ -55,8 +57,12 @@
 {:else if session.phase === 'login'}
   <Login />
 {:else}
-  <div class="grid h-screen grid-cols-[248px_minmax(0,1fr)] bg-frame">
-    <Nav />
+  <div class="grid h-screen bg-frame" style="grid-template-columns: {panes.nav}px minmax(0, 1fr)">
+    <div class="relative min-w-0">
+      <Nav />
+      <Resizer label="Resize sidebar" width={panes.nav} min={NAV_RAIL} max={NAV_MAX} set={(w) => (panes.nav = navWidth(w))}
+        reset={() => (panes.nav = NAV_DEFAULT)} done={savePanes} />
+    </div>
     <main class={top === '/browse'
       ? 'min-w-0 overflow-hidden py-2 pr-2'
       : 'm-2 ml-0 min-w-0 overflow-auto rounded-xl border border-line bg-panel px-9 py-7'}>

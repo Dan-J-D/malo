@@ -1,8 +1,9 @@
 <script lang="ts">
   import { api } from '../api/client';
-  import { live, attempt, accountName, destName, go, refreshJobs } from '../state.svelte';
-  import { bytes, when, ago, jobLabel, reveal } from '../format';
+  import { live, attempt, accountName, destName, go, refreshJobs, clearFound, FOUND_KEEP } from '../state.svelte';
+  import { bytes, when, ago, jobLabel, reveal, shortDate } from '../format';
   import StatusPill from '../components/StatusPill.svelte';
+  import Icon from '../components/Icon.svelte';
 
   const active = $derived(live.jobs.filter((j) => j.state === 'running' || j.state === 'queued'));
   const history = $derived(live.jobs.filter((j) => j.state !== 'running' && j.state !== 'queued').slice(0, 50));
@@ -33,30 +34,36 @@
   {/each}
 </div>
 
-<div class="row"><h2 class="grow">Newly found</h2>
-  <span class="muted small">Messages Malo has not seen before, as they are discovered — before they are downloaded.</span>
-  {#if live.newlyFound.length}<button onclick={() => (live.newlyFound = [])}>Clear list</button>{/if}
+<div class="row mt-8 mb-3 items-baseline">
+  <h2 class="m-0">Newly found</h2>
+  {#if live.foundCount}
+    <span class="text-[0.85rem] text-muted tabular-nums">{live.foundCount.toLocaleString()} this session{live.foundCount > live.newlyFound.length ? ` · latest ${live.newlyFound.length}` : ''}</span>
+  {/if}
+  <span class="grow"></span>
+  {#if live.foundCount > FOUND_KEEP}<a href="#/browse?new=1" class="text-[0.9rem]">See all in Mail</a>{/if}
+  {#if live.newlyFound.length}<button onclick={clearFound}>Clear list</button>{/if}
 </div>
-<div class="panel">
-  <table>
-    <thead><tr><th>From</th><th>Subject</th><th>Date</th><th>Mailbox / labels</th><th class="right">Size</th><th>📎</th><th>Status</th></tr></thead>
-    <tbody>
-      {#each live.newlyFound as m (m.id)}
-        {@const ready = m.state === 'stored' || m.state === 'verified'}
-        <tr class:clickable={ready} onclick={() => ready && go(`/browse/${m.id}`)} title={ready ? 'Open in the safe viewer' : 'Not downloaded yet'}>
-          <td>{reveal(m.envelope.from_name ?? m.envelope.from)}<div class="muted small">{m.envelope.from_name ? reveal(m.envelope.from) : ''}</div></td>
-          <td>{reveal(m.envelope.subject) || '(no subject)'}</td>
-          <td class="small">{when(m.envelope.date ?? m.internal_date)}</td>
-          <td class="small">{reveal([...m.mailboxes, ...m.labels].join(', '))}<div class="muted">{accountName(m.account_id)}</div></td>
-          <td class="right small">{bytes(m.size)}</td>
-          <td>{m.envelope.attachment_count || ''}</td>
-          <td><StatusPill state={m.state} stored={m.stored} destinations={m.destinations} error={m.error} /></td>
-        </tr>
-      {:else}
-        <tr><td colspan="7" class="muted">New mail shows up here live while a backup runs.</td></tr>
-      {/each}
-    </tbody>
-  </table>
+<!-- The newest messages only: a first backup discovers the whole mailbox, and Mail's New view pages through all of it. -->
+<div class="panel max-h-[26rem] overflow-y-auto p-1.5!">
+  {#each live.newlyFound as m (m.id)}
+    {@const ready = m.state === 'stored' || m.state === 'verified'}
+    {@const sender = reveal(m.envelope.from_name ?? m.envelope.from) || '(unknown sender)'}
+    <button class="grid w-full grid-cols-[minmax(0,13rem)_minmax(0,1fr)_auto_auto] items-center gap-x-4 rounded-lg bg-transparent px-3 py-2 text-left {ready ? 'hover:bg-hover' : 'cursor-default hover:bg-transparent!'}"
+      onclick={() => ready && go(`/browse/${m.id}`)} title={ready ? 'Open in the safe viewer' : 'Not downloaded yet'}>
+      <span class="min-w-0 leading-tight">
+        <span class="untrusted block truncate">{sender}</span>
+        <span class="block truncate text-[0.8rem] text-muted">{accountName(m.account_id)}</span>
+      </span>
+      <span class="flex min-w-0 items-center gap-1.5">
+        <span class="subject truncate">{reveal(m.envelope.subject) || '(no subject)'}</span>
+        {#if m.envelope.attachment_count}<span class="flex-none text-faint" title="{m.envelope.attachment_count} attachment(s)"><Icon name="paperclip" size={13} /></span>{/if}
+      </span>
+      <span class="text-right text-[0.8rem] whitespace-nowrap text-muted tabular-nums" title={when(m.envelope.date ?? m.internal_date)}>{shortDate(m.envelope.date ?? m.internal_date)} · {bytes(m.size)}</span>
+      <StatusPill state={m.state} stored={m.stored} destinations={m.destinations} error={m.error} />
+    </button>
+  {:else}
+    <p class="m-0 px-3 py-2 text-muted">New mail shows up here live while a backup runs.</p>
+  {/each}
 </div>
 
 <h2>History</h2>

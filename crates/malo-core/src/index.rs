@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS messages (
     last_attempt_at TEXT
 );
 CREATE INDEX IF NOT EXISTS messages_account ON messages(account, state);
+CREATE INDEX IF NOT EXISTS messages_date ON messages(internaldate);
 CREATE UNIQUE INDEX IF NOT EXISTS messages_gm ON messages(account, gm_msgid) WHERE gm_msgid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS messages_sha ON messages(sha256);
 CREATE TABLE IF NOT EXISTS memberships (
@@ -224,6 +225,44 @@ pub struct MessageQuery {
     pub states: Vec<MessageState>,
     pub limit: u32,
     pub offset: u32,
+    /// Only messages up to this id: a scrolling client pins its first page's newest id, so mail
+    /// arriving meanwhile doesn't shift the offsets of the pages it loads later.
+    pub max_id: Option<i64>,
+    pub sort: MessageSort,
+}
+
+/// Order of a message list. Ties (and messages without a date) fall back to discovery order.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MessageSort {
+    /// Most recently received first (the server's INTERNALDATE).
+    #[default]
+    Newest,
+    Oldest,
+    /// Sender name (or address) A–Z, case- and accent-insensitive.
+    Sender,
+    Largest,
+}
+
+impl MessageSort {
+    pub fn parse(s: &str) -> MessageSort {
+        match s {
+            "oldest" => MessageSort::Oldest,
+            "sender" => MessageSort::Sender,
+            "largest" => MessageSort::Largest,
+            _ => MessageSort::Newest,
+        }
+    }
+
+    fn order_by(self) -> &'static str {
+        match self {
+            MessageSort::Newest => "g.internaldate IS NULL, g.internaldate DESC, g.id DESC",
+            MessageSort::Oldest => "g.internaldate IS NULL, g.internaldate ASC, g.id ASC",
+            MessageSort::Sender => {
+                "malo_fold(coalesce(json_extract(g.envelope, '$.from_name'), json_extract(g.envelope, '$.from'), '')) ASC, g.id DESC"
+            }
+            MessageSort::Largest => "g.size DESC, g.id DESC",
+        }
+    }
 }
 
 pub struct NewMessage<'a> {
@@ -1285,10 +1324,11 @@ fn query_messages_on(
                 coalesce(json_extract(g.envelope, '$.from_name'), '') || ' ' ||
                 coalesce(json_extract(g.envelope, '$.from'), '') || ' ' ||
                 coalesce(json_extract(g.envelope, '$.to'), '')) LIKE ?4 ESCAPE '\\')
-          AND (?5 IS NULL OR instr(',' || ?5 || ',', ',' || g.state || ',') > 0)"
+          AND (?5 IS NULL OR instr(',' || ?5 || ',', ',' || g.state || ',') > 0)
+          AND (?7 IS NULL OR g.id<=?7)"
     );
     {
-        let p = params![q.account, q.mailbox, q.new_only as i32, text, states, id];
+        let p = params![q.account, q.mailbox, q.new_only as i32, text, states, id, q.max_id];
         // The total only matters for paging a list; counting is a full scan.
         let total: i64 = match id {
             Some(_) => 0,
@@ -1305,7 +1345,8 @@ fn query_messages_on(
                 (SELECT m.gm_labels FROM memberships m WHERE m.message=g.id LIMIT 1),
                 (SELECT m.flags FROM memberships m WHERE m.message=g.id LIMIT 1),
                 (SELECT COUNT(*)=SUM(m.deleted_on_server_at IS NOT NULL) FROM memberships m WHERE m.message=g.id)
-             FROM messages g {filter} ORDER BY g.id DESC LIMIT ?7 OFFSET ?8"
+             FROM messages g {filter} ORDER BY {order} LIMIT ?8 OFFSET ?9",
+            order = q.sort.order_by()
         );
         let limit = if q.limit == 0 { 100 } else { q.limit.min(1000) };
         let mut stmt = c.prepare(&sql)?;
@@ -1318,6 +1359,7 @@ fn query_messages_on(
                     text,
                     states,
                     id,
+                    q.max_id,
                     limit,
                     q.offset
                 ],
@@ -1575,6 +1617,64 @@ mod tests {
         assert_eq!(hits("%"), 1, "% is literal, not a wildcard");
         assert_eq!(hits("_"), 0);
         assert_eq!(hits("😀\u{202E}"), 0);
+    }
+
+    #[test]
+    fn batched_discovery_and_pinned_paging() {
+        let idx = Index::open_in_memory().unwrap();
+        let all = idx
+            .upsert_mailbox("acc", "[Gmail]/All Mail", "All Mail", "All", Some("/"), Some("\\All"), 1)
+            .unwrap();
+        let trash = idx
+            .upsert_mailbox("acc", "[Gmail]/Trash", "Trash", "Trash", Some("/"), Some("\\Trash"), 1)
+            .unwrap();
+        let found = |uids: std::ops::Range<u32>| -> Vec<crate::imap::Discovered> {
+            uids.map(|uid| crate::imap::Discovered {
+                uid,
+                flags: vec![],
+                // Higher UIDs here are older and larger, so every sort order differs from id order.
+                internaldate: DateTime::from_timestamp(1_700_000_000 - uid as i64 * 60, 0),
+                size: uid,
+                envelope: Envelope {
+                    from_name: Some(format!("{}", (b'a' + (uid % 26) as u8) as char)),
+                    ..empty_envelope()
+                },
+                gm_msgid: Some(1000 + uid as u64),
+                gm_labels: vec![],
+            })
+            .collect()
+        };
+        let added = idx.record_discovered("acc", all.id, 1, &found(1..251), 2).unwrap();
+        assert_eq!(added.len(), 250);
+        assert_eq!(added[0].destinations, 2);
+        // Seen again: nothing new. The same Gmail message in another mailbox: membership only.
+        assert!(idx.record_discovered("acc", all.id, 2, &found(1..251), 2).unwrap().is_empty());
+        assert!(idx.record_discovered("acc", trash.id, 2, &found(1..6), 2).unwrap().is_empty());
+        assert_eq!(idx.live_uids(trash.id).unwrap().len(), 5);
+
+        let page = |offset: u32, max_id: Option<i64>| {
+            let q = MessageQuery { limit: 100, offset, max_id, ..Default::default() };
+            idx.list_messages(&q, 2).unwrap()
+        };
+        let (total, first) = page(0, None);
+        assert_eq!(total, 250);
+        let pin = Some(first[0].id);
+        let before: Vec<i64> = page(100, pin).1.iter().map(|m| m.id).collect();
+        // Mail found after the first page doesn't shift the pinned pages.
+        idx.record_discovered("acc", all.id, 3, &found(251..261), 2).unwrap();
+        let after: Vec<i64> = page(100, pin).1.iter().map(|m| m.id).collect();
+        assert_eq!(before, after);
+        assert_eq!(page(0, None).0, 260);
+
+        let top = |sort: MessageSort| {
+            let q = MessageQuery { limit: 1, sort, ..Default::default() };
+            let m = idx.list_messages(&q, 2).unwrap().1.remove(0);
+            (m.size, m.envelope.from_name.unwrap())
+        };
+        assert_eq!(top(MessageSort::Newest).0, 1);
+        assert_eq!(top(MessageSort::Oldest).0, 260);
+        assert_eq!(top(MessageSort::Largest).0, 260);
+        assert_eq!(top(MessageSort::Sender).1, "a");
     }
 
     #[test]

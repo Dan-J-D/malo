@@ -165,6 +165,9 @@
   .callout > p:last-child { margin-bottom: 0; }
 }
 
+/* While a pane is being resized: one cursor everywhere, no text selection. */
+html.resizing, html.resizing * { cursor: col-resize !important; user-select: none; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }

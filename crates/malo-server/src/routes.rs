@@ -11,7 +11,7 @@ use chrono::Utc;
 use malo_api::*;
 use malo_core::config::{Account, Destination};
 use malo_core::ctx::JobCtx;
-use malo_core::index::{MessageQuery, ReplicaStatus};
+use malo_core::index::{MessageQuery, MessageSort, ReplicaStatus};
 use malo_core::oauth::TokenSource;
 use malo_core::store::Store;
 use malo_core::{crypto, imap, oauth, viewer};
@@ -821,6 +821,9 @@ pub struct MessagesQuery {
     pub state: Option<String>,
     pub limit: Option<u32>,
     pub offset: Option<u32>,
+    pub max_id: Option<i64>,
+    /// newest (default), oldest, sender, largest
+    pub sort: Option<String>,
 }
 
 pub async fn list_mailboxes(
@@ -861,6 +864,8 @@ pub async fn list_messages(
             states,
             limit: q.limit.unwrap_or(100),
             offset: q.offset.unwrap_or(0),
+            max_id: q.max_id,
+            sort: q.sort.as_deref().map(MessageSort::parse).unwrap_or_default(),
         },
         dests,
     )?;

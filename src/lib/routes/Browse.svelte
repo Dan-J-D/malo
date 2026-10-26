@@ -1,11 +1,14 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { api, qs } from '../api/client';
   import type * as T from '../api/types';
   import { live, route, scope, go, attempt, accountName } from '../state.svelte';
   import { reveal, shortDate } from '../format';
+  import { panes, savePanes, LIST_MIN, LIST_MAX, LIST_DEFAULT } from '../layout.svelte';
   import Viewer from '../components/Viewer.svelte';
   import Avatar from '../components/Avatar.svelte';
   import Icon from '../components/Icon.svelte';
+  import Resizer from '../components/Resizer.svelte';
   import { fade } from 'svelte/transition';
   import { ms } from '../motion';
 
@@ -20,23 +23,33 @@
   let mailbox = $state('');
   let newOnly = $state(false);
   let q = $state('');
-  let page = $state(0);
-  const pageSize = 100;
-  let list: T.MessageList = $state({ total: 0, messages: [] });
-  let loading = $state(false);
+  const sorts = [['newest', 'Newest'], ['oldest', 'Oldest'], ['sender', 'Sender A–Z'], ['largest', 'Largest']];
+  let sort = $state(readSort());
+  function readSort() {
+    try {
+      const v = localStorage.getItem('malo.sort');
+      return sorts.some(([k]) => k === v) ? v! : 'newest';
+    } catch {
+      return 'newest';
+    }
+  }
+  function setSort(v: string) {
+    sort = v;
+    try { localStorage.setItem('malo.sort', v); } catch { /* not remembered */ }
+  }
   let boxes: T.MailboxInfo[] = $state([]);
   let searchEl: HTMLInputElement | undefined = $state();
 
   $effect(() => {
     const a = params.get('account');
     if (a) scope.account = a;
+    if (params.get('new')) newOnly = true;
   });
 
-  // A different account starts on its whole mailbox list, first page.
+  // A different account starts on its whole mailbox list.
   $effect.pre(() => {
     void account;
     mailbox = '';
-    page = 0;
   });
 
   $effect(() => {
@@ -44,62 +57,167 @@
     attempt(() => api.get<T.MailboxInfo[]>(`/mailboxes${qs({ account })}`)).then((b) => (boxes = b ?? []));
   });
 
-  async function load() {
+  // ── Virtual list ──
+  // Every row has the same height, so which rows are on screen follows from the scroll offset
+  // alone: only those (plus an overscan margin) are rendered, inside a spacer as tall as the
+  // whole list. Rows arrive in pages as they come into view. The first page pins the newest id
+  // (`max_id`), so mail found by a running backup can't shift the offsets of later pages.
+  const ROW = 76;
+  const PAGE = 100;
+  const OVERSCAN = 10;
+
+  let total = $state(0);
+  let pages: Record<number, T.MessageSummary[]> = $state.raw({});
+  let maxId: number | null = null;
+  let gen = $state(0);
+  const inflight = new Set<number>();
+  let loading = $state(false);
+  let baseFound = $state(0);
+  let scroller: HTMLElement | undefined = $state();
+  let scrollTop = $state(0);
+  let viewH = $state(0);
+
+  const first = $derived(Math.max(0, Math.floor(scrollTop / ROW) - OVERSCAN));
+  const last = $derived(Math.min(total, Math.ceil((scrollTop + viewH) / ROW) + OVERSCAN));
+  const visible = $derived(Array.from({ length: Math.max(0, last - first) }, (_, k) => first + k));
+  const at = (i: number) => pages[Math.floor(i / PAGE)]?.[i % PAGE];
+
+  const query = (p: number) =>
+    `/messages${qs({ account, mailbox: account ? mailbox : '', new: newOnly, q, sort, limit: PAGE, offset: p * PAGE, max_id: maxId })}`;
+
+  async function fetchPage(p: number) {
+    if (pages[p] || inflight.has(p)) return;
+    const g = gen;
+    inflight.add(p);
+    const r = await attempt(() => api.get<T.MessageList>(query(p)));
+    if (g !== gen) return;
+    inflight.delete(p);
+    if (r) pages = { ...pages, [p]: r.messages };
+  }
+
+  /** Starts the list over (filters changed, or the user asked for new mail). */
+  async function reset() {
+    const g = ++gen;
+    inflight.clear();
+    stopWaiting();
+    maxId = null;
     loading = true;
-    const r = await attempt(() =>
-      api.get<T.MessageList>(`/messages${qs({ account, mailbox: account ? mailbox : '', new: newOnly, q, limit: pageSize, offset: page * pageSize })}`),
-    );
+    const r = await attempt(() => api.get<T.MessageList>(query(0)));
+    if (g !== gen) return;
     loading = false;
-    if (r) list = r;
+    if (!r) return;
+    maxId = r.messages[0]?.id ?? null;
+    total = r.total;
+    pages = { 0: r.messages };
+    baseFound = live.foundCount;
+    if (scroller) scroller.scrollTop = 0;
+    scrollTop = 0;
   }
 
   $effect(() => {
-    void account; void mailbox; void newOnly; void page;
-    load();
+    void account; void mailbox; void newOnly; void sort;
+    untrack(reset);
   });
+
+  // Pages for the rows on screen. A page is fetched once it has stayed in view for a moment,
+  // so flinging the scrollbar across thousands of rows doesn't fetch every page on the way,
+  // while slow continuous scrolling still loads as it goes.
+  const waiting = new Map<number, ReturnType<typeof setTimeout>>();
+  function stopWaiting() {
+    waiting.forEach((t) => clearTimeout(t));
+    waiting.clear();
+  }
+  $effect(() => {
+    if (loading || total === 0) return;
+    const from = Math.floor(first / PAGE);
+    const to = Math.floor(Math.max(first, last - 1) / PAGE);
+    untrack(() => {
+      for (const [p, t] of waiting) {
+        if (p < from || p > to) {
+          clearTimeout(t);
+          waiting.delete(p);
+        }
+      }
+      for (let p = from; p <= to; p++) {
+        if (pages[p] || inflight.has(p) || waiting.has(p)) continue;
+        waiting.set(p, setTimeout(() => { waiting.delete(p); fetchPage(p); }, 90));
+      }
+    });
+  });
+  $effect(() => stopWaiting);
 
   let searchTimer: ReturnType<typeof setTimeout>;
   function onSearch() {
     clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => { page = 0; load(); }, 300);
+    searchTimer = setTimeout(reset, 300);
   }
 
-  function open(m: T.MessageSummary) {
-    m.reviewed = true;
+  /** Mutates rows in place, then republishes the page map (it isn't deeply reactive). */
+  function touch(f: (m: T.MessageSummary) => void) {
+    Object.values(pages).forEach((rows) => rows.forEach(f));
+    pages = { ...pages };
+  }
+
+  // Index of the open message in the whole list, when it's loaded.
+  let sel = $state(-1);
+  const index = $derived.by(() => {
+    if (openId === null) return -1;
+    if (sel >= 0 && at(sel)?.id === openId) return sel;
+    for (const [p, rows] of Object.entries(pages)) {
+      const i = rows.findIndex((m) => m.id === openId);
+      if (i >= 0) return Number(p) * PAGE + i;
+    }
+    return -1;
+  });
+
+  function open(m: T.MessageSummary, i: number) {
+    sel = i;
+    if (!m.reviewed) touch((x) => { if (x.id === m.id) x.reviewed = true; });
     go(`/browse/${m.id}`);
   }
 
   async function markAll() {
     await attempt(() => api.post('/messages/reviewed', { ids: [], all: true, account_id: account || null }), 'Marked as reviewed');
     live.newlyFound.forEach((m) => { if (!account || m.account_id === account) m.reviewed = true; });
-    load();
+    if (newOnly) reset();
+    else touch((m) => (m.reviewed = true));
   }
 
-  const newTotal = $derived(boxes.reduce((n, b) => n + Number(b.new_count), 0));
-  const title = $derived(account && mailbox ? reveal(boxes.find((b) => b.name === mailbox)?.display_name.split('/').pop() ?? mailbox) : account ? accountName(account) : 'All mail');
-  const index = $derived(openId === null ? -1 : list.messages.findIndex((m) => m.id === openId));
+  /** Scrolls just enough to show row `i` (it may not be rendered yet, so no scrollIntoView). */
+  function showRow(i: number) {
+    if (!scroller) return;
+    const top = i * ROW;
+    if (top < scroller.scrollTop) scroller.scrollTop = top;
+    else if (top + ROW > scroller.scrollTop + viewH) scroller.scrollTop = top + ROW - viewH;
+  }
 
-  function step(d: number) {
-    const m = list.messages[index + d];
-    if (m) open(m);
+  async function step(d: number) {
+    const i = index < 0 ? (d > 0 ? 0 : -1) : index + d;
+    if (i < 0 || i >= total) return;
+    if (!at(i)) await fetchPage(Math.floor(i / PAGE));
+    const m = at(i);
+    if (m) {
+      open(m, i);
+      showRow(i);
+    }
   }
 
   function keys(e: KeyboardEvent) {
     const t = e.target as HTMLElement;
-    if (t.closest('input, select, textarea')) {
+    if (t.closest('input, select, textarea, [role="separator"]')) {
       if (e.key === 'Escape') t.blur();
       return;
     }
     if (e.key === '/' || (e.key === 'k' && (e.metaKey || e.ctrlKey))) { e.preventDefault(); searchEl?.focus(); }
-    else if (e.key === 'j' || e.key === 'ArrowDown') { e.preventDefault(); index < 0 ? list.messages[0] && open(list.messages[0]) : step(1); }
+    else if (e.key === 'j' || e.key === 'ArrowDown') { e.preventDefault(); step(1); }
     else if (e.key === 'k' || e.key === 'ArrowUp') { e.preventDefault(); step(-1); }
     else if (e.key === 'Escape' && openId !== null) go('/browse');
   }
 
-  // Keep the selected row in view when moving with the keyboard.
-  $effect(() => {
-    if (openId !== null) document.getElementById(`msg-${openId}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-  });
+  const newTotal = $derived(boxes.reduce((n, b) => n + Number(b.new_count), 0));
+  const title = $derived(account && mailbox ? reveal(boxes.find((b) => b.name === mailbox)?.display_name.split('/').pop() ?? mailbox) : account ? accountName(account) : 'All mail');
+  // Mail a running backup found since the list was loaded (any account; a refresh sorts it out).
+  const fresh = $derived(live.foundCount - baseFound);
 
   const stateIcon: Record<string, [string, string, string]> = {
     verified: ['check', 'text-ok', 'Verified on every destination'],
@@ -111,9 +229,10 @@
 
 <svelte:window onkeydown={keys} />
 
-<div class="grid h-full grid-cols-[minmax(320px,420px)_minmax(0,1fr)] gap-2">
+<div class="grid h-full gap-2" style="grid-template-columns: min({panes.list}px, 60%) minmax(0, 1fr)">
   <!-- Message list -->
-  <section class="flex min-h-0 flex-col overflow-hidden rounded-xl border border-line bg-panel">
+  <div class="relative min-h-0 min-w-0">
+  <section class="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-line bg-panel">
     <header class="flex items-center gap-2 border-b border-line px-4 py-3">
       <Icon name="inbox" />
       <h1 class="m-0 flex-1 truncate text-base font-semibold">{title}</h1>
@@ -131,10 +250,10 @@
       </label>
 
       <div class="flex gap-1.5">
-        <button class="flex-1 justify-center py-1.5 {newOnly ? 'bg-raised text-muted' : 'bg-accent! text-white'}" onclick={() => { newOnly = false; page = 0; }}>
+        <button class="flex-1 justify-center py-1.5 {newOnly ? 'bg-raised text-muted' : 'bg-accent! text-white'}" onclick={() => (newOnly = false)}>
           All
         </button>
-        <button class="flex-1 justify-center py-1.5 {newOnly ? 'bg-accent! text-white' : 'bg-raised text-muted'}" onclick={() => { newOnly = true; page = 0; }}
+        <button class="flex-1 justify-center py-1.5 {newOnly ? 'bg-accent! text-white' : 'bg-raised text-muted'}" onclick={() => (newOnly = true)}
           title="Messages that arrived since you last reviewed">
           New <span class="tabular-nums opacity-75">{newTotal}</span>
         </button>
@@ -142,72 +261,73 @@
 
       {#if account}
         <div class="flex gap-1.5">
-          <select class="min-w-0 flex-1 border-transparent py-1.5 text-[0.9rem]" aria-label="Mailbox" bind:value={mailbox} onchange={() => (page = 0)}>
+          <select class="min-w-0 flex-1 border-transparent py-1.5 text-[0.9rem]" aria-label="Mailbox" bind:value={mailbox}>
             <option value="">All mailboxes</option>
             {#each boxes as b}
-              <option value={b.name}>{'  '.repeat(b.display_name.split('/').length - 1)}{reveal(b.display_name.split('/').pop())} ({Number(b.new_count) > 0 ? `${b.new_count} new · ` : ''}{b.message_count})</option>
+              <option value={b.name}>{'  '.repeat(b.display_name.split('/').length - 1)}{reveal(b.display_name.split('/').pop())} ({Number(b.new_count) > 0 ? `${b.new_count} new · ` : ''}{b.message_count})</option>
             {/each}
           </select>
         </div>
       {/if}
     </div>
 
-    <div class="flex items-baseline justify-between px-4 pt-2 pb-1 text-[0.85rem] text-muted">
-      <span>{newOnly ? 'New since last visit' : 'Messages'} <span class="text-faint tabular-nums">[{list.total.toLocaleString()}]</span></span>
+    <div class="flex items-center justify-between gap-2 px-4 pt-2 pb-1 text-[0.85rem] text-muted">
+      <span class="flex-1 truncate">{newOnly ? 'New since last visit' : 'Messages'} <span class="text-faint tabular-nums">[{total.toLocaleString()}]</span></span>
+      {#if fresh > 0}
+        <button class="rounded-full bg-accent/15 px-2.5 py-0.5 text-[0.8rem] text-accent-2 hover:bg-accent/25!" onclick={reset} transition:fade={{ duration: ms(150) }}>
+          <Icon name="refresh" size={12} /> {fresh.toLocaleString()} new · show
+        </button>
+      {/if}
+      <label class="m-0 flex-row items-center gap-1 font-normal">
+        <span class="sr-only">Sort by</span>
+        <Icon name="filter" size={13} />
+        <select class="cursor-pointer border-transparent bg-transparent py-0.5 pr-1 pl-0.5 text-[0.85rem] text-muted hover:text-fg"
+          value={sort} onchange={(e) => setSort(e.currentTarget.value)} title="Sort by">
+          {#each sorts as [k, label]}<option value={k}>{label}</option>{/each}
+        </select>
+      </label>
     </div>
 
-    <ul class="m-0 min-h-0 flex-1 list-none overflow-y-auto px-2 pb-2 transition-opacity duration-200 {loading ? 'opacity-50' : ''}" role="listbox" aria-label="Messages">
-      {#each list.messages as m (m.id)}
-        {@const sender = reveal(m.envelope.from_name ?? m.envelope.from) || '(unknown sender)'}
-        {@const st = stateIcon[m.state]}
-        <li id="msg-{m.id}" role="option" aria-selected={openId === m.id}>
-          <button class="flex w-full items-start gap-3 rounded-lg px-2.5 py-2.5 text-left active:scale-[0.99] {openId === m.id ? 'bg-raised!' : 'bg-transparent'}" onclick={() => open(m)}>
-            <span class="relative mt-0.5">
-              <Avatar name={sender} seed={m.envelope.from} size={34} />
-              {#if !m.reviewed}<span class="absolute -right-0.5 -bottom-0.5 size-2.5 rounded-full bg-accent-2 ring-2 ring-panel" title="New"></span>{/if}
-            </span>
-            <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span class="flex items-baseline gap-2">
-                <span class="untrusted flex-1 truncate {m.reviewed ? 'text-fg/80' : 'font-semibold text-fg'}">{sender}</span>
-                <span class="flex-none text-[0.8rem] text-muted tabular-nums">{shortDate(m.envelope.date ?? m.internal_date)}</span>
-              </span>
-              <span class="flex items-center gap-2">
-                <span class="subject flex-1 truncate text-muted">{reveal(m.envelope.subject) || '(no subject)'}</span>
-                <span class="flex flex-none items-center gap-1.5">
-                  {#if m.envelope.attachment_count}<span class="text-faint" title="{m.envelope.attachment_count} attachment(s)"><Icon name="paperclip" size={13} /></span>{/if}
-                  {#if m.deleted_on_server}<span class="text-faint" title="Deleted on the mail server; only the backup remains"><Icon name="trash" size={13} /></span>{/if}
-                  {#if st}<span class={st[1]} title={m.state === 'stored' ? `Stored on ${m.stored}/${m.destinations} destinations` : (m.error ?? st[2])}><Icon name={st[0]} size={13} /></span>{/if}
-                </span>
-              </span>
-              {#if !account || m.labels.length}
-                <span class="untrusted truncate text-[0.8rem] text-faint">{!account ? accountName(m.account_id) : ''}{!account && m.labels.length ? ' · ' : ''}{reveal(m.labels.join(', '))}</span>
-              {/if}
-            </span>
-          </button>
-        </li>
+    <div bind:this={scroller} bind:clientHeight={viewH} onscroll={() => (scrollTop = scroller?.scrollTop ?? 0)}
+      class="min-h-0 flex-1 overflow-y-auto px-2 pb-2 [scroll-behavior:auto] transition-opacity duration-200 {loading ? 'opacity-50' : ''}"
+      role="listbox" aria-label="Messages" tabindex="-1">
+      {#if total === 0}
+        <p class="m-0 px-3 py-10 text-center text-muted">{loading ? 'Loading…' : q ? 'No messages match this search.' : newOnly ? 'Nothing new since your last visit.' : 'No messages backed up here yet.'}</p>
       {:else}
-        <li class="px-3 py-10 text-center text-muted">{q ? 'No messages match this search.' : newOnly ? 'Nothing new since your last visit.' : 'No messages backed up here yet.'}</li>
-      {/each}
-    </ul>
-
-    {#if list.total > pageSize}
-      <footer class="flex items-center gap-2 border-t border-line px-3 py-2 text-[0.85rem]">
-        <button class="bg-transparent px-2 py-1" disabled={page === 0} onclick={() => page--}>Previous</button>
-        <span class="flex-1 text-center text-muted">Page {page + 1} of {Math.ceil(list.total / pageSize)}</span>
-        <button class="bg-transparent px-2 py-1" disabled={(page + 1) * pageSize >= list.total} onclick={() => page++}>Next</button>
-      </footer>
-    {/if}
+        <ul class="relative m-0 list-none p-0" style="height: {total * ROW}px">
+          {#each visible as i (i)}
+            {@const m = at(i)}
+            <li class="absolute inset-x-0" style="top: {i * ROW}px; height: {ROW}px" role="option" aria-selected={!!m && openId === m.id} aria-setsize={total} aria-posinset={i + 1}>
+              {#if m}
+                {@render row(m, i)}
+              {:else}
+                <div class="flex h-full items-start gap-3 px-2.5 py-2.5" aria-label="Loading">
+                  <span class="mt-0.5 size-[34px] flex-none rounded-full bg-raised"></span>
+                  <span class="flex flex-1 flex-col gap-2 pt-1">
+                    <span class="h-3 w-2/5 rounded bg-raised"></span>
+                    <span class="h-3 w-4/5 rounded bg-raised/70"></span>
+                  </span>
+                </div>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </div>
   </section>
+  <Resizer label="Resize message list" width={Math.min(panes.list, LIST_MAX)} min={LIST_MIN} max={LIST_MAX} set={(w) => (panes.list = Math.min(LIST_MAX, Math.max(LIST_MIN, w)))}
+    reset={() => (panes.list = LIST_DEFAULT)} done={savePanes} />
+  </div>
 
   <!-- Reader -->
-  <section class="flex min-h-0 flex-col overflow-hidden rounded-xl border border-line bg-panel">
+  <section class="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border border-line bg-panel">
     {#if openId !== null}
       <Viewer id={openId}>
         {#snippet toolbar()}
           <button class="bg-transparent p-1.5 text-muted hover:text-fg" onclick={() => go('/browse')} aria-label="Close message" title="Close (Esc)"><Icon name="x" /></button>
           <span class="mx-1 h-4 w-px bg-line"></span>
           <button class="bg-transparent p-1.5 text-muted hover:text-fg" disabled={index <= 0} onclick={() => step(-1)} aria-label="Previous message" title="Previous (k)"><span class="rotate-180"><Icon name="chevron" size={16} /></span></button>
-          <button class="bg-transparent p-1.5 text-muted hover:text-fg" disabled={index < 0 || index >= list.messages.length - 1} onclick={() => step(1)} aria-label="Next message" title="Next (j)"><Icon name="chevron" size={16} /></button>
+          <button class="bg-transparent p-1.5 text-muted hover:text-fg" disabled={index < 0 || index >= total - 1} onclick={() => step(1)} aria-label="Next message" title="Next (j)"><Icon name="chevron" size={16} /></button>
         {/snippet}
       </Viewer>
     {:else}
@@ -221,3 +341,30 @@
     {/if}
   </section>
 </div>
+
+{#snippet row(m: T.MessageSummary, i: number)}
+  {@const sender = reveal(m.envelope.from_name ?? m.envelope.from) || '(unknown sender)'}
+  {@const st = stateIcon[m.state]}
+  {@const meta = [!account ? accountName(m.account_id) : '', reveal(m.labels.join(', '))].filter(Boolean).join(' · ')}
+  <button class="flex h-full w-full items-start gap-3 overflow-hidden rounded-lg px-2.5 py-2.5 text-left active:scale-[0.99] {openId === m.id ? 'bg-raised!' : 'bg-transparent'}" onclick={() => open(m, i)}>
+    <span class="relative mt-0.5">
+      <Avatar name={sender} seed={m.envelope.from} size={34} />
+      {#if !m.reviewed}<span class="absolute -right-0.5 -bottom-0.5 size-2.5 rounded-full bg-accent-2 ring-2 ring-panel" title="New"></span>{/if}
+    </span>
+    <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+      <span class="flex items-baseline gap-2">
+        <span class="untrusted flex-1 truncate {m.reviewed ? 'text-fg/80' : 'font-semibold text-fg'}">{sender}</span>
+        <span class="flex-none text-[0.8rem] text-muted tabular-nums">{shortDate(m.envelope.date ?? m.internal_date)}</span>
+      </span>
+      <span class="flex items-center gap-2">
+        <span class="subject flex-1 truncate text-muted">{reveal(m.envelope.subject) || '(no subject)'}</span>
+        <span class="flex flex-none items-center gap-1.5">
+          {#if m.envelope.attachment_count}<span class="text-faint" title="{m.envelope.attachment_count} attachment(s)"><Icon name="paperclip" size={13} /></span>{/if}
+          {#if m.deleted_on_server}<span class="text-faint" title="Deleted on the mail server; only the backup remains"><Icon name="trash" size={13} /></span>{/if}
+          {#if st}<span class={st[1]} title={m.state === 'stored' ? `Stored on ${m.stored}/${m.destinations} destinations` : (m.error ?? st[2])}><Icon name={st[0]} size={13} /></span>{/if}
+        </span>
+      </span>
+      <span class="untrusted truncate text-[0.8rem] text-faint">{meta}</span>
+    </span>
+  </button>
+{/snippet}

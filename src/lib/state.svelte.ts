@@ -18,13 +18,20 @@ export const live = $state({
   accounts: [] as T.AccountView[],
   destinations: [] as T.DestinationView[],
   jobs: [] as T.JobInfo[],
+  /** Newest discovered messages, at most FOUND_KEEP; the full list is Mail's "New" view. */
   newlyFound: [] as T.MessageSummary[],
+  /** Messages discovered since login, including those dropped from `newlyFound`. */
+  foundCount: 0,
   latestReport: null as T.CheckReport | null,
   notices: [] as { id: number; level: string; message: string }[],
 });
 
 /** Account chosen in the sidebar switcher; '' shows mail from every account. */
 export const scope = $state({ account: '' });
+
+// A first backup discovers every message in the mailbox; the live feed only needs the newest.
+export const FOUND_KEEP = 200;
+const foundIds = new Set<number>();
 
 export const route = $state({ path: location.hash.slice(1) || '/dashboard' });
 
@@ -113,10 +120,7 @@ function handle(ev: T.SyncEvent) {
       break;
     }
     case 'new_message_discovered':
-      if (!live.newlyFound.some((m) => m.id === ev.message.id)) {
-        live.newlyFound.unshift(ev.message);
-        if (live.newlyFound.length > 1000) live.newlyFound.length = 1000;
-      }
+      addFound([ev.message]);
       break;
     case 'message_state_changed': {
       const m = live.newlyFound.find((x) => x.id === ev.id);
@@ -153,6 +157,38 @@ function handle(ev: T.SyncEvent) {
   }
 }
 
+/** Adds discovered messages to the live feed in one update, newest first. */
+function addFound(found: T.MessageSummary[]) {
+  const fresh = found.filter((m) => !foundIds.has(m.id) && foundIds.add(m.id));
+  if (!fresh.length) return;
+  live.foundCount += fresh.length;
+  live.newlyFound = [...fresh.slice(-FOUND_KEEP).reverse(), ...live.newlyFound].slice(0, FOUND_KEEP);
+}
+
+/** A first backup sends discoveries by the hundred; they go into the feed together. Other
+ *  events still apply in order, after the discoveries before them. */
+function handleBatch(events: T.SyncEvent[]) {
+  let found: T.MessageSummary[] = [];
+  for (const ev of events) {
+    if (ev.type === 'new_message_discovered') {
+      found.push(ev.message);
+      continue;
+    }
+    if (found.length) {
+      addFound(found);
+      found = [];
+    }
+    handle(ev);
+  }
+  if (found.length) addFound(found);
+}
+
+export function clearFound() {
+  live.newlyFound = [];
+  live.foundCount = 0;
+  foundIds.clear();
+}
+
 export async function enterApp(me: T.Me) {
   session.me = me;
   session.lockedReason = null;
@@ -160,11 +196,11 @@ export async function enterApp(me: T.Me) {
   route.path = '/dashboard';
   go('/dashboard');
   session.phase = 'app';
-  live.newlyFound = [];
+  clearFound();
   scope.account = '';
   await Promise.all([refreshAccounts(), refreshDestinations(), refreshJobs()]).catch((e) => notify(errorText(e), 'error'));
   live.latestReport = await api.get<T.CheckReport | null>('/checks/latest').catch(() => null);
-  await app.subscribe((batch) => batch.events.forEach(handle));
+  await app.subscribe((batch) => handleBatch(batch.events));
   if (me.skipped_while_locked > 0) {
     notify(`${me.skipped_while_locked} scheduled job(s) were skipped while you were locked.`, 'warning');
   }
