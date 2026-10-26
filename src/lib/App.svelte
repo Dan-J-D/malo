@@ -5,6 +5,8 @@
   import { app } from './api/client';
   import { session, route } from './state.svelte';
   import Notices from './components/Notices.svelte';
+  import ContextMenu from './components/ContextMenu.svelte';
+  import Commands from './components/Commands.svelte';
   import Nav from './components/Nav.svelte';
   import Resizer from './components/Resizer.svelte';
   import { panes, savePanes, navWidth, NAV_DEFAULT, NAV_RAIL, NAV_MAX } from './layout.svelte';
@@ -45,10 +47,12 @@
     session.phase = 'connect';
   });
 
-  const top = $derived('/' + (route.path.split('/')[1] ?? ''));
+  // The page, without its sub-path or query (`/browse?account=…` is still Mail).
+  const top = $derived('/' + (route.path.split(/[/?]/)[1] ?? ''));
 </script>
 
 <Notices />
+<ContextMenu />
 
 {#if session.phase === 'boot'}
   <div class="grid h-screen place-items-center text-muted">Starting…</div>
@@ -57,6 +61,7 @@
 {:else if session.phase === 'login'}
   <Login />
 {:else}
+  <Commands />
   <div class="grid h-screen bg-frame" style="grid-template-columns: {panes.nav}px minmax(0, 1fr)">
     <div class="relative min-w-0">
       <Nav />

@@ -4,6 +4,9 @@
   import type * as T from '../api/types';
   import { live, route, go, attempt, refreshAccounts, errorText, notify } from '../state.svelte';
   import { ago, bytes } from '../format';
+  import { commands } from '../commands.svelte';
+  import { contextMenu } from '../menu.svelte';
+  import { accountMenu, removeAccount } from '../actions';
 
   let presets: T.AccountPreset[] = $state([]);
   onMount(async () => {
@@ -130,11 +133,18 @@
     go('/accounts');
   }
 
-  async function remove(a: T.AccountView) {
-    if (!confirm(`Remove "${a.name}"? Backups already written stay on your destinations; only the local index rows are deleted.`)) return;
-    await attempt(() => api.del(`/accounts/${a.id}`), 'Account removed');
-    await refreshAccounts();
-  }
+  commands(() => wizard
+    ? [
+        { id: 'account-cancel', group: 'Account', label: 'Cancel', keys: 'escape', run: close },
+        { id: 'account-test', group: 'Account', label: 'Test connection', keys: 'mod+t', anywhere: true, disabled: busy || step === 1, run: runTest },
+        { id: 'account-save', group: 'Account', label: verified ? (editingId ? 'Save changes' : 'Add account') : 'Test connection', keys: 'mod+enter, mod+s', anywhere: true,
+          disabled: busy || step === 1 || (verified && !form.name.trim()), run: () => (verified ? save() : runTest()) },
+        ...presets.map((p) => ({ id: `preset-${p.id}`, group: 'Provider', label: p.name, disabled: step !== 1, run: () => pick(p) })),
+      ]
+    : [
+        { id: 'account-new', group: 'Accounts', label: 'Add account', keys: 'n', run: () => go('/accounts/new') },
+        ...live.accounts.filter((a) => !a.imported).map((a) => ({ id: `edit-${a.id}`, group: 'Accounts', label: `Edit ${a.name}`, run: () => go(`/accounts/edit/${a.id}`) })),
+      ]);
 </script>
 
 {#if !wizard}
@@ -144,7 +154,8 @@
       <thead><tr><th>Name</th><th>Server</th><th>Auth</th><th>Schedule</th><th>Last backup</th><th>Stored</th><th></th></tr></thead>
       <tbody>
         {#each live.accounts as a}
-          <tr>
+          <tr tabindex="0" class="clickable" {@attach contextMenu(() => accountMenu(a))}
+            ondblclick={() => !a.imported && go(`/accounts/edit/${a.id}`)} onkeydown={(e) => e.key === 'Enter' && e.target === e.currentTarget && !a.imported && go(`/accounts/edit/${a.id}`)}>
             <td><strong>{a.name}</strong>{#if a.imported} <span class="pill muted">imported</span>{/if}</td>
             <td class="small">{a.username}<br /><span class="muted">{a.host}:{a.port} · {a.tls}</span></td>
             <td>{a.auth.kind === 'oauth2' ? `OAuth2 (${a.auth.provider})` : 'Password'}</td>
@@ -153,7 +164,7 @@
             <td class="small">{Number(a.message_count).toLocaleString()} · {bytes(a.stored_bytes)}</td>
             <td class="right">
               {#if !a.imported}<button onclick={() => go(`/accounts/edit/${a.id}`)}>Edit</button>{/if}
-              <button onclick={() => remove(a)}>Remove</button>
+              <button onclick={() => removeAccount(a)}>Remove</button>
             </td>
           </tr>
         {:else}

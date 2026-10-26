@@ -5,6 +5,8 @@
   import { live, attempt } from '../state.svelte';
   import { when } from '../format';
   import HealthMatrix from '../components/HealthMatrix.svelte';
+  import { commands } from '../commands.svelte';
+  import { contextMenu } from '../menu.svelte';
 
   let reports: T.CheckReport[] = $state([]);
   let selected: T.CheckReport | null = $state(null);
@@ -27,6 +29,24 @@
   const check = (deep: boolean) => attempt(() => api.post('/jobs', { kind: { type: 'check', scope: scopeValue(), deep } }), 'Check queued');
   const repair = () => attempt(() => api.post('/jobs', { kind: { type: 'repair', scope: scopeValue() } }), 'Repair queued');
   const shown = $derived(selected ?? live.latestReport ?? reports[0] ?? null);
+
+  // Moves the shown report through the history.
+  function stepReport(d: number) {
+    const i = reports.findIndex((r) => r.id === shown?.id);
+    const r = reports[Math.min(reports.length - 1, Math.max(0, i + d))];
+    if (r) selected = r;
+  }
+
+  commands(() => [
+    { id: 'check-quick', group: 'Integrity', label: 'Quick verify now', keys: 'v', run: () => check(false) },
+    { id: 'check-deep', group: 'Integrity', label: 'Deep verify now', keys: 'shift+v', run: () => check(true) },
+    { id: 'check-repair', group: 'Integrity', label: 'Verify & repair', run: repair },
+    { id: 'report-next', group: 'Integrity', label: 'Older report', keys: 'j, arrowdown', run: () => stepReport(1) },
+    { id: 'report-prev', group: 'Integrity', label: 'Newer report', keys: 'k, arrowup', run: () => stepReport(-1) },
+    { id: 'scope-all', group: 'Integrity scope', label: 'Scope: everything', disabled: scope === 'all', run: () => (scope = 'all') },
+    ...live.accounts.map((a) => ({ id: `scope-a-${a.id}`, group: 'Integrity scope', label: `Scope: account ${a.name}`, disabled: scope === 'a:' + a.id, run: () => (scope = 'a:' + a.id) })),
+    ...live.destinations.map((d) => ({ id: `scope-d-${d.id}`, group: 'Integrity scope', label: `Scope: destination ${d.name}`, disabled: scope === 'd:' + d.id, run: () => (scope = 'd:' + d.id) })),
+  ]);
 </script>
 
 <h1>Integrity</h1>
@@ -53,7 +73,8 @@
     <thead><tr><th>When</th><th>Kind</th><th>Scope</th><th>Result</th><th>Repaired</th></tr></thead>
     <tbody>
       {#each reports as r (r.id)}
-        <tr class="clickable" onclick={() => (selected = r)}>
+        <tr class="clickable" tabindex="0" aria-selected={shown?.id === r.id} onclick={() => (selected = r)} onkeydown={(e) => e.key === 'Enter' && (selected = r)}
+          {@attach contextMenu(() => [{ label: 'Show this report', icon: 'file', run: () => (selected = r) }])}>
           <td>{when(r.created_at)}</td>
           <td>{r.deep ? 'deep' : 'quick'}</td>
           <td class="small">{r.scope.scope}</td>

@@ -5,6 +5,9 @@
   import { live, session, attempt, accountName, destName, go } from '../state.svelte';
   import { ago, bytes, until, when, jobLabel } from '../format';
   import HealthMatrix from '../components/HealthMatrix.svelte';
+  import { commands } from '../commands.svelte';
+  import { contextMenu } from '../menu.svelte';
+  import { accountMenu, backup as backupAccount, verifyAll } from '../actions';
 
   let schedules: T.ScheduledJob[] = $state([]);
   onMount(async () => {
@@ -15,12 +18,11 @@
   const totalBytes = $derived(live.accounts.reduce((n, a) => n + Number(a.stored_bytes), 0));
   const running = $derived(live.jobs.filter((j) => j.state === 'running' || j.state === 'queued'));
 
-  function backup(id: string) {
-    attempt(() => api.post('/jobs', { kind: { type: 'backup', account_id: id } }), 'Backup queued');
-  }
-  function verify(deep: boolean) {
-    attempt(() => api.post('/jobs', { kind: { type: 'check', scope: { scope: 'all' }, deep } }), 'Check queued');
-  }
+  const verify = verifyAll;
+  commands(() => [
+    { id: 'verify-quick', group: 'Overview', label: 'Quick verify everything', keys: 'v', run: () => verify(false) },
+    { id: 'verify-deep', group: 'Overview', label: 'Deep verify everything', keys: 'shift+v', run: () => verify(true) },
+  ]);
 </script>
 
 <h1>Overview</h1>
@@ -43,7 +45,9 @@
 <h2>Accounts</h2>
 <div class="cards">
   {#each live.accounts as a}
-    <div class="panel">
+    <!-- Focusable so Shift+F10 or the Menu key opens its actions. -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+    <div class="panel" tabindex="0" role="group" aria-label={a.name} {@attach contextMenu(() => accountMenu(a))}>
       <div class="row"><strong class="grow">{a.name}</strong>
         {#if a.imported}<span class="pill muted">imported</span>
         {:else if !a.enabled}<span class="pill muted">paused</span>
@@ -59,7 +63,7 @@
           {#if a.policy.armed && a.purge_blocked}<span class="pill bad" title={a.purge_blocked}>blocked</span>{/if}</div>
       </div>
       {#if !a.imported}
-        <div class="row" style="margin-top: 0.75rem"><button onclick={() => backup(a.id)}>Back up now</button><button onclick={() => go(`/browse?account=${a.id}`)}>Browse</button></div>
+        <div class="row" style="margin-top: 0.75rem"><button onclick={() => backupAccount(a)}>Back up now</button><button onclick={() => go(`/browse?account=${a.id}`)}>Browse</button></div>
       {/if}
     </div>
   {/each}

@@ -878,7 +878,7 @@ pub async fn mark_reviewed(u: Unlocked, Json(req): Json<ReviewedRequest>) -> Api
             .index
             .mark_reviewed(&[], Some(req.account_id.as_deref()))?
     } else {
-        u.user.index.mark_reviewed(&req.ids, None)?
+        u.user.index.set_reviewed(&req.ids, req.reviewed)?
     };
     Ok(Json(n))
 }

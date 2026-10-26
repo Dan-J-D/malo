@@ -5,6 +5,8 @@
   import { bytes } from '../format';
   import Modal from '../components/Modal.svelte';
   import KeyValue from '../components/KeyValue.svelte';
+  import { commands, type Command } from '../commands.svelte';
+  import { contextMenu, copy, type Entry } from '../menu.svelte';
 
   type Field = { key: string; label: string; secret?: boolean; placeholder?: string };
   const schemes: Record<string, { label: string; fields: Field[] }> = {
@@ -114,6 +116,28 @@
   function verify(d: T.DestinationView, deep: boolean) {
     attempt(() => api.post('/jobs', { kind: { type: 'check', scope: { scope: 'destination', destination_id: d.id }, deep } }), 'Check queued');
   }
+
+  const destMenu = (d: T.DestinationView): Entry[] => [
+    { label: 'Edit…', icon: 'pencil', run: () => edit(d) },
+    '-',
+    { label: 'Quick verify', icon: 'shield', run: () => verify(d, false) },
+    { label: 'Deep verify', icon: 'shield', run: () => verify(d, true) },
+    { label: 'Rebuild index from here…', icon: 'database', run: () => rebuild(d) },
+    '-',
+    d.options.bucket && { label: 'Copy bucket name', icon: 'copy', run: () => copy(d.options.bucket!, 'Bucket copied') },
+    { label: 'Remove…', icon: 'x', danger: true, run: () => remove(d) },
+  ];
+
+  commands(() => [
+    { id: 'dest-new', group: 'Destinations', label: 'Add destination', keys: 'n', run: create },
+    { id: 'dest-rebuild-all', group: 'Destinations', label: 'Rebuild index from all destinations', disabled: live.destinations.length < 2, run: rebuildAll },
+    { id: 'dest-test', group: 'Destination', label: 'Test destination', keys: 'mod+t', anywhere: true, disabled: !open || busy, run: runTest },
+    { id: 'dest-save', group: 'Destination', label: 'Save destination', keys: 'mod+enter, mod+s', anywhere: true, disabled: !open || busy || !form.name, run: save },
+    ...live.destinations.flatMap((d): Command[] => [
+      { id: `dest-edit-${d.id}`, group: 'Destinations', label: `Edit ${d.name}`, run: () => edit(d) },
+      { id: `dest-verify-${d.id}`, group: 'Destinations', label: `Verify ${d.name}`, run: () => verify(d, false) },
+    ]),
+  ]);
 </script>
 
 <div class="row"><h1 class="grow">Destinations</h1>{#if live.destinations.length > 1}<button onclick={rebuildAll}>Rebuild index from all</button>{/if}<button class="primary" onclick={create}>Add destination</button></div>
@@ -121,7 +145,9 @@
 
 <div class="cards">
   {#each live.destinations as d}
-    <div class="panel">
+    <!-- Focusable so Shift+F10 or the Menu key opens its actions. -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+    <div class="panel" tabindex="0" role="group" aria-label={d.name} {@attach contextMenu(() => destMenu(d))}>
       <div class="row"><strong class="grow">{d.name}</strong>
         {#if d.encrypt}<span class="pill ok">encrypted</span>{:else}<span class="pill warn">plain</span>{/if}
         {#if d.health}{#if d.health.ok}<span class="pill ok">healthy</span>{:else}<span class="pill bad">problems</span>{/if}{/if}

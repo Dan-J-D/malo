@@ -1,7 +1,8 @@
 <script lang="ts">
   import { api } from '../api/client';
   import type * as T from '../api/types';
-  import { live, attempt, refreshAccounts, destName, notify } from '../state.svelte';
+  import { live, route, attempt, refreshAccounts, destName, notify } from '../state.svelte';
+  import { commands } from '../commands.svelte';
   import { bytes, when } from '../format';
   import Modal from '../components/Modal.svelte';
 
@@ -15,9 +16,21 @@
   let arming = $state(false);
   let confirmName = $state('');
 
+  // `#/purge?account=…` (from an account's menu) opens that account's policy.
   $effect(() => {
-    if (!accountId && live.accounts.length) accountId = live.accounts.find((a) => !a.imported)?.id ?? '';
+    const want = new URLSearchParams(route.path.split('?')[1] ?? '').get('account');
+    if (want && live.accounts.some((a) => a.id === want)) accountId = want;
+    else if (!accountId && live.accounts.length) accountId = live.accounts.find((a) => !a.imported)?.id ?? '';
   });
+
+  commands(() => [
+    { id: 'purge-save', group: 'Purge', label: 'Save policy', keys: 'mod+s', anywhere: true, disabled: !dirty || arming, run: save },
+    { id: 'purge-dry', group: 'Purge', label: 'Run dry run', keys: 'd', disabled: dirty || !!dryRunJob || !account, run: dryRun },
+    { id: 'purge-disarm', group: 'Purge', label: 'Disarm purge', disabled: !account?.policy.armed, run: disarm },
+    { id: 'purge-arm', group: 'Purge', label: 'Arm purge…', disabled: !preview || !!preview.blocked_reason || !!account?.policy.armed, run: () => (arming = true) },
+    { id: 'purge-arm-confirm', group: 'Purge', label: 'Arm', keys: 'mod+enter', anywhere: true, disabled: !arming || confirmName !== account?.name, run: arm },
+    ...live.accounts.filter((a) => !a.imported).map((a) => ({ id: `purge-acc-${a.id}`, group: 'Purge', label: `Purge policy of ${a.name}`, disabled: a.id === accountId, run: () => (accountId = a.id) })),
+  ]);
 
   $effect(() => {
     if (!account) return;

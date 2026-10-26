@@ -588,6 +588,13 @@ pub struct ReviewedRequest {
     #[serde(default)]
     pub all: bool,
     pub account_id: Option<String>,
+    /// False marks the messages unread again. Only applies to `ids`, never to `all`.
+    #[serde(default = "yes")]
+    pub reviewed: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

@@ -5,6 +5,7 @@
   import { session, attempt, notify, refreshMe, errorText } from '../state.svelte';
   import LocalData from '../components/LocalData.svelte';
   import DangerConfirm from '../components/DangerConfirm.svelte';
+  import { commands } from '../commands.svelte';
 
   let settings: T.UserSettings | null = $state(null);
   let oldPw = $state('');
@@ -54,6 +55,12 @@
   }
 
   let deleting = $state(false);
+
+  commands(() => [
+    { id: 'settings-save', group: 'Settings', label: 'Save settings', keys: 'mod+s', anywhere: true, disabled: !settings || deleting, run: saveSettings },
+    { id: 'settings-kit', group: 'Settings', label: 'Save recovery kit…', run: exportKit },
+    { id: 'settings-switch', group: 'Settings', label: 'Switch server', run: switchServer },
+  ]);
 
   async function deleteAccount(password: string) {
     const name = session.me!.username;

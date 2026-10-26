@@ -341,6 +341,7 @@ async fn backup_two_users_byte_identical_and_isolated() {
                 ids: vec![],
                 all: true,
                 account_id: Some(acc.id.clone()),
+                reviewed: true,
             },
         )
         .await;

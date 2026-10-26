@@ -1,8 +1,10 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { api, qs } from '../api/client';
+  import { api, app, qs } from '../api/client';
   import type * as T from '../api/types';
-  import { live, route, scope, go, attempt, accountName } from '../state.svelte';
+  import { live, route, scope, go, attempt, accountName, setReviewed } from '../state.svelte';
+  import { commands, type Command } from '../commands.svelte';
+  import { contextMenu, menuUnder, copy, type Entry } from '../menu.svelte';
   import { reveal, shortDate } from '../format';
   import { panes, savePanes, LIST_MIN, LIST_MAX, LIST_DEFAULT } from '../layout.svelte';
   import Viewer from '../components/Viewer.svelte';
@@ -52,9 +54,14 @@
     mailbox = '';
   });
 
+  // Also reloaded after marking mail, for the per-mailbox counts of new messages.
+  function loadBoxes() {
+    const a = account;
+    attempt(() => api.get<T.MailboxInfo[]>(`/mailboxes${qs({ account: a })}`)).then((b) => { if (a === account) boxes = b ?? []; });
+  }
   $effect(() => {
     void account;
-    attempt(() => api.get<T.MailboxInfo[]>(`/mailboxes${qs({ account })}`)).then((b) => (boxes = b ?? []));
+    untrack(loadBoxes);
   });
 
   // ── Virtual list ──
@@ -152,10 +159,14 @@
     searchTimer = setTimeout(reset, 300);
   }
 
-  /** Mutates rows in place, then republishes the page map (it isn't deeply reactive). */
+  /** Applies `f` to copies of the rows and republishes the pages. The page map isn't deeply
+   *  reactive, and a row only redraws when it is a new object. */
   function touch(f: (m: T.MessageSummary) => void) {
-    Object.values(pages).forEach((rows) => rows.forEach(f));
-    pages = { ...pages };
+    pages = Object.fromEntries(Object.entries(pages).map(([p, rows]) => [p, rows.map((m) => {
+      const c = { ...m };
+      f(c);
+      return c.reviewed === m.reviewed ? m : c;
+    })]));
   }
 
   // Index of the open message in the whole list, when it's loaded.
@@ -177,10 +188,27 @@
   }
 
   async function markAll() {
-    await attempt(() => api.post('/messages/reviewed', { ids: [], all: true, account_id: account || null }), 'Marked as reviewed');
+    await attempt(() => api.post('/messages/reviewed', { ids: [], all: true, account_id: account || null }), 'Marked as read');
     live.newlyFound.forEach((m) => { if (!account || m.account_id === account) m.reviewed = true; });
     if (newOnly) reset();
     else touch((m) => (m.reviewed = true));
+    loadBoxes();
+  }
+
+  async function mark(m: T.MessageSummary, reviewed: boolean) {
+    if (!(await setReviewed([m.id], reviewed))) return;
+    touch((x) => { if (x.id === m.id) x.reviewed = reviewed; });
+    loadBoxes();
+  }
+
+  function fromSender(m: T.MessageSummary) {
+    q = m.envelope.from;
+    reset();
+  }
+
+  function cycleSort() {
+    const i = sorts.findIndex(([k]) => k === sort);
+    setSort(sorts[(i + 1) % sorts.length][0]);
   }
 
   /** Scrolls just enough to show row `i` (it may not be rendered yet, so no scrollIntoView). */
@@ -191,8 +219,11 @@
     else if (top + ROW > scroller.scrollTop + viewH) scroller.scrollTop = top + ROW - viewH;
   }
 
-  async function step(d: number) {
-    const i = index < 0 ? (d > 0 ? 0 : -1) : index + d;
+  function step(d: number) {
+    return openAt(index < 0 ? (d > 0 ? 0 : -1) : index + d);
+  }
+
+  async function openAt(i: number) {
     if (i < 0 || i >= total) return;
     if (!at(i)) await fetchPage(Math.floor(i / PAGE));
     const m = at(i);
@@ -202,17 +233,62 @@
     }
   }
 
-  function keys(e: KeyboardEvent) {
-    const t = e.target as HTMLElement;
-    if (t.closest('input, select, textarea, [role="separator"]')) {
-      if (e.key === 'Escape') t.blur();
-      return;
-    }
-    if (e.key === '/' || (e.key === 'k' && (e.metaKey || e.ctrlKey))) { e.preventDefault(); searchEl?.focus(); }
-    else if (e.key === 'j' || e.key === 'ArrowDown') { e.preventDefault(); step(1); }
-    else if (e.key === 'k' || e.key === 'ArrowUp') { e.preventDefault(); step(-1); }
-    else if (e.key === 'Escape' && openId !== null) go('/browse');
+  /** Everything that can be done with one message, for its context menu and the "." shortcut. */
+  function messageMenu(m: T.MessageSummary, i: number): Entry[] {
+    const subject = reveal(m.envelope.subject);
+    return [
+      openId !== m.id && { label: 'Open', icon: 'mail-open', run: () => open(m, i) },
+      m.reviewed
+        ? { label: 'Mark as unread', icon: 'mail', keys: 'shift+u', run: () => mark(m, false) }
+        : { label: 'Mark as read', icon: 'check', keys: 'shift+i', run: () => mark(m, true) },
+      '-',
+      { label: 'Search mail from this sender', icon: 'search', run: () => fromSender(m) },
+      !account && { label: `Show only ${accountName(m.account_id)}`, icon: 'at', run: () => (scope.account = m.account_id) },
+      '-',
+      { label: 'Copy sender address', icon: 'copy', run: () => copy(m.envelope.from, 'Address copied') },
+      subject && { label: 'Copy subject', icon: 'copy', run: () => copy(subject, 'Subject copied') },
+      { label: 'Save .eml…', icon: 'download', run: () => attempt(() => app.saveRaw(m.id)) },
+    ];
   }
+
+  // Right-click on the list itself, around the rows.
+  const listMenu = (): Entry[] => [
+    { label: newOnly ? 'Show all messages' : 'Show only new messages', icon: 'mail', keys: 'n', run: () => (newOnly = !newOnly) },
+    { label: 'Mark all read', icon: 'checks', keys: 'shift+a', run: markAll },
+    { label: 'Reload list', icon: 'refresh', keys: 'r', run: reset },
+    '-',
+    ...sorts.map(([k, label]): Entry => ({ label: `Sort: ${label}`, icon: k === sort ? 'check' : undefined, run: () => setSort(k) })),
+  ];
+
+  const current = $derived(index >= 0 ? at(index) : undefined);
+  const rowAt = (i: number) => scroller?.querySelector(`[aria-posinset="${i + 1}"]`);
+
+  commands(() => {
+    const m = current;
+    return [
+      { id: 'next', group: 'Mail', label: 'Next message', keys: 'j, arrowdown', run: () => step(1) },
+      { id: 'prev', group: 'Mail', label: 'Previous message', keys: 'k, arrowup', run: () => step(-1) },
+      { id: 'first', group: 'Mail', label: 'First message', keys: 'home', run: () => openAt(0) },
+      { id: 'last', group: 'Mail', label: 'Last message', keys: 'end', run: () => openAt(total - 1) },
+      { id: 'close', group: 'Mail', label: 'Close message', keys: 'escape', disabled: openId === null, run: () => go('/browse') },
+      { id: 'search', group: 'Mail', label: 'Search', keys: '/', run: () => searchEl?.focus() },
+      { id: 'search-f', group: 'Mail', label: 'Search', keys: 'mod+f', anywhere: true, hidden: true, run: () => searchEl?.focus() },
+      { id: 'actions', group: 'Mail', label: 'Message actions…', keys: '.', disabled: !m, run: () => m && menuUnder(rowAt(index) ?? scroller, messageMenu(m, index)) },
+      { id: 'mark-unread', group: 'Mail', label: 'Mark as unread', keys: 'shift+u', disabled: !m?.reviewed, run: () => m && mark(m, false) },
+      { id: 'mark-read', group: 'Mail', label: 'Mark as read', keys: 'shift+i', disabled: !m || m.reviewed, run: () => m && mark(m, true) },
+      { id: 'mark-all', group: 'Mail', label: 'Mark all in this view read', keys: 'shift+a', run: markAll },
+      { id: 'from-sender', group: 'Mail', label: 'Search mail from this sender', disabled: !m, run: () => m && fromSender(m) },
+      { id: 'copy-sender', group: 'Mail', label: 'Copy sender address', disabled: !m, run: () => m && copy(m.envelope.from, 'Address copied') },
+      { id: 'new-only', group: 'Mail', label: newOnly ? 'Show all messages' : 'Show only new messages', keys: 'n', run: () => (newOnly = !newOnly) },
+      { id: 'reload', group: 'Mail', label: 'Reload list', keys: 'r', run: reset },
+      { id: 'sort', group: 'Mail', label: 'Next sort order', keys: 's', run: cycleSort },
+      ...sorts.map(([k, label]): Command => ({ id: `sort-${k}`, group: 'Mail', label: `Sort by ${label}`, disabled: k === sort, run: () => setSort(k) })),
+      ...(account ? [{ id: 'box-all', group: 'Mailboxes', label: 'All mailboxes', disabled: mailbox === '', run: () => (mailbox = '') }] : []),
+      ...(account ? boxes : []).map((b): Command => ({
+        id: `box-${b.name}`, group: 'Mailboxes', label: reveal(b.display_name), disabled: mailbox === b.name, run: () => (mailbox = b.name),
+      })),
+    ];
+  });
 
   const newTotal = $derived(boxes.reduce((n, b) => n + Number(b.new_count), 0));
   const title = $derived(account && mailbox ? reveal(boxes.find((b) => b.name === mailbox)?.display_name.split('/').pop() ?? mailbox) : account ? accountName(account) : 'All mail');
@@ -227,8 +303,6 @@
   };
 </script>
 
-<svelte:window onkeydown={keys} />
-
 <div class="grid h-full gap-2" style="grid-template-columns: min({panes.list}px, 60%) minmax(0, 1fr)">
   <!-- Message list -->
   <div class="relative min-h-0 min-w-0">
@@ -236,8 +310,8 @@
     <header class="flex items-center gap-2 border-b border-line px-4 py-3">
       <Icon name="inbox" />
       <h1 class="m-0 flex-1 truncate text-base font-semibold">{title}</h1>
-      <button class="bg-transparent px-2 py-1 text-muted hover:text-fg" onclick={markAll} title="Mark everything in this view as reviewed">
-        <Icon name="checks" size={15} /> Mark all reviewed
+      <button class="bg-transparent px-2 py-1 text-muted hover:text-fg" onclick={markAll} title="Mark everything in this view as read (Shift+A)">
+        <Icon name="checks" size={15} /> Mark all read
       </button>
     </header>
 
@@ -254,7 +328,7 @@
           All
         </button>
         <button class="flex-1 justify-center py-1.5 {newOnly ? 'bg-accent! text-white' : 'bg-raised text-muted'}" onclick={() => (newOnly = true)}
-          title="Messages that arrived since you last reviewed">
+          title="Messages you haven't read yet">
           New <span class="tabular-nums opacity-75">{newTotal}</span>
         </button>
       </div>
@@ -290,7 +364,7 @@
 
     <div bind:this={scroller} bind:clientHeight={viewH} onscroll={() => (scrollTop = scroller?.scrollTop ?? 0)}
       class="min-h-0 flex-1 overflow-y-auto px-2 pb-2 [scroll-behavior:auto] transition-opacity duration-200 {loading ? 'opacity-50' : ''}"
-      role="listbox" aria-label="Messages" tabindex="-1">
+      role="listbox" aria-label="Messages" tabindex="-1" {@attach contextMenu(listMenu)}>
       {#if total === 0}
         <p class="m-0 px-3 py-10 text-center text-muted">{loading ? 'Loading…' : q ? 'No messages match this search.' : newOnly ? 'Nothing new since your last visit.' : 'No messages backed up here yet.'}</p>
       {:else}
@@ -335,7 +409,7 @@
         <div class="flex max-w-xs flex-col items-center gap-3 text-muted">
           <span class="grid size-12 place-items-center rounded-full bg-raised text-faint"><Icon name="inbox" size={22} /></span>
           <p class="m-0 text-fg">Select a message to read it</p>
-          <p class="m-0 text-[0.85rem]">Messages open in a sandboxed viewer: plain text first, no remote content, links only after you confirm. Use <kbd class="rounded bg-raised px-1">j</kbd> and <kbd class="rounded bg-raised px-1">k</kbd> to move through the list.</p>
+          <p class="m-0 text-[0.85rem]">Messages open in a sandboxed viewer: plain text first, no remote content, links only after you confirm. Use <kbd class="rounded bg-raised px-1">j</kbd> and <kbd class="rounded bg-raised px-1">k</kbd> to move through the list, right-click a message for its actions, and press <kbd class="rounded bg-raised px-1">?</kbd> for every shortcut.</p>
         </div>
       </div>
     {/if}
@@ -346,10 +420,11 @@
   {@const sender = reveal(m.envelope.from_name ?? m.envelope.from) || '(unknown sender)'}
   {@const st = stateIcon[m.state]}
   {@const meta = [!account ? accountName(m.account_id) : '', reveal(m.labels.join(', '))].filter(Boolean).join(' · ')}
-  <button class="flex h-full w-full items-start gap-3 overflow-hidden rounded-lg px-2.5 py-2.5 text-left active:scale-[0.99] {openId === m.id ? 'bg-raised!' : 'bg-transparent'}" onclick={() => open(m, i)}>
+  <button class="flex h-full w-full items-start gap-3 overflow-hidden rounded-lg px-2.5 py-2.5 text-left active:scale-[0.99] {openId === m.id ? 'bg-raised!' : 'bg-transparent'}" onclick={() => open(m, i)}
+    {@attach contextMenu(() => messageMenu(m, i))}>
     <span class="relative mt-0.5">
       <Avatar name={sender} seed={m.envelope.from} size={34} />
-      {#if !m.reviewed}<span class="absolute -right-0.5 -bottom-0.5 size-2.5 rounded-full bg-accent-2 ring-2 ring-panel" title="New"></span>{/if}
+      {#if !m.reviewed}<span class="absolute -right-0.5 -bottom-0.5 size-2.5 rounded-full bg-accent-2 ring-2 ring-panel" title="Unread"></span>{/if}
     </span>
     <span class="flex min-w-0 flex-1 flex-col gap-0.5">
       <span class="flex items-baseline gap-2">

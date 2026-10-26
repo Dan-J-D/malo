@@ -2,12 +2,13 @@
   import { onDestroy, tick } from 'svelte';
   import { fly, slide } from 'svelte/transition';
   import { ms, ease } from '../motion';
-  import { api } from '../api/client';
-  import { session, route, live, scope, go, logout, attempt } from '../state.svelte';
+  import { session, route, live, scope, go, logout } from '../state.svelte';
   import { until } from '../format';
   import Icon from './Icon.svelte';
   import Avatar from './Avatar.svelte';
   import { navRail } from '../layout.svelte';
+  import { contextMenu } from '../menu.svelte';
+  import { accountMenu, backupAll, verifyAll } from '../actions';
 
   // Icon rail: the sidebar dragged narrow. Labels move into tooltips, counts become dots.
   const rail = $derived(navRail());
@@ -75,12 +76,14 @@
     place();
   });
 
-  function backupAll() {
-    attempt(
-      () => Promise.all(backupable.map((a) => api.post('/jobs', { kind: { type: 'backup', account_id: a.id } }))),
-      backupable.length === 1 ? 'Backup queued' : `${backupable.length} backups queued`,
-    );
-  }
+  const allMenu = () => [
+    { label: 'Show all mail', icon: 'inbox', run: () => pick('') },
+    { label: 'Back up all accounts now', icon: 'refresh', run: () => { scope.account = ''; backupAll(); } },
+    { label: 'Quick verify everything', icon: 'shield', run: () => verifyAll(false) },
+    '-' as const,
+    { label: 'Add account…', icon: 'plus', run: () => go('/accounts/new') },
+    { label: 'Manage accounts', icon: 'settings', run: () => go('/accounts') },
+  ];
 </script>
 
 <nav bind:this={navEl} class="relative flex h-screen flex-col gap-4 overflow-x-hidden overflow-y-auto pt-3.5 pb-2.5 {rail ? 'px-2' : 'pr-2.5 pl-3'}">
@@ -90,10 +93,10 @@
   <div class="relative flex flex-col gap-3" bind:this={switcher}>
     <div class="flex items-center gap-1.5 {rail ? 'flex-col' : 'px-1'}">
       <button class="grid size-8 place-items-center rounded-lg p-0 {scope.account === '' ? 'bg-panel text-fg ring-2 ring-accent-2 dark:bg-raised' : 'bg-transparent text-muted hover:text-fg'}"
-        onclick={() => pick('')} title="All accounts" aria-label="All accounts" aria-pressed={scope.account === ''}><Icon name="layers" /></button>
+        onclick={() => pick('')} title="All accounts" aria-label="All accounts" aria-pressed={scope.account === ''} {@attach contextMenu(allMenu)}><Icon name="layers" /></button>
       {#each live.accounts.slice(0, inline) as a (a.id)}
         <button class="relative rounded-full bg-transparent! p-0 hover:scale-110 {scope.account === a.id ? 'ring-2 ring-accent-2 ring-offset-2 ring-offset-frame' : 'opacity-75 hover:opacity-100'}"
-          onclick={() => pick(a.id)} title="{a.name} · {a.username}" aria-label="Show {a.name}" aria-pressed={scope.account === a.id}>
+          onclick={() => pick(a.id)} title="{a.name} · {a.username}" aria-label="Show {a.name}" aria-pressed={scope.account === a.id} {@attach contextMenu(() => accountMenu(a))}>
           <Avatar name={a.name} seed={a.username} size={28} />
           {#if a.last_backup_ok === false}<span class="absolute -right-0.5 -bottom-0.5 size-2.5 rounded-full bg-warn ring-2 ring-frame" title="Last backup had errors"></span>{/if}
         </button>
@@ -123,7 +126,7 @@
         class="absolute top-10 right-0 left-0 z-40 origin-top flex max-h-[70vh] flex-col overflow-y-auto rounded-xl border border-line bg-panel p-1.5 shadow-2xl shadow-black/30" role="menu" aria-label="Accounts">
         {@render accountItem('', 'All accounts', `${total.toLocaleString()} messages in ${live.accounts.length} accounts`)}
         {#each live.accounts as a (a.id)}
-          {@render accountItem(a.id, a.name, `${a.username} · ${Number(a.message_count).toLocaleString()}`)}
+          <div class="contents" {@attach contextMenu(() => accountMenu(a))}>{@render accountItem(a.id, a.name, `${a.username} · ${Number(a.message_count).toLocaleString()}`)}</div>
         {/each}
         <div class="my-1 h-px bg-line"></div>
         <a href="#/accounts" class="flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-muted no-underline! hover:bg-hover hover:text-fg" role="menuitem" onclick={() => (menuOpen = false)}><Icon name="settings" size={15} /> Manage accounts</a>
@@ -133,7 +136,7 @@
   </div>
 
   <button class="w-full justify-center border border-line bg-panel py-2 dark:bg-raised {rail ? 'px-0' : ''}" disabled={backupable.length === 0} onclick={backupAll}
-    title={rail ? 'Back up now' : undefined} aria-label={rail ? 'Back up now' : undefined}>
+    title={rail ? 'Back up now (Shift+B)' : 'Shift+B'} aria-label={rail ? 'Back up now' : undefined}>
     <Icon name="refresh" />{#if !rail} Back up now{/if}
   </button>
 
@@ -171,7 +174,7 @@
   {#if rail}
   <div class="flex flex-col items-center gap-1 border-t border-line pt-3">
     <span title="{session.me?.username} · {session.local ? 'Local server' : session.url} · keys unlocked for {lockIn}"><Avatar name={session.me?.username ?? '?'} size={26} /></span>
-    <button class="bg-transparent p-2 text-muted hover:text-fg" onclick={() => logout(true)} title="Lock now: wipe keys from the server; backups pause until you log in" aria-label="Lock now"><Icon name="lock" size={15} /></button>
+    <button class="bg-transparent p-2 text-muted hover:text-fg" onclick={() => logout(true)} title="Lock now: wipe keys from the server; backups pause until you log in (Ctrl+Shift+L)" aria-label="Lock now"><Icon name="lock" size={15} /></button>
     <button class="bg-transparent p-2 text-muted hover:text-fg" onclick={() => logout(false)} title="Log out" aria-label="Log out"><Icon name="logout" size={15} /></button>
   </div>
   {:else}
@@ -186,7 +189,7 @@
     <div class="text-[0.85rem] text-muted" title="Keys are wiped from server memory when this runs out">Keys unlocked for {lockIn}</div>
     <div class="flex gap-1">
       <button class="bg-transparent px-2 py-1 text-[0.85rem] text-muted hover:text-fg" onclick={() => logout(true)}
-        title="Wipe keys from the server now; backups pause until you log in"><Icon name="lock" size={14} /> Lock now</button>
+        title="Wipe keys from the server now; backups pause until you log in (Ctrl+Shift+L)"><Icon name="lock" size={14} /> Lock now</button>
       <button class="bg-transparent px-2 py-1 text-[0.85rem] text-muted hover:text-fg" onclick={() => logout(false)}><Icon name="logout" size={14} /> Log out</button>
     </div>
   </div>

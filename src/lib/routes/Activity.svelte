@@ -1,6 +1,9 @@
 <script lang="ts">
   import { api } from '../api/client';
-  import { live, attempt, accountName, destName, go, refreshJobs, clearFound, FOUND_KEEP } from '../state.svelte';
+  import type * as T from '../api/types';
+  import { live, scope, attempt, accountName, destName, go, refreshJobs, clearFound, setReviewed, FOUND_KEEP } from '../state.svelte';
+  import { commands } from '../commands.svelte';
+  import { contextMenu, copy, type Entry } from '../menu.svelte';
   import { bytes, when, ago, jobLabel, reveal, shortDate } from '../format';
   import StatusPill from '../components/StatusPill.svelte';
   import Icon from '../components/Icon.svelte';
@@ -11,6 +14,45 @@
   function cancel(id: string) {
     attempt(() => api.del(`/jobs/${id}`), 'Cancelling…');
   }
+
+  const accountOf = (j: T.JobInfo) => ('account_id' in j.kind ? j.kind.account_id : null) as string | null;
+  function again(j: T.JobInfo) {
+    attempt(() => api.post('/jobs', { kind: j.kind }), 'Job queued');
+  }
+
+  function jobMenu(j: T.JobInfo): Entry[] {
+    const acc = accountOf(j);
+    const busy = j.state === 'running' || j.state === 'queued';
+    return [
+      busy && { label: 'Cancel', icon: 'x', danger: true, run: () => cancel(j.id) },
+      // Only jobs that are safe to repeat; a purge is always started from the Purge page.
+      !busy && (j.kind.type === 'backup' || j.kind.type === 'check' || j.kind.type === 'repair') && { label: 'Run again', icon: 'refresh', run: () => again(j) },
+      acc && { label: `Show ${accountName(acc)} in Mail`, icon: 'inbox', run: () => { scope.account = acc; go('/browse'); } },
+      j.error && { label: 'Copy error', icon: 'copy', run: () => copy(j.error!, 'Error copied') },
+      { label: 'Copy job ID', icon: 'copy', run: () => copy(j.id, 'Job ID copied') },
+    ];
+  }
+
+  function foundMenu(m: T.MessageSummary): Entry[] {
+    const ready = m.state === 'stored' || m.state === 'verified';
+    const subject = reveal(m.envelope.subject);
+    return [
+      ready && { label: 'Open in Mail', icon: 'mail-open', run: () => go(`/browse/${m.id}`) },
+      m.reviewed
+        ? { label: 'Mark as unread', icon: 'mail', run: () => setReviewed([m.id], false) }
+        : { label: 'Mark as read', icon: 'check', run: () => setReviewed([m.id], true) },
+      '-',
+      { label: 'Copy sender address', icon: 'copy', run: () => copy(m.envelope.from, 'Address copied') },
+      subject && { label: 'Copy subject', icon: 'copy', run: () => copy(subject, 'Subject copied') },
+    ];
+  }
+
+  commands(() => [
+    { id: 'jobs-refresh', group: 'Activity', label: 'Refresh jobs', keys: 'r', run: () => attempt(refreshJobs) },
+    { id: 'found-clear', group: 'Activity', label: 'Clear the newly found list', disabled: !live.newlyFound.length, run: clearFound },
+    { id: 'jobs-cancel-all', group: 'Activity', label: `Cancel all running jobs (${active.length})`, disabled: !active.length, run: () => active.forEach((j) => cancel(j.id)) },
+  ]);
+
   const stateClass: Record<string, string> = { done: 'ok', failed: 'bad', cancelled: 'warn', skipped_locked: 'muted', running: 'info', queued: 'muted' };
 </script>
 
@@ -19,7 +61,9 @@
 <h2>Running</h2>
 <div class="panel">
   {#each active as j (j.id)}
-    <div class="border-b border-line py-2 last:border-b-0">
+    <!-- Focusable so Shift+F10 or the Menu key opens its actions. -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+    <div class="border-b border-line py-2 last:border-b-0" tabindex="0" role="group" aria-label={jobLabel(j.kind, accountName, destName)} {@attach contextMenu(() => jobMenu(j))}>
       <div class="row">
         <strong class="grow">{jobLabel(j.kind, accountName, destName)}</strong>
         <span class="pill {stateClass[j.state]}">{j.state}</span>
@@ -49,7 +93,7 @@
     {@const ready = m.state === 'stored' || m.state === 'verified'}
     {@const sender = reveal(m.envelope.from_name ?? m.envelope.from) || '(unknown sender)'}
     <button class="grid w-full grid-cols-[minmax(0,13rem)_minmax(0,1fr)_auto_auto] items-center gap-x-4 rounded-lg bg-transparent px-3 py-2 text-left {ready ? 'hover:bg-hover' : 'cursor-default hover:bg-transparent!'}"
-      onclick={() => ready && go(`/browse/${m.id}`)} title={ready ? 'Open in the safe viewer' : 'Not downloaded yet'}>
+      onclick={() => ready && go(`/browse/${m.id}`)} title={ready ? 'Open in the safe viewer' : 'Not downloaded yet'} {@attach contextMenu(() => foundMenu(m))}>
       <span class="min-w-0 leading-tight">
         <span class="untrusted block truncate">{sender}</span>
         <span class="block truncate text-[0.8rem] text-muted">{accountName(m.account_id)}</span>
@@ -72,7 +116,7 @@
     <thead><tr><th>Job</th><th>State</th><th>Trigger</th><th>Started</th><th>Finished</th><th>Details</th></tr></thead>
     <tbody>
       {#each history as j (j.id)}
-        <tr>
+        <tr tabindex="0" {@attach contextMenu(() => jobMenu(j))}>
           <td>{jobLabel(j.kind, accountName, destName)}</td>
           <td><span class="pill {stateClass[j.state]}">{j.state.replace('_', ' ')}</span></td>
           <td class="small">{j.trigger}</td>

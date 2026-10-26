@@ -6,6 +6,8 @@
   import { bytes, when, reveal } from '../format';
   import { fly } from 'svelte/transition';
   import { ms, ease } from '../motion';
+  import { commands, type Command } from '../commands.svelte';
+  import { contextMenu, copy, type Entry } from '../menu.svelte';
   import Avatar from './Avatar.svelte';
   import Icon from './Icon.svelte';
 
@@ -34,10 +36,10 @@
     void remote;
     load();
   });
-  // Opening a message marks it reviewed ("new since last visit" is tracked by Malo, never via server flags).
+  // Opening a message marks it read (tracked by Malo, never via the mail server's \Seen flag).
   $effect(() => {
     const mid = id;
-    api.post('/messages/reviewed', { ids: [mid], all: false, account_id: null }).catch(() => undefined);
+    api.post('/messages/reviewed', { ids: [mid], all: false, account_id: null, reviewed: true }).catch(() => undefined);
     const nf = live.newlyFound.find((m) => m.id === mid);
     if (nf) nf.reviewed = true;
   });
@@ -108,6 +110,41 @@
     tab = 'source';
     if (!source) source = (await attempt(() => app.rawSource(id))) ?? '';
   }
+
+  const saveRaw = () => attempt(() => app.saveRaw(id));
+  // One of the two is always empty: links come from the HTML when there is HTML, else from the text.
+  const links = $derived([...prepared.links, ...textLinks]);
+
+  function viewMenu(): Entry[] {
+    if (!view) return [];
+    const subject = reveal(view.subject);
+    return [
+      tab !== 'message' && { label: 'Show message', icon: 'mail-open', keys: '1', run: () => (tab = 'message') },
+      tab !== 'headers' && { label: 'Show headers', icon: 'file', keys: '2', run: () => (tab = 'headers') },
+      tab !== 'source' && { label: 'Show source', icon: 'file', keys: '3', run: showSource },
+      '-',
+      view.has_html && { label: showHtml ? 'Show plain text' : 'Show HTML (sanitized)', icon: 'file', keys: 'h', run: () => (showHtml = !showHtml) },
+      showHtml && { label: remote ? 'Block remote images' : 'Load remote images', icon: 'download', keys: 'i', run: () => (remote = !remote) },
+      '-',
+      subject && { label: 'Copy subject', icon: 'copy', run: () => copy(subject, 'Subject copied') },
+      { label: 'Copy sender address', icon: 'copy', run: () => copy(view!.from, 'Address copied') },
+      { label: 'Save .eml…', icon: 'download', keys: 'mod+s', run: saveRaw },
+    ];
+  }
+
+  commands(() => {
+    if (!view) return [];
+    return [
+      { id: 'tab-message', group: 'Message', label: 'Show message', keys: '1', run: () => (tab = 'message') },
+      { id: 'tab-headers', group: 'Message', label: 'Show headers', keys: '2', run: () => (tab = 'headers') },
+      { id: 'tab-source', group: 'Message', label: 'Show source', keys: '3', run: showSource },
+      { id: 'html', group: 'Message', label: showHtml ? 'Show plain text' : 'Show HTML (sanitized)', keys: 'h', disabled: !view.has_html, run: () => (showHtml = !showHtml) },
+      { id: 'remote', group: 'Message', label: remote ? 'Block remote images' : 'Load remote images', keys: 'i', disabled: !showHtml, run: () => (remote = !remote) },
+      { id: 'save-eml', group: 'Message', label: 'Save .eml…', keys: 'mod+s', anywhere: true, run: saveRaw },
+      ...view.attachments.map((a): Command => ({ id: `att-${a.index}`, group: 'Attachments', label: `Save ${reveal(a.filename)}…`, run: () => save(a) })),
+      ...links.map((l): Command => ({ id: `link-${l.n}`, group: 'Links', label: `Open [${l.n}] ${l.href}`, run: () => openLink(l) })),
+    ];
+  });
 </script>
 
 <div class="flex h-12 flex-none items-center gap-1 border-b border-line px-3">
@@ -123,7 +160,7 @@
           onclick={() => (key === 'source' ? showSource() : (tab = key as typeof tab))}>{label}</button>
       {/each}
     </div>
-    <button class="ml-1 border border-line bg-transparent px-2.5 py-1 text-[0.85rem]" onclick={() => attempt(() => app.saveRaw(id))} title="Save the original message, byte for byte">
+    <button class="ml-1 border border-line bg-transparent px-2.5 py-1 text-[0.85rem]" onclick={saveRaw} title="Save the original message, byte for byte (Ctrl+S)">
       <Icon name="download" size={14} /> Save .eml…
     </button>
   {/if}
@@ -136,7 +173,7 @@
     <p class="m-6 text-muted">Loading…</p>
   {:else}
     {#key view.id}
-    <article class="flex flex-col" in:fly={{ y: 8, duration: ms(240), easing: ease }}>
+    <article class="flex flex-col" in:fly={{ y: 8, duration: ms(240), easing: ease }} {@attach contextMenu(viewMenu)}>
       <header class="px-6 pt-5 pb-4">
         <h2 class="subject m-0 text-lg font-medium leading-snug">{reveal(view.subject) || '(no subject)'}</h2>
         <div class="mt-1.5 flex items-center gap-1.5 text-[0.85rem] text-muted"><Icon name="calendar" size={14} /> {when(view.date)}</div>
@@ -158,6 +195,10 @@
           <div class="flex flex-wrap gap-2">
             {#each view.attachments as a}
               <div class="flex max-w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[0.9rem] {a.warnings.length ? 'border-bad/40 bg-bad/8' : 'border-line bg-raised'}"
+                {@attach contextMenu(() => [
+                  { label: 'Save as…', icon: 'download', run: () => save(a) },
+                  { label: 'Copy file name', icon: 'copy', run: () => copy(a.filename, 'File name copied') },
+                ])}
                 title="Declared {a.declared_type} · detected {a.sniffed_type ?? 'unknown'}">
                 <span class={a.warnings.length ? 'text-bad' : 'text-info'}><Icon name={a.warnings.length ? 'alert' : 'file'} size={15} /></span>
                 <span class="untrusted truncate">{reveal(a.filename)}</span>
@@ -173,7 +214,11 @@
       {/if}
 
       <div class="border-t border-line px-6 py-4">
-        <div class="flex items-start gap-3">
+        <div class="flex items-start gap-3" {@attach contextMenu(() => [
+          { label: 'Copy sender address', icon: 'copy', run: () => copy(view!.from, 'Address copied') },
+          view?.from_name && { label: 'Copy sender name', icon: 'copy', run: () => copy(view!.from_name!, 'Name copied') },
+          view?.to.length && { label: 'Copy recipients', icon: 'copy', run: () => copy(view!.to.join(', '), 'Recipients copied') },
+        ])}>
           <Avatar name={reveal(view.from_name || view.from) || '?'} seed={view.from} size={38} />
           <div class="min-w-0 flex-1 text-[0.9rem]">
             <div class="untrusted"><span class="font-medium">{reveal(view.from_name || view.from)}</span>
@@ -213,7 +258,10 @@
           {/if}
         {:else if tab === 'headers'}
           <table class="text-[0.85rem]">
-            <tbody>{#each view.headers as [k, v]}<tr><td class="mono w-48 text-muted">{k}</td><td class="mono">{v}</td></tr>{/each}</tbody>
+            <tbody>{#each view.headers as [k, v]}<tr {@attach contextMenu(() => [
+              { label: 'Copy value', icon: 'copy', run: () => copy(v, 'Header copied') },
+              { label: 'Copy header line', icon: 'copy', run: () => copy(`${k}: ${v}`, 'Header copied') },
+            ])}><td class="mono w-48 text-muted">{k}</td><td class="mono">{v}</td></tr>{/each}</tbody>
           </table>
         {:else}
           <pre class="m-0 font-mono text-[0.8rem] whitespace-pre-wrap break-words">{source || 'Loading…'}</pre>
@@ -228,7 +276,10 @@
   <details class="mt-4 text-[0.85rem]"><summary>{label}</summary>
     <div class="mt-2 flex flex-col gap-1">
       {#each links as l}
-        <div class="flex items-start gap-2 rounded-lg px-2 py-1.5 hover:bg-raised">
+        <div class="flex items-start gap-2 rounded-lg px-2 py-1.5 hover:bg-raised" {@attach contextMenu(() => [
+          { label: 'Open in browser…', icon: 'external', run: () => openLink(l) },
+          { label: 'Copy link', icon: 'copy', run: () => copy(l.href, 'Link copied') },
+        ])}>
           <span class="text-faint tabular-nums">[{l.n}]</span>
           <span class="min-w-0 flex-1"><span class="mono">{l.href}</span>{#if l.text}<br /><span class="text-muted">“{l.text}”</span>{/if}</span>
           <button class="flex-none px-2 py-0.5" onclick={() => openLink(l)}>Open…</button>

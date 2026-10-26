@@ -73,6 +73,14 @@ export async function attempt<R>(fn: () => Promise<R>, success?: string): Promis
   }
 }
 
+/** Marks messages reviewed, or new again. Returns false when the request failed (the error is shown). */
+export async function setReviewed(ids: number[], reviewed: boolean): Promise<boolean> {
+  const r = await attempt(() => api.post<number>('/messages/reviewed', { ids, all: false, account_id: null, reviewed }));
+  if (r === undefined) return false;
+  live.newlyFound.forEach((m) => { if (ids.includes(m.id)) m.reviewed = reviewed; });
+  return true;
+}
+
 export function accountName(id: string): string {
   return live.accounts.find((a) => a.id === id)?.name ?? id.slice(0, 8);
 }

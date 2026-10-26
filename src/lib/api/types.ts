@@ -178,7 +178,11 @@ export type ReviewedRequest = { ids: Array<number>,
 /**
  * Mark everything (optionally of one account) as reviewed.
  */
-all: boolean, account_id: string | null, };
+all: boolean, account_id: string | null, 
+/**
+ * False marks the messages unread again. Only applies to `ids`, never to `all`.
+ */
+reviewed: boolean, };
 
 export type MessageView = { id: number, headers: Array<[string, string]>, from: string, from_name: string | null, to: Array<string>, cc: Array<string>, subject: string, date: string | null, text: string, 
 /**

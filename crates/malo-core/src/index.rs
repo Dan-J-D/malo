@@ -783,6 +783,22 @@ impl Index {
         })
     }
 
+    /// Marks the given messages reviewed, or new again when `reviewed` is false.
+    pub fn set_reviewed(&self, ids: &[i64], reviewed: bool) -> anyhow::Result<u64> {
+        if reviewed {
+            return self.mark_reviewed(ids, None);
+        }
+        self.with(|c| {
+            let tx = c.unchecked_transaction()?;
+            let mut n = 0;
+            for id in ids {
+                n += tx.execute("UPDATE messages SET reviewed=0 WHERE id=?1", [id])?;
+            }
+            tx.commit()?;
+            Ok(n as u64)
+        })
+    }
+
     pub fn account_stats(&self, account: &str) -> anyhow::Result<(u64, u64)> {
         self.with(|c| {
             c.query_row(
@@ -1726,16 +1742,16 @@ mod tests {
             (MessageState::Verified, 2)
         );
         idx.mark_reviewed(&[id], None).unwrap();
-        let (total, _) = idx
-            .list_messages(
-                &MessageQuery {
-                    new_only: true,
-                    ..Default::default()
-                },
-                2,
-            )
-            .unwrap();
+        let new_only = MessageQuery {
+            new_only: true,
+            ..Default::default()
+        };
+        let (total, _) = idx.list_messages(&new_only, 2).unwrap();
         assert_eq!(total, 0);
+        idx.set_reviewed(&[id], false).unwrap();
+        assert_eq!(idx.list_messages(&new_only, 2).unwrap().0, 1);
+        idx.set_reviewed(&[id], true).unwrap();
+        assert_eq!(idx.list_messages(&new_only, 2).unwrap().0, 0);
         // New UIDVALIDITY → new current mailbox row, old one kept.
         let mb2 = idx
             .upsert_mailbox("acc", "INBOX", "INBOX", "INBOX", Some("/"), None, 6)
