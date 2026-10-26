@@ -471,6 +471,7 @@ async fn mail_apps_read_backups_and_send() {
         .put(
             &format!("/accounts/{}/mail-view", acc.id),
             &MailViewSettings {
+                inbox_all_mail: true,
                 split_categories: true,
                 hidden: vec!["Trash".into(), "INBOX".into()],
             },
@@ -498,6 +499,7 @@ async fn mail_apps_read_backups_and_send() {
         .put(
             &format!("/accounts/{}/mail-view", acc.id),
             &MailViewSettings {
+                inbox_all_mail: true,
                 split_categories: true,
                 hidden: vec![],
             },

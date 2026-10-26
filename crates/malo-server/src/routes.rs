@@ -1477,6 +1477,7 @@ fn mail_view_info(user: &UnlockedUser, account: &str) -> anyhow::Result<MailView
                 FolderSource::Mailbox => MailFolderKind::Mailbox,
                 FolderSource::Label(_) => MailFolderKind::Label,
                 FolderSource::Primary => MailFolderKind::Primary,
+                FolderSource::AllMail => MailFolderKind::AllMail,
                 FolderSource::Category(_) => MailFolderKind::Category,
             },
             shown: inbox || !settings.hidden.contains(&f.name),
@@ -1485,6 +1486,7 @@ fn mail_view_info(user: &UnlockedUser, account: &str) -> anyhow::Result<MailView
     }
     Ok(MailViewInfo {
         gmail,
+        inbox_all_mail: settings.inbox_all_mail,
         split_categories: settings.split_categories,
         folders: out,
     })
@@ -1516,6 +1518,7 @@ pub async fn put_mail_view(
     u.user.index.set_imap_settings(
         &id,
         &malo_core::mailview::ViewSettings {
+            inbox_all_mail: req.inbox_all_mail,
             split_categories: req.split_categories,
             hidden,
         },

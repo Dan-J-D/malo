@@ -1934,7 +1934,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
         }
         let upstream = match &folder.source {
             FolderSource::Label(l) if l == "\\Inbox" => "INBOX".to_string(),
-            FolderSource::Primary | FolderSource::Category(_) => "INBOX".to_string(),
+            FolderSource::Primary | FolderSource::AllMail | FolderSource::Category(_) => {
+                "INBOX".to_string()
+            }
             FolderSource::Label(l) => l.clone(),
             FolderSource::Mailbox => folder.name.clone(),
         };

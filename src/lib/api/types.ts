@@ -164,7 +164,7 @@ export type MailViewInfo = {
 /**
  * A Gmail account: it has labels and inbox categories.
  */
-gmail: boolean, split_categories: boolean, folders: Array<MailFolderInfo>, };
+gmail: boolean, inbox_all_mail: boolean, split_categories: boolean, folders: Array<MailFolderInfo>, };
 
 export type MailFolderInfo = { 
 /**
@@ -176,9 +176,13 @@ name: string, display_name: string,
  */
 special_use: string | null, kind: MailFolderKind, shown: boolean, messages: number, };
 
-export type MailFolderKind = "mailbox" | "label" | "primary" | "category";
+export type MailFolderKind = "mailbox" | "label" | "primary" | "all_mail" | "category";
 
 export type MailViewSettings = { 
+/**
+ * Gmail: INBOX shows every message of All Mail, archived ones too.
+ */
+inbox_all_mail: boolean, 
 /**
  * Gmail: INBOX shows Primary only; Social, Promotions, Updates and Forums get folders.
  */

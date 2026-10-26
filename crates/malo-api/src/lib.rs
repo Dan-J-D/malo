@@ -358,6 +358,7 @@ pub struct MailLoginRequest {
 pub struct MailViewInfo {
     /// A Gmail account: it has labels and inbox categories.
     pub gmail: bool,
+    pub inbox_all_mail: bool,
     pub split_categories: bool,
     pub folders: Vec<MailFolderInfo>,
 }
@@ -384,6 +385,8 @@ pub enum MailFolderKind {
     Label,
     /// Gmail's INBOX holding only the Primary category.
     Primary,
+    /// Gmail's INBOX holding all of All Mail.
+    AllMail,
     /// A Gmail inbox category (Social, Promotions, Updates, Forums).
     Category,
 }
@@ -391,6 +394,8 @@ pub enum MailFolderKind {
 /// Which folders mail apps see. Messages a mail app moved keep their place either way.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct MailViewSettings {
+    /// Gmail: INBOX shows every message of All Mail, archived ones too.
+    pub inbox_all_mail: bool,
     /// Gmail: INBOX shows Primary only; Social, Promotions, Updates and Forums get folders.
     pub split_categories: bool,
     /// Raw names of the folders to leave out (INBOX is always shown).

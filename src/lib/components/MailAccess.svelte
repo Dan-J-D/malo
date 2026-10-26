@@ -29,6 +29,7 @@
   };
   function role(f: T.MailFolderInfo): string {
     if (f.kind === 'primary') return 'Primary';
+    if (f.kind === 'all_mail') return 'All mail';
     if (f.kind === 'category') return 'Category';
     return (f.special_use && ROLES[f.special_use]) || (f.kind === 'label' ? 'Label' : '');
   }
@@ -94,9 +95,16 @@
     }
   }
 
-  async function saveView(split: boolean, hidden: string[]) {
+  async function saveView(change: Partial<T.MailViewSettings>) {
+    if (!view) return;
+    const settings: T.MailViewSettings = {
+      inbox_all_mail: view.inbox_all_mail,
+      split_categories: view.split_categories,
+      hidden: view.folders.filter((x) => !x.shown).map((x) => x.name),
+      ...change,
+    };
     try {
-      view = await api.put<T.MailViewInfo>(`/accounts/${account.id}/mail-view`, { split_categories: split, hidden } satisfies T.MailViewSettings);
+      view = await api.put<T.MailViewInfo>(`/accounts/${account.id}/mail-view`, settings);
     } catch (e) {
       error = errorText(e);
     }
@@ -104,8 +112,7 @@
 
   function toggle(f: T.MailFolderInfo, shown: boolean) {
     if (!view) return;
-    const hidden = view.folders.filter((x) => (x.name === f.name ? !shown : !x.shown)).map((x) => x.name);
-    saveView(view.split_categories, hidden);
+    saveView({ hidden: view.folders.filter((x) => (x.name === f.name ? !shown : !x.shown)).map((x) => x.name) });
   }
 
   async function resetView() {
@@ -195,8 +202,10 @@
         <h3>Folders</h3>
         <p class="muted small">Choose what the mail app shows. Moving a message in the mail app (to Spam, a category, Trash or any folder) files it there in Malo's view; the backup and the mail server stay as they are.</p>
         {#if view.gmail}
-          <label class="check"><input type="checkbox" class="switch" checked={view.split_categories} onchange={(e) => view && saveView((e.target as HTMLInputElement).checked, view.folders.filter((x) => !x.shown).map((x) => x.name))} />
-            Separate Gmail categories: INBOX shows Primary; Social, Promotions, Updates and Forums get folders of their own</label>
+          <label class="check"><input type="checkbox" class="switch" checked={view.inbox_all_mail} onchange={(e) => saveView({ inbox_all_mail: (e.target as HTMLInputElement).checked })} />
+            INBOX shows all mail: every message, archived ones too, like Gmail's All Mail</label>
+          <label class="check"><input type="checkbox" class="switch" checked={view.split_categories} onchange={(e) => saveView({ split_categories: (e.target as HTMLInputElement).checked })} />
+            Separate Gmail categories: Social, Promotions, Updates and Forums get folders of their own{view.inbox_all_mail ? '' : ', and INBOX shows Primary'}</label>
         {/if}
         <table class="small">
           <thead><tr><th>Show</th><th>Folder</th><th></th><th class="right">Messages</th></tr></thead>

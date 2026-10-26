@@ -19,6 +19,8 @@ pub enum FolderSource {
     Label(String),
     /// Gmail's inbox without the messages of its other categories.
     Primary,
+    /// Gmail: every message of All Mail (shown as INBOX).
+    AllMail,
     /// The inbox messages of one Gmail category (`social`, `promotions`, `updates`, `forums`).
     Category(String),
 }
@@ -35,8 +37,12 @@ pub struct Folder {
 /// What mail apps see of an account, chosen in the app.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewSettings {
-    /// Gmail: INBOX holds Primary only, the other categories get folders of their own.
+    /// Gmail: INBOX holds every message of All Mail, archived ones too. On by default.
     #[serde(default = "yes")]
+    pub inbox_all_mail: bool,
+    /// Gmail: INBOX holds Primary only, the other categories get folders of their own. Off by
+    /// default: INBOX holds every category, as Gmail's own IMAP has it.
+    #[serde(default)]
     pub split_categories: bool,
     /// Raw names of folders mail apps don't see (INBOX is always shown).
     #[serde(default)]
@@ -50,7 +56,8 @@ fn yes() -> bool {
 impl Default for ViewSettings {
     fn default() -> Self {
         ViewSettings {
-            split_categories: true,
+            inbox_all_mail: true,
+            split_categories: false,
             hidden: vec![],
         }
     }
@@ -199,6 +206,7 @@ const IN_LABEL: &str =
 fn belongs(source: &FolderSource) -> (String, Vec<String>) {
     match source {
         FolderSource::Mailbox => ("mb.name=?2".into(), vec![]),
+        FolderSource::AllMail => ("mb.special_use='\\All'".into(), vec![]),
         FolderSource::Label(l) => (IN_LABEL.into(), vec![l.clone()]),
         FolderSource::Primary => (
             format!("{IN_LABEL} AND g.category IS NULL"),
@@ -298,7 +306,15 @@ impl Index {
                     labels.extend(split_list(l?));
                 }
                 let gmail = !labels.is_empty();
-                if gmail && settings.split_categories {
+                if gmail && settings.inbox_all_mail {
+                    labels.remove("\\Inbox");
+                    out.push(Folder {
+                        name: "INBOX".into(),
+                        delimiter: delimiter.clone(),
+                        special_use: None,
+                        source: FolderSource::AllMail,
+                    });
+                } else if gmail && settings.split_categories {
                     labels.insert("\\Inbox".into());
                 }
                 for label in labels {
@@ -308,7 +324,10 @@ impl Index {
                     if out.iter().any(|f| f.name.eq_ignore_ascii_case(&name)) {
                         continue;
                     }
-                    let source = if label == "\\Inbox" && settings.split_categories {
+                    let source = if label == "\\Inbox"
+                        && settings.split_categories
+                        && !settings.inbox_all_mail
+                    {
                         FolderSource::Primary
                     } else {
                         FolderSource::Label(label)
@@ -757,6 +776,34 @@ mod tests {
         let mut found = std::collections::HashMap::new();
         found.insert(3u32, "social");
         assert_eq!(ix.set_categories(all.id, 1, &found).unwrap(), 1);
+        // By default INBOX is all of All Mail.
+        let settings = ix.imap_settings("a").unwrap();
+        assert!(settings.inbox_all_mail && !settings.split_categories);
+        let folders = ix.imap_folders("a").unwrap();
+        let names: Vec<&str> = folders.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "INBOX",
+                "Work",
+                "[Gmail]/All Mail",
+                "[Gmail]/Sent Mail",
+                "[Gmail]/Spam"
+            ]
+        );
+        assert_eq!(folders[0].source, FolderSource::AllMail);
+        assert_eq!(ix.imap_view("a", &folders[0]).unwrap().messages.len(), 3);
+        ix.imap_reset("a").unwrap();
+
+        ix.set_imap_settings(
+            "a",
+            &ViewSettings {
+                inbox_all_mail: false,
+                split_categories: true,
+                hidden: vec![],
+            },
+        )
+        .unwrap();
 
         let folders = ix.imap_folders("a").unwrap();
         let names: Vec<&str> = folders.iter().map(|f| f.name.as_str()).collect();
@@ -804,6 +851,7 @@ mod tests {
         ix.set_imap_settings(
             "a",
             &ViewSettings {
+                inbox_all_mail: false,
                 split_categories: false,
                 hidden: vec!["[Gmail]/Spam".into(), "INBOX".into()],
             },
