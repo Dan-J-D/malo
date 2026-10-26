@@ -3,39 +3,57 @@
   import type * as T from '../api/types';
   import { attempt, errorText, notify, live } from '../state.svelte';
   import type { Snippet } from 'svelte';
-  import { bytes, when, reveal } from '../format';
+  import { untrack } from 'svelte';
+  import { bytes, when, reveal, dateRange, fileKind, personName, addressOf, CATEGORIES, isGmail, type Category } from '../format';
   import { fly } from 'svelte/transition';
   import { ms, ease } from '../motion';
-  import { commands, type Command } from '../commands.svelte';
-  import { contextMenu, copy, type Entry } from '../menu.svelte';
+  import { commands } from '../commands.svelte';
+  import { contextMenu, copy, menuUnder, type Entry } from '../menu.svelte';
   import Avatar from './Avatar.svelte';
   import Icon from './Icon.svelte';
+  import ThreadMessage from './ThreadMessage.svelte';
+  import Composer, { type ComposeInit } from './Composer.svelte';
 
+  // A message with the rest of its conversation, oldest first. The opened message and the newest
+  // one start expanded. Replies and forwards are written inline, under the message they answer.
   // `toolbar` holds the caller's navigation controls (close, previous, next).
-  let { id, toolbar }: { id: number; toolbar?: Snippet } = $props();
+  let {
+    id,
+    toolbar,
+    ondelete,
+  }: { id: number; toolbar?: Snippet; ondelete?: (m: T.MessageSummary, scope: T.DeleteScope) => void } = $props();
 
-  let view: T.MessageView | null = $state(null);
-  let showHtml = $state(false);
-  let remote = $state(false);
-  let tab: 'message' | 'headers' | 'source' = $state('message');
-  let source = $state('');
+  let thread: T.MessageSummary[] = $state([]);
+  let expanded: number[] = $state([]);
+  let views: Record<number, T.MessageView> = $state({});
+  let composing: { at: number; init: ComposeInit } | null = $state(null);
   let error = $state('');
+  let scroller: HTMLElement | undefined = $state();
 
-  async function load() {
+  async function load(mid: number) {
     error = '';
     try {
-      view = await api.get<T.MessageView>(`/messages/${id}/view${qs({ html: showHtml, remote })}`);
+      const t = await api.get<T.MessageSummary[]>(`/messages/${mid}/thread`);
+      if (mid !== id) return;
+      thread = t;
+      const last = t[t.length - 1]?.id;
+      expanded = [...new Set([mid, last].filter((x): x is number => x !== undefined))];
     } catch (e) {
       error = errorText(e);
     }
   }
 
   $effect(() => {
-    void id;
-    void showHtml;
-    void remote;
-    load();
+    const mid = id;
+    untrack(() => {
+      thread = [];
+      views = {};
+      composing = null;
+      scroller?.scrollTo({ top: 0, behavior: 'instant' });
+    });
+    load(mid);
   });
+
   // Opening a message marks it read (tracked by Malo, never via the mail server's \Seen flag).
   $effect(() => {
     const mid = id;
@@ -44,105 +62,134 @@
     if (nf) nf.reviewed = true;
   });
 
-  $effect(() => {
-    void id;
-    showHtml = false;
-    remote = false;
-    tab = 'message';
-    source = '';
+  const opened = $derived(thread.find((m) => m.id === id));
+  const account = $derived(live.accounts.find((a) => a.id === opened?.account_id));
+  const category = $derived.by((): Category | null => {
+    if (!opened || !isGmail(account)) return null;
+    const c = (opened.category ?? 'primary') as Category;
+    return c in CATEGORIES ? c : null;
   });
+  const span = $derived.by(() => {
+    const dates = thread.map((m) => m.envelope.date ?? m.internal_date).filter((d): d is string => !!d).sort();
+    return dateRange(dates[0], dates[dates.length - 1]);
+  });
+  const people = $derived.by(() => {
+    const seen = new Map<string, { name: string; address: string }>();
+    for (const m of thread) {
+      const add = (name: string | null | undefined, address: string) => {
+        const k = address.toLowerCase();
+        if (k && !seen.has(k)) seen.set(k, { name: reveal(name || personName(address)), address });
+      };
+      add(m.envelope.from_name, m.envelope.from);
+      m.envelope.to.forEach((t) => add(null, addressOf(t)));
+    }
+    return [...seen.values()];
+  });
+  const attachments = $derived(
+    thread.flatMap((m) => (views[m.id]?.attachments ?? []).map((a) => ({ m, a }))),
+  );
 
-  // Links are shown with their real target and only opened after confirmation.
-  type Link = { n: number; href: string; text: string };
-  const tabs = [['message', 'Message'], ['headers', 'Headers'], ['source', 'Source']] as const;
-  let scroller: HTMLElement | undefined = $state();
-  // A newly opened message starts at its top, without a smooth scroll back up from the last one.
-  $effect(() => {
-    void id;
-    scroller?.scrollTo({ top: 0, behavior: 'instant' });
-  });
-  const prepared = $derived.by(() => {
-    if (!view?.html) return { doc: '', links: [] as Link[] };
-    // DOMParser documents are inert: no scripts run, no resources load.
-    const doc = new DOMParser().parseFromString(view.html, 'text/html');
-    const links: Link[] = [];
-    doc.querySelectorAll('a[href]').forEach((a) => {
-      const href = a.getAttribute('href') ?? '';
-      const n = links.length + 1;
-      links.push({ n, href, text: (a.textContent ?? '').trim().slice(0, 120) });
-      a.removeAttribute('href');
-      a.setAttribute('title', href);
-      a.setAttribute('style', 'color:#2563eb;text-decoration:underline');
-      const sup = doc.createElement('sup');
-      sup.textContent = `[${n}]`;
-      a.after(sup);
-    });
-    const csp = `default-src 'none'; img-src data:${remote ? ' https:' : ''}; style-src 'unsafe-inline'; font-src data:`;
-    // Built as an element, not written as a literal tag: a style tag inside <script> text is picked up
-    // as the component's stylesheet by the dev server (and then fails in Tailwind).
-    const style = doc.createElement('style');
-    style.textContent = 'body{font-family:system-ui,sans-serif;font-size:14px;margin:12px;word-wrap:break-word}img{max-width:100%;height:auto}';
-    const head = `<meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="referrer" content="no-referrer"><base target="_self">${style.outerHTML}`;
-    return { doc: `<!doctype html><html><head>${head}</head><body>${doc.body.innerHTML}</body></html>`, links };
-  });
-
-  const textLinks = $derived.by(() => {
-    if (!view || view.html) return [] as Link[];
-    const found = new Set<string>();
-    for (const m of view.text.matchAll(/\bhttps?:\/\/[^\s<>"')\]]+/g)) found.add(m[0]);
-    return [...found].map((href, i) => ({ n: i + 1, href, text: '' }));
-  });
-
-  async function openLink(l: Link) {
-    let host = l.href;
-    try { host = new URL(l.href).host; } catch { /* mailto etc. */ }
-    if (!confirm(`Open this link in your browser?\n\n${l.href}\n\nHost: ${host}`)) return;
-    await attempt(() => app.openExternal(l.href));
+  function toggle(mid: number) {
+    expanded = expanded.includes(mid) ? expanded.filter((x) => x !== mid) : [...expanded, mid];
   }
 
-  async function save(a: T.AttachmentInfo) {
+  async function save(mid: number, a: T.AttachmentInfo) {
     if (a.warnings.length && !confirm(`Warning:\n- ${a.warnings.join('\n- ')}\n\nSave "${a.filename}" anyway? Malo never opens attachments.`)) return;
-    const p = await attempt(() => app.saveAttachment(id, a.index, a.filename));
+    const p = await attempt(() => app.saveAttachment(mid, a.index, a.filename));
     if (p) notify(`Saved to ${p}`, 'success');
   }
 
-  async function showSource() {
-    tab = 'source';
-    if (!source) source = (await attempt(() => app.rawSource(id))) ?? '';
+  const prefixed = (p: string, s: string) => (new RegExp(`^${p}:`, 'i').test(s.trim()) ? s.trim() : `${p}: ${s.trim()}`);
+
+  /** Opens the composer under message `mid`, filled in for a reply, reply-all or forward. */
+  async function reply(mid: number, mode: 'reply' | 'reply-all' | 'forward') {
+    const m = thread.find((x) => x.id === mid);
+    if (!m) return;
+    let v = views[mid];
+    if (!v) {
+      const got = await attempt(() => api.get<T.MessageView>(`/messages/${mid}/view${qs({ html: false, remote: false })}`));
+      if (!got) return;
+      v = views[mid] = got;
+    }
+    if (!expanded.includes(mid)) expanded = [...expanded, mid];
+    const acc = live.accounts.find((a) => a.id === m.account_id);
+    const me = (acc?.username ?? '').toLowerCase();
+    const sender = v.from_name ? `${v.from_name} <${v.from}>` : v.from;
+    const mine = v.from.toLowerCase() === me;
+    const quoted = v.text.replace(/\r\n/g, '\n').replace(/\n+$/, '').split('\n').map((l) => (l.startsWith('>') ? `>${l}` : `> ${l}`)).join('\n');
+    const date = when(v.date);
+    let to: string[] = [];
+    let cc: string[] = [];
+    let subject: string;
+    let body: string;
+    if (mode === 'forward') {
+      subject = prefixed('Fwd', v.subject);
+      const head = [`From: ${sender}`, `Date: ${date}`, `Subject: ${v.subject}`, `To: ${v.to.join(', ')}`, ...(v.cc.length ? [`Cc: ${v.cc.join(', ')}`] : [])];
+      body = `\n\n---------- Forwarded message ----------\n${head.join('\n')}\n\n${v.text}`;
+    } else {
+      subject = prefixed('Re', v.subject);
+      // A reply to your own message goes to the people you wrote to.
+      to = mine ? [...v.to] : v.reply_to.length ? [...v.reply_to] : [sender];
+      if (mode === 'reply-all') {
+        const taken = new Set([me, ...to.map(addressOf)]);
+        cc = [...(mine ? [] : v.to), ...v.cc].filter((r) => {
+          const a = addressOf(r);
+          if (taken.has(a)) return false;
+          taken.add(a);
+          return true;
+        });
+      }
+      body = `\n\nOn ${date}, ${sender} wrote:\n${quoted}\n`;
+    }
+    composing = {
+      at: mid,
+      init: {
+        account_id: m.account_id,
+        title: mode === 'forward' ? 'Forward' : mode === 'reply-all' ? 'Reply all' : `Reply to ${reveal(v.from_name || v.from)}`,
+        message: {
+          to,
+          cc,
+          bcc: [],
+          subject,
+          body,
+          in_reply_to: mode === 'forward' ? undefined : mid,
+          attachments_of: mode === 'forward' && v.attachments.length ? mid : undefined,
+        },
+        forwarded: mode === 'forward' ? v.attachments.map((a) => ({ filename: a.filename, size: Number(a.size) })) : undefined,
+      },
+    };
   }
 
-  const saveRaw = () => attempt(() => app.saveRaw(id));
-  // One of the two is always empty: links come from the HTML when there is HTML, else from the text.
-  const links = $derived([...prepared.links, ...textLinks]);
+  const many = $derived(!!opened && opened.envelope.to.length > 1);
 
-  function viewMenu(): Entry[] {
-    if (!view) return [];
-    const subject = reveal(view.subject);
+  function moreMenu(): Entry[] {
+    if (!opened) return [];
+    const subject = reveal(opened.envelope.subject);
     return [
-      tab !== 'message' && { label: 'Show message', icon: 'mail-open', keys: '1', run: () => (tab = 'message') },
-      tab !== 'headers' && { label: 'Show headers', icon: 'file', keys: '2', run: () => (tab = 'headers') },
-      tab !== 'source' && { label: 'Show source', icon: 'file', keys: '3', run: showSource },
+      { label: 'Reply', icon: 'reply', keys: 'r', run: () => reply(id, 'reply') },
+      { label: 'Reply all', icon: 'reply-all', keys: 'a', run: () => reply(id, 'reply-all') },
+      { label: 'Forward', icon: 'forward', keys: 'f', run: () => reply(id, 'forward') },
       '-',
-      view.has_html && { label: showHtml ? 'Show plain text' : 'Show HTML (sanitized)', icon: 'file', keys: 'h', run: () => (showHtml = !showHtml) },
-      showHtml && { label: remote ? 'Block remote images' : 'Load remote images', icon: 'download', keys: 'i', run: () => (remote = !remote) },
-      '-',
+      thread.length > 1 && { label: expanded.length === thread.length ? 'Collapse all' : 'Expand all', icon: 'layers', run: () => (expanded = expanded.length === thread.length ? [id] : thread.map((m) => m.id)) },
       subject && { label: 'Copy subject', icon: 'copy', run: () => copy(subject, 'Subject copied') },
-      { label: 'Copy sender address', icon: 'copy', run: () => copy(view!.from, 'Address copied') },
-      { label: 'Save .eml…', icon: 'download', keys: 'mod+s', run: saveRaw },
+      { label: 'Save .eml…', icon: 'download', keys: 'mod+s', run: () => attempt(() => app.saveRaw(id)) },
+    ];
+  }
+
+  function deleteMenu(): Entry[] {
+    if (!opened || !ondelete) return [];
+    return [
+      { label: 'Delete from mail server…', icon: 'trash', keys: 'delete', danger: true, run: () => ondelete(opened!, 'server') },
+      { label: 'Delete from backup…', icon: 'trash', keys: 'shift+delete', danger: true, run: () => ondelete(opened!, 'everywhere') },
     ];
   }
 
   commands(() => {
-    if (!view) return [];
+    if (!opened) return [];
     return [
-      { id: 'tab-message', group: 'Message', label: 'Show message', keys: '1', run: () => (tab = 'message') },
-      { id: 'tab-headers', group: 'Message', label: 'Show headers', keys: '2', run: () => (tab = 'headers') },
-      { id: 'tab-source', group: 'Message', label: 'Show source', keys: '3', run: showSource },
-      { id: 'html', group: 'Message', label: showHtml ? 'Show plain text' : 'Show HTML (sanitized)', keys: 'h', disabled: !view.has_html, run: () => (showHtml = !showHtml) },
-      { id: 'remote', group: 'Message', label: remote ? 'Block remote images' : 'Load remote images', keys: 'i', disabled: !showHtml, run: () => (remote = !remote) },
-      { id: 'save-eml', group: 'Message', label: 'Save .eml…', keys: 'mod+s', anywhere: true, run: saveRaw },
-      ...view.attachments.map((a): Command => ({ id: `att-${a.index}`, group: 'Attachments', label: `Save ${reveal(a.filename)}…`, run: () => save(a) })),
-      ...links.map((l): Command => ({ id: `link-${l.n}`, group: 'Links', label: `Open [${l.n}] ${l.href}`, run: () => openLink(l) })),
+      { id: 'reply', group: 'Message', label: 'Reply', keys: 'r', run: () => reply(id, 'reply') },
+      { id: 'reply-all', group: 'Message', label: 'Reply all', keys: 'a', run: () => reply(id, 'reply-all') },
+      { id: 'forward', group: 'Message', label: 'Forward', keys: 'f', run: () => reply(id, 'forward') },
     ];
   });
 </script>
@@ -150,141 +197,80 @@
 <div class="flex h-12 flex-none items-center gap-1 border-b border-line px-3">
   {@render toolbar?.()}
   <span class="flex-1"></span>
-  {#if view}
-    <!-- Equal-width tabs, so one indicator can slide between them. -->
-    <div class="relative grid grid-cols-3 rounded-lg bg-raised p-0.5 text-[0.85rem]" role="tablist" aria-label="Message view">
-      <span aria-hidden="true" class="absolute top-0.5 bottom-0.5 left-0.5 w-[calc((100%-4px)/3)] rounded-md bg-panel shadow-sm dark:bg-white/10 transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
-        style="transform: translateX({tabs.findIndex(([k]) => k === tab) * 100}%)"></span>
-      {#each tabs as [key, label]}
-        <button role="tab" aria-selected={tab === key} class="relative w-[4.75rem] justify-center rounded-md bg-transparent! px-2.5 py-1 {tab === key ? 'text-fg' : 'text-muted hover:text-fg'}"
-          onclick={() => (key === 'source' ? showSource() : (tab = key as typeof tab))}>{label}</button>
-      {/each}
-    </div>
-    <button class="ml-1 border border-line bg-transparent px-2.5 py-1 text-[0.85rem]" onclick={saveRaw} title="Save the original message, byte for byte (Ctrl+S)">
-      <Icon name="download" size={14} /> Save .eml…
+  {#if opened}
+    <button class="px-2.5 py-1 text-[0.85rem]" onclick={() => reply(id, many ? 'reply-all' : 'reply')} title={many ? 'Reply all (a)' : 'Reply (r)'}>
+      <Icon name={many ? 'reply-all' : 'reply'} size={14} /> {many ? 'Reply all' : 'Reply'}
     </button>
+    {#if many}<button class="p-1.5" onclick={() => reply(id, 'reply')} aria-label="Reply" title="Reply (r)"><Icon name="reply" size={15} /></button>{/if}
+    <button class="p-1.5" onclick={() => reply(id, 'forward')} aria-label="Forward" title="Forward (f)"><Icon name="forward" size={15} /></button>
+    <button class="p-1.5" onclick={(e) => menuUnder(e.currentTarget, moreMenu())} aria-label="More actions" title="More"><Icon name="more" size={15} /></button>
+    {#if ondelete}
+      <button class="bg-bad/15 p-1.5 text-bad hover:bg-bad! hover:text-white" onclick={(e) => menuUnder(e.currentTarget, deleteMenu())} aria-label="Delete" title="Delete"><Icon name="trash" size={15} /></button>
+    {/if}
   {/if}
 </div>
 
 <div bind:this={scroller} class="min-h-0 flex-1 overflow-y-auto">
   {#if error}
     <p class="callout bad m-6">{error}</p>
-  {:else if !view}
+  {:else if !opened}
     <p class="m-6 text-muted">Loading…</p>
   {:else}
-    {#key view.id}
-    <article class="flex flex-col" in:fly={{ y: 8, duration: ms(240), easing: ease }} {@attach contextMenu(viewMenu)}>
-      <header class="px-6 pt-5 pb-4">
-        <h2 class="subject m-0 text-lg font-medium leading-snug">{reveal(view.subject) || '(no subject)'}</h2>
-        <div class="mt-1.5 flex items-center gap-1.5 text-[0.85rem] text-muted"><Icon name="calendar" size={14} /> {when(view.date)}</div>
+    {#key id}
+    <article class="flex flex-col" in:fly={{ y: 8, duration: ms(240), easing: ease }} {@attach contextMenu(moreMenu)}>
+      <header class="flex flex-col gap-3 px-6 pt-5 pb-4">
+        <div>
+          <h2 class="subject m-0 text-[1.15rem] leading-snug font-medium">{reveal(opened.envelope.subject) || '(no subject)'}{#if thread.length > 1}<span class="ml-1.5 font-normal text-faint tabular-nums">[{thread.length}]</span>{/if}</h2>
+          {#if span}<div class="mt-1.5 flex items-center gap-1.5 text-[0.85rem] text-muted"><Icon name="calendar" size={14} /> {span}</div>{/if}
+        </div>
+        <div class="flex flex-wrap items-center gap-x-1 gap-y-1.5">
+          {#if category}
+            {@const c = CATEGORIES[category]}
+            <span class="mr-2 flex items-center gap-1.5 rounded-md px-2 py-1 text-[0.8rem] {c.bg} {c.tone}" title="Gmail category"><Icon name={c.icon} size={13} /> {c.label}</span>
+          {/if}
+          {#each people.slice(0, 6) as p (p.address)}
+            <span class="flex items-center gap-1.5 rounded-full py-0.5 pr-2 pl-0.5 text-[0.85rem]" title={p.address}
+              {@attach contextMenu(() => [{ label: 'Copy address', icon: 'copy', run: () => copy(p.address, 'Address copied') }])}>
+              <Avatar name={p.name} seed={p.address} size={20} /><span class="untrusted max-w-[12rem] truncate">{p.name}</span>
+            </span>
+          {/each}
+          {#if people.length > 6}<span class="text-[0.85rem] text-faint" title={people.slice(6).map((p) => p.address).join(', ')}>+{people.length - 6}</span>{/if}
+        </div>
       </header>
 
-      {#if view.warnings.length}
-        <div class="flex flex-col gap-2 px-6 pb-4">
-          {#each view.warnings as w}
-            <div class="flex items-start gap-2 rounded-lg border border-bad/40 bg-bad/8 px-3 py-2 text-[0.9rem]">
-              <span class="mt-0.5 text-bad"><Icon name="alert" size={15} /></span><span>{w}</span>
-            </div>
-          {/each}
-        </div>
-      {/if}
-
-      {#if view.attachments.length}
+      {#if attachments.length}
         <section class="px-6 pb-4">
-          <div class="mb-2 text-[0.9rem] text-muted">Attachments <span class="text-faint">[{view.attachments.length}]</span></div>
+          <div class="mb-2 text-[0.9rem] text-muted">Attachments <span class="text-faint">[{attachments.length}]</span></div>
           <div class="flex flex-wrap gap-2">
-            {#each view.attachments as a}
-              <div class="flex max-w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[0.9rem] {a.warnings.length ? 'border-bad/40 bg-bad/8' : 'border-line bg-raised'}"
-                {@attach contextMenu(() => [
-                  { label: 'Save as…', icon: 'download', run: () => save(a) },
-                  { label: 'Copy file name', icon: 'copy', run: () => copy(a.filename, 'File name copied') },
-                ])}
-                title="Declared {a.declared_type} · detected {a.sniffed_type ?? 'unknown'}">
-                <span class={a.warnings.length ? 'text-bad' : 'text-info'}><Icon name={a.warnings.length ? 'alert' : 'file'} size={15} /></span>
+            {#each attachments as { m, a } (`${m.id}-${a.index}`)}
+              {@const k = fileKind(a.filename, a.sniffed_type ?? a.declared_type)}
+              <button class="max-w-full gap-2 border px-2.5 py-1.5 text-[0.9rem] {a.warnings.length ? 'border-bad/40 bg-bad/8' : 'border-transparent'}"
+                onclick={() => save(m.id, a)} title="Save as…">
+                <span class={a.warnings.length ? 'text-bad' : k.tone}><Icon name={a.warnings.length ? 'alert' : k.icon} size={15} /></span>
                 <span class="untrusted truncate">{reveal(a.filename)}</span>
                 <span class="flex-none text-muted">{bytes(a.size)}</span>
-                {#if a.sniffed_type && a.sniffed_type !== a.declared_type}<span class="flex-none text-[0.8rem] text-warn">is {a.sniffed_type}</span>{/if}
-                <button class="ml-1 flex-none bg-transparent px-1.5 py-0.5 text-[0.85rem] text-accent-2" onclick={() => save(a)}>Save as…</button>
-              </div>
-              {#each a.warnings as w}<span class="pill bad self-center">{w}</span>{/each}
+              </button>
             {/each}
           </div>
-          <p class="mt-2 mb-0 text-[0.8rem] text-faint">Malo never opens attachments. Saved files keep their original bytes.</p>
         </section>
       {/if}
 
-      <div class="border-t border-line px-6 py-4">
-        <div class="flex items-start gap-3" {@attach contextMenu(() => [
-          { label: 'Copy sender address', icon: 'copy', run: () => copy(view!.from, 'Address copied') },
-          view?.from_name && { label: 'Copy sender name', icon: 'copy', run: () => copy(view!.from_name!, 'Name copied') },
-          view?.to.length && { label: 'Copy recipients', icon: 'copy', run: () => copy(view!.to.join(', '), 'Recipients copied') },
-        ])}>
-          <Avatar name={reveal(view.from_name || view.from) || '?'} seed={view.from} size={38} />
-          <div class="min-w-0 flex-1 text-[0.9rem]">
-            <div class="untrusted"><span class="font-medium">{reveal(view.from_name || view.from)}</span>
-              {#if view.from_name}<span class="text-muted"> &lt;{reveal(view.from)}&gt;</span>{/if}</div>
-            <div class="untrusted text-muted">To: {view.to.join(', ')}</div>
-            {#if view.cc.length}<div class="untrusted text-muted">Cc: {view.cc.join(', ')}</div>{/if}
-          </div>
-        </div>
-        {#if view.authentication_results.length}
-          <details class="mt-2 ml-[50px] text-[0.85rem]"><summary>Sender authentication (SPF / DKIM / DMARC)</summary>
-            {#each view.authentication_results as r}<div class="mono mt-1 text-muted">{r}</div>{/each}
-          </details>
-        {/if}
-      </div>
-
-      <div class="px-6 pb-8">
-        {#if tab === 'message'}
-          {#if view.has_html}
-            <div class="mb-3 flex flex-wrap items-center gap-x-5 gap-y-2 rounded-lg bg-raised px-3 py-2 text-[0.85rem]">
-              <label class="check"><input type="checkbox" bind:checked={showHtml} /> Show HTML (sanitized)</label>
-              {#if showHtml}
-                <label class="check"><input type="checkbox" bind:checked={remote} /> Load remote images for this message</label>
-              {/if}
-              {#if showHtml && view.remote_blocked > 0 && !remote}<span class="text-muted">{view.remote_blocked} remote image(s) blocked to prevent tracking.</span>{/if}
-            </div>
-          {/if}
-          {#if view.html !== null && view.html !== undefined}
-            <iframe class="h-[65vh] w-full rounded-lg border border-line bg-white" title="Message content" sandbox="" srcdoc={prepared.doc} referrerpolicy="no-referrer"></iframe>
-            {#if prepared.links.length}
-              {@render linkList(`Links in this message (${prepared.links.length})`, prepared.links)}
-            {/if}
-          {:else}
-            <pre class="m-0 font-sans text-[0.95rem] leading-relaxed whitespace-pre-wrap break-words">{view.text}</pre>
-            {#if textLinks.length}
-              {@render linkList(`Links (${textLinks.length})`, textLinks)}
-            {/if}
-          {/if}
-        {:else if tab === 'headers'}
-          <table class="text-[0.85rem]">
-            <tbody>{#each view.headers as [k, v]}<tr {@attach contextMenu(() => [
-              { label: 'Copy value', icon: 'copy', run: () => copy(v, 'Header copied') },
-              { label: 'Copy header line', icon: 'copy', run: () => copy(`${k}: ${v}`, 'Header copied') },
-            ])}><td class="mono w-48 text-muted">{k}</td><td class="mono">{v}</td></tr>{/each}</tbody>
-          </table>
-        {:else}
-          <pre class="m-0 font-mono text-[0.8rem] whitespace-pre-wrap break-words">{source || 'Loading…'}</pre>
-        {/if}
+      <div class="border-t border-line">
+        {#each thread as m (m.id)}
+          <ThreadMessage {m} expanded={expanded.includes(m.id)} focus={m.id === id}
+            ontoggle={() => toggle(m.id)} onreply={(mode) => reply(m.id, mode)} onview={(v) => (views[m.id] = v)}
+            composer={composing?.at === m.id ? inlineComposer : undefined} />
+        {/each}
       </div>
     </article>
     {/key}
   {/if}
 </div>
 
-{#snippet linkList(label: string, links: Link[])}
-  <details class="mt-4 text-[0.85rem]"><summary>{label}</summary>
-    <div class="mt-2 flex flex-col gap-1">
-      {#each links as l}
-        <div class="flex items-start gap-2 rounded-lg px-2 py-1.5 hover:bg-raised" {@attach contextMenu(() => [
-          { label: 'Open in browser…', icon: 'external', run: () => openLink(l) },
-          { label: 'Copy link', icon: 'copy', run: () => copy(l.href, 'Link copied') },
-        ])}>
-          <span class="text-faint tabular-nums">[{l.n}]</span>
-          <span class="min-w-0 flex-1"><span class="mono">{l.href}</span>{#if l.text}<br /><span class="text-muted">“{l.text}”</span>{/if}</span>
-          <button class="flex-none px-2 py-0.5" onclick={() => openLink(l)}>Open…</button>
-        </div>
-      {/each}
-    </div>
-  </details>
+{#snippet inlineComposer()}
+  {#if composing}
+    {#key composing.init}
+      <Composer inline init={composing.init} onclose={() => (composing = null)} />
+    {/key}
+  {/if}
 {/snippet}

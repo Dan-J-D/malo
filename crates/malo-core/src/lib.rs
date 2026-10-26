@@ -1,6 +1,7 @@
 //! Malo core: crypto, IMAP, index, storage, backup, integrity checks, purge and the safe viewer.
 //! No HTTP or GUI code lives here.
 
+pub mod compose;
 pub mod config;
 pub mod crypto;
 pub mod ctx;
@@ -9,6 +10,7 @@ pub mod imap;
 pub mod index;
 pub mod layout;
 pub mod mailview;
+pub mod mime;
 pub mod oauth;
 pub mod purge;
 pub mod rebuild;

@@ -848,6 +848,8 @@ pub struct MessagesQuery {
     pub sort: Option<String>,
     /// Search column for words of `q` without one: subject, sender, recipients, body, attachments.
     pub field: Option<String>,
+    /// Gmail category: primary, social, promotions, updates, forums.
+    pub category: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -921,6 +923,7 @@ pub async fn list_messages(
                 .map(MessageSort::parse)
                 .unwrap_or_default(),
             field: q.field,
+            category: q.category,
         },
         dests,
     )?;
@@ -950,6 +953,176 @@ pub async fn get_message(u: Unlocked, Path(id): Path<i64>) -> ApiResult<Json<Mes
             .summary(id, dests)?
             .ok_or_else(|| ApiErr::not_found("message"))?,
     ))
+}
+
+/// The conversation of a message, oldest first.
+pub async fn message_thread(
+    u: Unlocked,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Vec<MessageSummary>>> {
+    let dests = u.user.config().destinations.len() as u32;
+    let thread = u.user.index.thread(id, dests)?;
+    if thread.is_empty() {
+        return Err(ApiErr::not_found("message"));
+    }
+    Ok(Json(thread))
+}
+
+/// Sends a message written in Malo through the account's SMTP server, and saves the sent copy
+/// in the account's Sent mailbox (Gmail files it by itself).
+pub async fn send_message(
+    State(state): State<SharedState>,
+    u: Unlocked,
+    Path(account_id): Path<String>,
+    Json(req): Json<SendRequest>,
+) -> ApiResult<Json<SendResult>> {
+    use malo_core::compose::{self, Attachment, Draft};
+    let account = u
+        .user
+        .config()
+        .account(&account_id)
+        .cloned()
+        .ok_or_else(|| ApiErr::not_found("account"))?;
+    let smtp = account.smtp.clone().ok_or_else(|| {
+        ApiErr::bad_request(format!(
+            "Sending isn't set up for {}: add its outgoing (SMTP) server under Accounts",
+            account.name
+        ))
+    })?;
+    crate::net::check_smtp(&state, &smtp).await?;
+    let from = req.from.clone().unwrap_or_else(|| account.username.clone());
+    let list = |v: &[String]| -> ApiResult<Vec<compose::Mailbox>> {
+        v.iter()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| compose::parse_mailbox(s).map_err(|e| ApiErr::bad_request(format!("{e:#}"))))
+            .collect()
+    };
+    let in_reply_to = match req.in_reply_to {
+        Some(id) => Some(load_raw(&state, &u.user, id).await?),
+        None => None,
+    };
+    let attachments = match req.attachments_of {
+        Some(id) => {
+            let raw = load_raw(&state, &u.user, id).await?;
+            tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<Attachment>> {
+                let n = viewer::render(id, &raw, false, false)?.attachments.len() as u32;
+                (0..n)
+                    .map(|i| {
+                        let (filename, content_type, data) = viewer::attachment(&raw, i)?;
+                        Ok(Attachment {
+                            filename,
+                            content_type,
+                            data,
+                        })
+                    })
+                    .collect()
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!(e))??
+        }
+        None => vec![],
+    };
+    let draft = Draft {
+        from: compose::parse_mailbox(&from).map_err(|_| {
+            ApiErr::bad_request(format!(
+                "“{from}” isn't an email address: enter the address to send from"
+            ))
+        })?,
+        to: list(&req.to)?,
+        cc: list(&req.cc)?,
+        bcc: list(&req.bcc)?,
+        subject: req.subject.clone(),
+        body: req.body.clone(),
+        in_reply_to,
+        attachments,
+    };
+    let built = compose::build(&draft).map_err(|e| ApiErr::bad_request(format!("{e:#}")))?;
+    let msg = malo_core::smtp::Message {
+        from: &draft.from.address,
+        to: &built.recipients,
+        data: &built.data,
+    };
+    let tokens = u.user.tokens.clone();
+    match malo_core::smtp::send(&account, &smtp, tokens.as_ref(), &msg).await {
+        Ok(()) => {}
+        Err(malo_core::smtp::SendError::Rejected(r)) => {
+            return Err(ApiErr::bad_request(format!(
+                "{} refused the message: {} {}",
+                smtp.host, r.code, r.text
+            )))
+        }
+        Err(malo_core::smtp::SendError::Failed(e)) => {
+            return Err(ApiErr::bad_request(format!(
+                "Couldn't send through {}: {e:#}",
+                smtp.host
+            )))
+        }
+    }
+    tracing::info!(account = %account.id, recipients = built.recipients.len(), "sent a message written in Malo");
+    // Gmail (it has an All Mail mailbox) keeps sent mail by itself; other servers get a copy in
+    // their Sent mailbox, like a mail app would save it.
+    let boxes = u.user.index.mailboxes(Some(&account.id), true)?;
+    let gmail = boxes
+        .iter()
+        .any(|b| b.special_use.as_deref() == Some("\\All"));
+    let sent = boxes
+        .iter()
+        .find(|b| b.special_use.as_deref() == Some("\\Sent"))
+        .map(|b| b.name.clone());
+    let mut saved_to = None;
+    if let (false, Some(sent)) = (gmail, sent) {
+        let res = async {
+            let mut conn = imap::connect(&account, tokens.as_ref()).await?;
+            conn.session
+                .append(&sent, Some("(\\Seen)"), None, &built.data)
+                .await?;
+            conn.logout().await;
+            anyhow::Ok(())
+        }
+        .await;
+        match res {
+            Ok(()) => saved_to = Some(malo_core::layout::decode_utf7(&sent)),
+            Err(e) => tracing::warn!(account = %account.id, "saving the sent copy: {e:#}"),
+        }
+    }
+    if let Some(d) = req.draft_id {
+        u.user.index.delete_draft(d)?;
+    }
+    let _ = jobs::submit(
+        &state,
+        &u.user.user_id,
+        JobKind::Backup {
+            account_id: account.id.clone(),
+        },
+        JobTrigger::Scheduled,
+    );
+    Ok(Json(SendResult {
+        message_id: built.message_id,
+        saved_to,
+    }))
+}
+
+pub async fn list_drafts(u: Unlocked) -> ApiResult<Json<Vec<DraftView>>> {
+    Ok(Json(u.user.index.drafts()?))
+}
+
+pub async fn save_draft(u: Unlocked, Json(d): Json<DraftInput>) -> ApiResult<Json<DraftView>> {
+    if u.user.config().account(&d.account_id).is_none() {
+        return Err(ApiErr::not_found("account"));
+    }
+    u.user
+        .index
+        .save_draft(d.id, &d.account_id, &d.message)?
+        .map(Json)
+        .ok_or_else(|| ApiErr::not_found("draft"))
+}
+
+pub async fn delete_draft(u: Unlocked, Path(id): Path<i64>) -> ApiResult<StatusCode> {
+    if u.user.index.delete_draft(id)? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiErr::not_found("draft"))
+    }
 }
 
 const VIEWER_CACHE_BYTES: u64 = 256 * 1024 * 1024;

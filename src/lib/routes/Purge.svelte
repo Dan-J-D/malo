@@ -139,7 +139,7 @@
     {/each}
     {#if policy.required_destinations.length < 2}<p class="callout small">With fewer than two required destinations, a single storage failure could lose mail that is no longer on the server.</p>{/if}
     <h3>Never delete</h3>
-    <label class="check"><input type="checkbox" bind:checked={policy.exclude_flagged} /> Flagged (starred) messages</label>
+    <label class="check"><input type="checkbox" class="switch" bind:checked={policy.exclude_flagged} /> Flagged (starred) messages</label>
     <details><summary>Excluded mailboxes ({policy.exclude_mailboxes.length})</summary>
       {#each boxes as b}
         <label class="check"><input type="checkbox" checked={policy.exclude_mailboxes.includes(b.name)} onchange={() => toggle(policy!.exclude_mailboxes, b.name)} /> {b.display_name}</label>

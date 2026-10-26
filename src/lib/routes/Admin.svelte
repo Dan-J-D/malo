@@ -167,8 +167,8 @@
       <label>Default max accounts per user <input type="number" min="1" bind:value={settings.default_max_accounts} /></label>
       <label>Concurrent jobs per user <input type="number" min="1" max="16" bind:value={settings.max_jobs_per_user} /></label>
     </div>
-    <label class="check"><input type="checkbox" bind:checked={settings.self_registration} /> Allow self-registration without an invite</label>
-    <label class="check"><input type="checkbox" bind:checked={settings.block_private_networks} /> Block mail servers and storage on private networks (loopback, LAN, link-local)</label>
+    <label class="check"><input type="checkbox" class="switch" bind:checked={settings.self_registration} /> Allow self-registration without an invite</label>
+    <label class="check"><input type="checkbox" class="switch" bind:checked={settings.block_private_networks} /> Block mail servers and storage on private networks (loopback, LAN, link-local)</label>
     <p class="muted small">Turn this on when users you don't fully trust share the server: otherwise their accounts and destinations can make the server connect to hosts on its own network. Leave it off if users back up a mail server or MinIO on the LAN.</p>
     <label>Extra folders users may use for "fs" destinations (absolute paths, one per line)
       <textarea rows="3" bind:value={mounts} placeholder="/mnt/nas"></textarea>

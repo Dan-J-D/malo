@@ -180,6 +180,7 @@ async fn mail_apps_read_backups_and_send() {
 
     // Two backed-up messages, one of them long gone from the mail server.
     let me: Me = admin.get("/me").await;
+    let mut ids = vec![];
     {
         let user = r.state.keyring.get(&me.id).unwrap();
         let ctx = malo_server::jobs::job_ctx(&r.state, &user, "t", Default::default());
@@ -219,6 +220,7 @@ async fn mail_apps_read_backups_and_send() {
                 .add_membership(id, inbox.id, uid, &[], &[])
                 .unwrap();
             ctx.spool_put(id, raw).unwrap();
+            ids.push(id);
             // The first is indexed for full-text search, the other waits for the search-index job.
             if uid == 1 {
                 assert!(user.index.search_index_raw(id, &sha, raw).unwrap());
@@ -260,6 +262,24 @@ async fn mail_apps_read_backups_and_send() {
         )
         .await;
     assert_eq!(taken.unwrap_err().0, 409);
+
+    // Searching in the app: full text with a highlighted snippet where indexed.
+    let found: MessageList = admin.get("/messages?q=hello").await;
+    assert_eq!(found.total, 1);
+    assert_eq!(found.unindexed, 1);
+    let snippet = found.messages[0].snippet.as_deref().unwrap();
+    assert!(snippet.contains("\u{2}hello\u{3}"), "{snippet}");
+    let found: MessageList = admin.get("/messages?q=news").await;
+    assert_eq!(
+        found.total, 0,
+        "not indexed yet, and its envelope has no 'news'"
+    );
+    let job = admin.run_job(JobKind::SearchIndex).await;
+    assert_eq!(job.state, JobState::Done, "{:?}", job.error);
+    assert_eq!(job.result.unwrap()["indexed"], 1);
+    let found: MessageList = admin.get("/messages?q=news&sort=relevance").await;
+    assert_eq!((found.total, found.unindexed), (1, 0));
+    // (A mail app logging in also starts this job when mail is waiting for it.)
 
     assert!(imap_login(imap, "test-email", "wrong").await.is_err());
     // The Malo password is not a mail password.
@@ -345,22 +365,6 @@ async fn mail_apps_read_backups_and_send() {
         assert_eq!(hits, want, "{query}");
     }
 
-    // Searching in the app: full text with a highlighted snippet where indexed.
-    let found: MessageList = admin.get("/messages?q=hello").await;
-    assert_eq!(found.total, 1);
-    assert_eq!(found.unindexed, 1);
-    let snippet = found.messages[0].snippet.as_deref().unwrap();
-    assert!(snippet.contains("\u{2}hello\u{3}"), "{snippet}");
-    let found: MessageList = admin.get("/messages?q=news").await;
-    assert_eq!(
-        found.total, 0,
-        "not indexed yet, and its envelope has no 'news'"
-    );
-    let job = admin.run_job(JobKind::SearchIndex).await;
-    assert_eq!(job.state, JobState::Done, "{:?}", job.error);
-    assert_eq!(job.result.unwrap()["indexed"], 1);
-    let found: MessageList = admin.get("/messages?q=news&sort=relevance").await;
-    assert_eq!((found.total, found.unindexed), (1, 0));
     // "Search in" limits words without an operator to one part of the message.
     let found: MessageList = admin.get("/messages?q=hello&field=body").await;
     assert_eq!(found.total, 1);
@@ -494,6 +498,67 @@ async fn mail_apps_read_backups_and_send() {
     }
     let unauth = smtp_dialog(smtp, &["EHLO mac", "MAIL FROM:<me@example.com>"]).await;
     assert!(unauth[2].starts_with("530"), "{unauth:?}");
+
+    // Writing in Malo: a reply that takes the original's attachments along, through the account's
+    // SMTP server. Bcc recipients get it without showing up in the headers.
+    let draft: DraftView = admin
+        .put(
+            "/drafts",
+            &DraftInput {
+                id: None,
+                account_id: acc.id.clone(),
+                message: SendRequest {
+                    from: None,
+                    to: vec!["alice@example.com".into()],
+                    cc: vec![],
+                    bcc: vec![],
+                    subject: "Re: first".into(),
+                    body: "Thanks".into(),
+                    in_reply_to: Some(ids[0]),
+                    attachments_of: None,
+                    draft_id: None,
+                },
+            },
+        )
+        .await;
+    let drafts: Vec<DraftView> = admin.get("/drafts").await;
+    assert_eq!(drafts.len(), 1);
+    let sent: SendResult = admin
+        .post(
+            &format!("/accounts/{}/send", acc.id),
+            &SendRequest {
+                from: Some("Me <me@example.com>".into()),
+                to: vec!["Alice <alice@example.com>".into()],
+                cc: vec![],
+                bcc: vec!["hidden@example.net".into()],
+                subject: "Re: first".into(),
+                body: "Thanks!".into(),
+                in_reply_to: Some(ids[0]),
+                attachments_of: Some(ids[0]),
+                draft_id: Some(draft.id),
+            },
+        )
+        .await;
+    let drafts: Vec<DraftView> = admin.get("/drafts").await;
+    assert!(drafts.is_empty(), "sending deletes its draft");
+    assert!(sent.message_id.ends_with("@example.com"));
+    assert_eq!(sent.saved_to, None, "this account has no Sent mailbox");
+    {
+        let up = upstream.lock().unwrap();
+        assert_eq!(
+            up.envelopes[1].1,
+            vec![
+                "<alice@example.com>".to_string(),
+                "<hidden@example.net>".to_string()
+            ]
+        );
+        let text = String::from_utf8_lossy(&up.messages[1]).to_string();
+        assert!(text.contains("In-Reply-To: <1@example.com>"), "{text}");
+        assert!(text.contains("filename=\"a.pdf\""), "{text}");
+        assert!(!text.contains("hidden@example.net"), "{text}");
+    }
+    let thread: Vec<MessageSummary> = admin.get(&format!("/messages/{}/thread", ids[0])).await;
+    assert_eq!(thread.len(), 1);
 
     // A locked user's mail is unreadable until they log in again.
     assert_eq!(

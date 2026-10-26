@@ -159,6 +159,12 @@ CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(
 CREATE TRIGGER IF NOT EXISTS search_forget AFTER DELETE ON messages BEGIN
     DELETE FROM search WHERE rowid = old.id;
 END;
+CREATE TABLE IF NOT EXISTS drafts (
+    id INTEGER PRIMARY KEY,
+    account TEXT NOT NULL,
+    message TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS tombstones (
     account TEXT NOT NULL,
     mailbox TEXT NOT NULL,
@@ -273,6 +279,8 @@ pub struct MessageQuery {
     pub sort: MessageSort,
     /// Search column for words of `text` without one (see [`crate::search::COLUMNS`]).
     pub field: Option<String>,
+    /// Gmail category (see [`crate::search::CATEGORIES`]); `primary` is mail in none of the others.
+    pub category: Option<String>,
 }
 
 /// Order of a message list. Ties (and messages without a date) fall back to discovery order.
@@ -379,6 +387,17 @@ impl Index {
             conn.execute_batch("ALTER TABLE imap_uids ADD COLUMN moved INTEGER NOT NULL DEFAULT 0");
         // The content hash whose text is in `search` (see crate::search).
         let _ = conn.execute_batch("ALTER TABLE messages ADD COLUMN indexed_sha TEXT");
+        // Conversation key, set with the search text. Messages indexed before it existed are
+        // indexed again (the search-index job) to get one.
+        if conn
+            .execute_batch("ALTER TABLE messages ADD COLUMN thread TEXT")
+            .is_ok()
+        {
+            conn.execute_batch("UPDATE messages SET indexed_sha=NULL")?;
+        }
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS messages_thread ON messages(account, thread) WHERE thread IS NOT NULL",
+        )?;
         conn.create_scalar_function(
             "malo_fold",
             1,
@@ -915,6 +934,45 @@ impl Index {
         })
     }
 
+    /// The messages of `id`'s conversation (itself when it has none), oldest first, each copy of
+    /// a message (same Message-ID in several folders) once.
+    pub fn thread(&self, id: i64, destinations: u32) -> anyhow::Result<Vec<MessageSummary>> {
+        let ids: Vec<(i64, Option<String>)> = self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT t.id, t.message_id_hdr FROM messages g JOIN messages t
+                   ON t.account=g.account AND (t.id=g.id OR (g.thread IS NOT NULL AND t.thread=g.thread))
+                 WHERE g.id=?1
+                 ORDER BY t.internaldate IS NULL, t.internaldate, t.id LIMIT 200",
+            )?;
+            let rows = stmt
+                .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect();
+            rows
+        })?;
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for (tid, mid) in ids {
+            // The opened message is always the copy shown.
+            if let Some(m) = mid.filter(|_| tid != id) {
+                if !seen.insert(m) {
+                    continue;
+                }
+            }
+            if let Some(s) = self.summary(tid, destinations)? {
+                out.push(s);
+            }
+        }
+        // A copy seen before the opened one is dropped in favour of it.
+        if let Some(own) = out
+            .iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.envelope.message_id.clone())
+        {
+            out.retain(|s| s.id == id || s.envelope.message_id.as_deref() != Some(own.as_str()));
+        }
+        Ok(out)
+    }
+
     pub fn summary(&self, id: i64, destinations: u32) -> anyhow::Result<Option<MessageSummary>> {
         Ok(self
             .query_messages(
@@ -1002,6 +1060,7 @@ impl Index {
             tx.execute("DELETE FROM messages WHERE account=?1", [account])?;
             tx.execute("DELETE FROM mailboxes WHERE account=?1", [account])?;
             tx.execute("DELETE FROM imap_mailboxes WHERE account=?1", [account])?;
+            tx.execute("DELETE FROM drafts WHERE account=?1", [account])?;
             tx.execute(IMAP_META_CLEANUP, [])?;
             tx.commit()
         })
@@ -1528,6 +1587,8 @@ fn query_messages_on(
           AND (?14 IS NULL OR (coalesce(json_extract(g.envelope, '$.attachment_count'), 0) > 0) = ?14)
           AND (?15 IS NULL OR coalesce((SELECT COUNT(*)=SUM(m.deleted_on_server_at IS NOT NULL) FROM memberships m WHERE m.message=g.id), 0) = ?15)
           AND (?16 IS NULL OR g.reviewed = 1 - ?16)
+          AND (?17 IS NULL OR coalesce(g.category, 'primary') = ?17)
+          AND (?18 IS NULL OR (coalesce(g.category, 'primary') = ?18) = ?19)
           AND (?5 IS NULL OR instr(',' || ?5 || ',', ',' || g.state || ',') > 0)
           AND (?7 IS NULL OR g.id<=?7)"
     );
@@ -1549,7 +1610,12 @@ fn query_messages_on(
             search.before,
             search.has_attachment,
             search.purged,
-            search.unread
+            search.unread,
+            q.category
+                .as_deref()
+                .filter(|c| crate::search::CATEGORIES.contains(c)),
+            search.category.as_ref().map(|c| c.0.as_str()),
+            search.category.as_ref().map(|c| c.1)
         ];
         // The total only matters for paging a list; counting is a full scan.
         let total: i64 = match id {
@@ -1567,7 +1633,10 @@ fn query_messages_on(
                 (SELECT m.gm_labels FROM memberships m WHERE m.message=g.id LIMIT 1),
                 (SELECT m.flags FROM memberships m WHERE m.message=g.id LIMIT 1),
                 (SELECT COUNT(*)=SUM(m.deleted_on_server_at IS NOT NULL) FROM memberships m WHERE m.message=g.id),
-                {snippet}
+                {snippet},
+                g.category,
+                CASE WHEN g.thread IS NULL THEN 1 ELSE
+                  (SELECT COUNT(DISTINCT coalesce(t.message_id_hdr, t.id)) FROM messages t WHERE t.account=g.account AND t.thread=g.thread) END
              FROM messages g {filter} ORDER BY {order} LIMIT ?8 OFFSET ?9",
             // Matches are marked with STX/ETX (U+0002, U+0003) for the app to highlight.
             snippet = if fts.is_some() {
@@ -1606,6 +1675,8 @@ fn query_messages_on(
                     flags: split_list(r.get::<_, Option<String>>(12)?.unwrap_or_default()),
                     deleted_on_server: r.get::<_, Option<bool>>(13)?.unwrap_or(false),
                     snippet: r.get(14)?,
+                    category: r.get(15)?,
+                    thread_size: r.get::<_, i64>(16)? as u32,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;

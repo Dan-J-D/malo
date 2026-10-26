@@ -200,8 +200,8 @@
       {/each}
     </div>
     <details open={kind === 'other'}><summary>Additional OpenDAL options</summary><KeyValue bind:values={extra} /></details>
-    <label class="check"><input type="checkbox" bind:checked={form.encrypt} disabled={!!editing} /> Encrypt backups (recommended; can't be changed later)</label>
-    <label class="check"><input type="checkbox" bind:checked={form.required_for_purge} /> Offer as a required destination for purges</label>
+    <label class="check"><input type="checkbox" class="switch" bind:checked={form.encrypt} disabled={!!editing} /> Encrypt backups (recommended; can't be changed later)</label>
+    <label class="check"><input type="checkbox" class="switch" bind:checked={form.required_for_purge} /> Offer as a required destination for purges</label>
     <div class="row">
       <label>Deep check
         <Select value={form.deep_check.mode}

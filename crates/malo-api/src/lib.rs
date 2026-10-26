@@ -772,6 +772,11 @@ pub struct MessageSummary {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub snippet: Option<String>,
+    /// Gmail category other than Primary (`social`, `promotions`, `updates`, `forums`).
+    pub category: Option<String>,
+    /// Messages in its conversation, itself included.
+    #[serde(default)]
+    pub thread_size: u32,
 }
 
 /// A value for a search operator (`from:`, `to:`, `file:`), most used first.
@@ -835,6 +840,9 @@ pub struct MessageView {
     pub from_name: Option<String>,
     pub to: Vec<String>,
     pub cc: Vec<String>,
+    /// Where replies go, when the sender asks for another address (Reply-To).
+    #[serde(default)]
+    pub reply_to: Vec<String>,
     pub subject: String,
     pub date: Option<Timestamp>,
     pub text: String,
@@ -847,6 +855,63 @@ pub struct MessageView {
     pub authentication_results: Vec<String>,
     pub warnings: Vec<String>,
     pub attachments: Vec<AttachmentInfo>,
+}
+
+/// A message written in Malo, sent through the account's SMTP server.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct SendRequest {
+    /// Sender address; the account's username when it is an address.
+    #[serde(default)]
+    #[ts(optional)]
+    pub from: Option<String>,
+    /// `Name <addr>` or `addr`.
+    pub to: Vec<String>,
+    #[serde(default)]
+    pub cc: Vec<String>,
+    #[serde(default)]
+    pub bcc: Vec<String>,
+    pub subject: String,
+    pub body: String,
+    /// The message this answers (In-Reply-To, References).
+    #[serde(default)]
+    #[ts(optional, type = "number")]
+    pub in_reply_to: Option<i64>,
+    /// A message whose attachments go along (forwarding).
+    #[serde(default)]
+    #[ts(optional, type = "number")]
+    pub attachments_of: Option<i64>,
+    /// The draft this was written in: deleted once the message is sent.
+    #[serde(default)]
+    #[ts(optional, type = "number")]
+    pub draft_id: Option<i64>,
+}
+
+/// A message being written, kept (encrypted, in Malo only) until it is sent or discarded.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct DraftView {
+    #[ts(type = "number")]
+    pub id: i64,
+    pub account_id: String,
+    pub message: SendRequest,
+    pub updated_at: Timestamp,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct DraftInput {
+    /// The draft to update; a new one without it.
+    #[serde(default)]
+    #[ts(optional, type = "number")]
+    pub id: Option<i64>,
+    pub account_id: String,
+    pub message: SendRequest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct SendResult {
+    pub message_id: String,
+    /// The sent copy was saved in this mailbox on the account's server (not for Gmail, which
+    /// files sent mail itself).
+    pub saved_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1162,6 +1227,10 @@ pub fn typescript_bindings() -> String {
         MessageSummary,
         MessageList,
         SearchSuggestion,
+        SendRequest,
+        SendResult,
+        DraftView,
+        DraftInput,
         MailboxInfo,
         ReviewedRequest,
         MessageView,

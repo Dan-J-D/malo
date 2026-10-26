@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use chrono::{DateTime, NaiveDate, Utc};
+use futures::StreamExt;
 use malo_api::{JobKind, JobTrigger};
 use malo_core::mailview::{Folder, FolderSource, ImapMeta, ViewMessage};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
@@ -24,6 +25,8 @@ use crate::state::SharedState;
 const CAPABILITIES: &str =
     "IMAP4rev1 LITERAL+ SASL-IR AUTH=PLAIN ID IDLE NAMESPACE MOVE SPECIAL-USE UNSELECT CHILDREN";
 const MAX_LINE: usize = 64 * 1024;
+/// How many messages a command reads at once (they may come from a remote destination).
+const LOAD_CONCURRENCY: usize = 8;
 const MAX_LITERAL: usize = super::smtp::MAX_MESSAGE;
 /// RFC 3501: at least 30 minutes for an authenticated client.
 const AUTOLOGOUT: Duration = Duration::from_secs(31 * 60);
@@ -581,22 +584,6 @@ fn flag_list(flags: &[String]) -> String {
     format!("({})", v.join(" "))
 }
 
-fn meta_of(raw: &[u8]) -> ImapMeta {
-    let root = mime::parse(raw);
-    let mut envelope = vec![];
-    mime::envelope(&mut envelope, &mime::fields(root.header));
-    let mut bodystructure = vec![];
-    mime::body_structure(&mut bodystructure, &root, true);
-    let mut body = vec![];
-    mime::body_structure(&mut body, &root, false);
-    ImapMeta {
-        header: root.header.to_vec(),
-        envelope,
-        bodystructure,
-        body,
-    }
-}
-
 /// The bytes of a section of a message.
 fn section_bytes(raw: &[u8], s: &Section) -> Vec<u8> {
     let root = mime::parse(raw);
@@ -949,6 +936,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
         match authenticate(&self.state, username, password, self.ip).await {
             Ok(u) => {
                 tracing::info!(login = %u.username, "IMAP login");
+                if let Ok(user) = u.unlocked(&self.state) {
+                    crate::jobs::index_if_pending(&self.state, &user);
+                }
                 self.user = Some(u);
                 self.line(&format!("{tag} OK [CAPABILITY {CAPABILITIES}] Logged in"))
                     .await?;
@@ -1298,40 +1288,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
         Ok(())
     }
 
-    /// Cached header data of a message, computed (and cached) from the raw message if needed.
-    async fn meta(
-        &self,
-        user: &Arc<UnlockedUser>,
-        m: &ViewMessage,
-        raw: &mut Option<Vec<u8>>,
-    ) -> anyhow::Result<ImapMeta> {
-        if let Some(meta) = user.index.imap_meta(&m.sha256)? {
-            return Ok(meta);
-        }
-        let bytes = self.raw(user, m, raw).await?;
-        let meta = meta_of(&bytes);
-        if let Err(e) = user.index.put_imap_meta(&m.sha256, &meta) {
-            tracing::debug!("caching IMAP header data: {e:#}");
-        }
-        Ok(meta)
-    }
-
-    async fn raw(
-        &self,
-        user: &Arc<UnlockedUser>,
-        m: &ViewMessage,
-        raw: &mut Option<Vec<u8>>,
-    ) -> anyhow::Result<Vec<u8>> {
-        if let Some(r) = raw {
-            return Ok(r.clone());
-        }
-        let r = crate::routes::load_raw(&self.state, user, m.message)
-            .await
-            .map_err(|e| anyhow::anyhow!("[UNAVAILABLE] {}", e.message))?;
-        *raw = Some(r.clone());
-        Ok(r)
-    }
-
     async fn fetch(
         &mut self,
         tag: &str,
@@ -1370,25 +1326,29 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
         let account = self.account_id();
         let mut failed = None;
         let mut seen_changes = vec![];
-        for idx in targets {
-            let Some(m) = self.sel.as_ref().and_then(|s| s.msgs.get(idx)).cloned() else {
-                continue;
-            };
-            let mut raw = None;
-            let loaded: anyhow::Result<(Option<ImapMeta>, Option<Vec<u8>>)> = async {
-                let raw_bytes = if needs_raw {
-                    Some(self.raw(user, &m, &mut raw).await?)
-                } else {
-                    None
-                };
-                let meta = if needs_meta {
-                    Some(self.meta(user, &m, &mut raw).await?)
-                } else {
-                    None
-                };
-                Ok((meta, raw_bytes))
-            }
-            .await;
+        let msgs: Vec<(usize, ViewMessage)> = targets
+            .into_iter()
+            .filter_map(|idx| {
+                let m = self.sel.as_ref()?.msgs.get(idx)?.clone();
+                Some((idx, m))
+            })
+            .collect();
+        // Several messages load at once; responses still go out in order, as each is ready.
+        // (The futures are built up front, not in a stream's closure: that keeps the session
+        // future Send.)
+        let state = self.state.clone();
+        let jobs: Vec<_> = msgs
+            .into_iter()
+            .map(|(idx, m)| {
+                let (state, user) = (state.clone(), user.clone());
+                async move {
+                    let loaded = load(&state, &user, &m, needs_raw, needs_meta).await;
+                    (idx, m, loaded)
+                }
+            })
+            .collect();
+        let mut queue = futures::stream::iter(jobs).buffered(LOAD_CONCURRENCY);
+        while let Some((idx, m, loaded)) = queue.next().await {
             let (meta, raw_bytes) = match loaded {
                 Ok(v) => v,
                 Err(e) => {
@@ -1629,23 +1589,32 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
             .map(|s| s.msgs.clone())
             .unwrap_or_default();
         let mut hits = vec![];
-        for (i, m) in msgs.iter().enumerate() {
-            let mut raw = None;
-            let indexed = !unindexed.contains(&m.message);
-            let need_raw = !full_text.is_empty() && (raw_for_all || !indexed);
-            let raw_bytes = if need_raw {
-                self.raw(user, m, &mut raw).await.ok()
-            } else {
-                None
-            };
-            let header = if need_header {
-                self.meta(user, m, &mut raw).await.ok().map(|x| x.header)
-            } else {
-                None
-            };
+        let state = self.state.clone();
+        let check_text = !full_text.is_empty();
+        let jobs: Vec<_> = msgs
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                let indexed = !unindexed.contains(&m.message);
+                let need_raw = check_text && (raw_for_all || !indexed);
+                let (state, user, m) = (state.clone(), user.clone(), m.clone());
+                async move {
+                    let (meta, raw) = if need_raw || need_header {
+                        load(&state, &user, &m, need_raw, need_header)
+                            .await
+                            .unwrap_or_default()
+                    } else {
+                        (None, None)
+                    };
+                    (i, m, indexed, meta.map(|x| x.header), raw)
+                }
+            })
+            .collect();
+        let mut queue = futures::stream::iter(jobs).buffered(LOAD_CONCURRENCY);
+        while let Some((i, m, indexed, header, raw_bytes)) = queue.next().await {
             let item = SearchItem {
                 seq: i as u32 + 1,
-                msg: m,
+                msg: &m,
                 header: header.as_deref(),
                 raw: raw_bytes.as_deref(),
                 indexed,
@@ -1923,6 +1892,40 @@ fn literal(out: &mut Vec<u8>, bytes: &[u8]) {
 }
 
 /// The tag of a command being read (for an error before it is complete).
+/// What a command needs of a message: its raw bytes, its header data, or both. Header data is
+/// normally stored when the message is indexed, so header-only fetches don't download anything;
+/// otherwise it's computed from the raw message and kept.
+async fn load(
+    state: &SharedState,
+    user: &Arc<UnlockedUser>,
+    m: &ViewMessage,
+    need_raw: bool,
+    need_meta: bool,
+) -> anyhow::Result<(Option<ImapMeta>, Option<Vec<u8>>)> {
+    let mut meta = if need_meta {
+        user.index.imap_meta(&m.sha256)?
+    } else {
+        None
+    };
+    let raw = if need_raw || (need_meta && meta.is_none()) {
+        Some(
+            crate::routes::load_raw(state, user, m.message)
+                .await
+                .map_err(|e| anyhow::anyhow!("[UNAVAILABLE] {}", e.message))?,
+        )
+    } else {
+        None
+    };
+    if let (true, None, Some(bytes)) = (need_meta, &meta, &raw) {
+        let computed = ImapMeta::of(bytes);
+        if let Err(e) = user.index.put_imap_meta(&m.sha256, &computed) {
+            tracing::debug!("caching IMAP header data: {e:#}");
+        }
+        meta = Some(computed);
+    }
+    Ok((meta, raw.filter(|_| need_raw)))
+}
+
 fn segs_tag(segs: &[Seg], line: &[u8]) -> Vec<u8> {
     let first = match segs.first() {
         Some(Seg::Text(t)) => t.as_slice(),

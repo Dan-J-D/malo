@@ -236,12 +236,12 @@
         </label>
         <label>Backup every (minutes) <input type="number" min="1" bind:value={form.backup_interval_minutes} /></label>
       </div>
-      <label class="check"><input type="checkbox" bind:checked={form.idle} /> Watch INBOX with IMAP IDLE for near-real-time backups</label>
-      <label class="check"><input type="checkbox" bind:checked={form.enabled} /> Scheduled backups enabled</label>
-      <label class="check"><input type="checkbox" bind:checked={form.accept_invalid_certs} /> Accept invalid server certificates <span class="muted">(test servers only — unsafe)</span></label>
+      <label class="check"><input type="checkbox" class="switch" bind:checked={form.idle} /> Watch INBOX with IMAP IDLE for near-real-time backups</label>
+      <label class="check"><input type="checkbox" class="switch" bind:checked={form.enabled} /> Scheduled backups enabled</label>
+      <label class="check"><input type="checkbox" class="switch" bind:checked={form.accept_invalid_certs} /> Accept invalid server certificates <span class="muted">(test servers only — unsafe)</span></label>
 
       <h3>Outgoing mail</h3>
-      <label class="check"><input type="checkbox" bind:checked={sending} /> Send mail from mail apps through this account's SMTP server <span class="muted">(signs in like IMAP)</span></label>
+      <label class="check"><input type="checkbox" class="switch" bind:checked={sending} /> Send mail from mail apps through this account's SMTP server <span class="muted">(signs in like IMAP)</span></label>
       {#if sending}
         <div class="cards">
           <label>SMTP host <input bind:value={smtp.host} placeholder="smtp.example.com" /></label>

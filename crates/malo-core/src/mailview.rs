@@ -75,13 +75,31 @@ pub struct FolderView {
 }
 
 /// Parsed header data of a message, so header-only fetches don't download it again.
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ImapMeta {
     pub header: Vec<u8>,
     /// ENVELOPE, BODYSTRUCTURE and BODY in IMAP syntax (bytes: literals may hold 8-bit text).
     pub envelope: Vec<u8>,
     pub bodystructure: Vec<u8>,
     pub body: Vec<u8>,
+}
+
+impl ImapMeta {
+    pub fn of(raw: &[u8]) -> ImapMeta {
+        let root = crate::mime::parse(raw);
+        let mut envelope = vec![];
+        crate::mime::envelope(&mut envelope, &crate::mime::fields(root.header));
+        let mut bodystructure = vec![];
+        crate::mime::body_structure(&mut bodystructure, &root, true);
+        let mut body = vec![];
+        crate::mime::body_structure(&mut body, &root, false);
+        ImapMeta {
+            header: root.header.to_vec(),
+            envelope,
+            bodystructure,
+            body,
+        }
+    }
 }
 
 /// Messages become visible once their content is stored somewhere.

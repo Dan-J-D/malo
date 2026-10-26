@@ -7,6 +7,7 @@
   import { copy } from '../menu.svelte';
   import { ago } from '../format';
   import Modal from './Modal.svelte';
+  import Icon from './Icon.svelte';
 
   // The IMAP/SMTP login of one account: a username the user picks and a password the server
   // generates, shown once. It is separate from the Malo password, so a mail app never holds
@@ -126,8 +127,13 @@
     {#if created}
       <div class="callout ok">
         <p><strong>Copy the password now.</strong> Malo keeps only a hash of it and can't show it again; you can always make a new one.</p>
-        <div class="row"><span class="grow">Username <code>{created.login.username}</code></span><button onclick={() => copy(created!.login.username, 'Username copied')}>Copy</button></div>
-        <div class="row"><span class="grow">Password <code class="mono">{created.password}</code></span><button onclick={() => copy(created!.password, 'Password copied')}>Copy</button></div>
+        <div class="mt-3 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2">
+          {#each [['Username', created.login.username], ['Password', created.password]] as [name, secret] (name)}
+            <span class="text-[0.85rem] text-muted">{name}</span>
+            <code class="mono min-w-0 rounded-md border border-line bg-raised px-2.5 py-1.5 text-fg select-all">{secret}</code>
+            <button class="justify-center" onclick={() => copy(secret, `${name} copied`)} aria-label="Copy {name.toLowerCase()}"><Icon name="copy" size={14} /> Copy</button>
+          {/each}
+        </div>
       </div>
     {/if}
 
@@ -169,7 +175,7 @@
         <h3>Folders</h3>
         <p class="muted small">Choose what the mail app shows. Moving a message in the mail app (to Spam, a category, Trash or any folder) files it there in Malo's view; the backup and the mail server stay as they are.</p>
         {#if view.gmail}
-          <label class="check"><input type="checkbox" checked={view.split_categories} onchange={(e) => view && saveView((e.target as HTMLInputElement).checked, view.folders.filter((x) => !x.shown).map((x) => x.name))} />
+          <label class="check"><input type="checkbox" class="switch" checked={view.split_categories} onchange={(e) => view && saveView((e.target as HTMLInputElement).checked, view.folders.filter((x) => !x.shown).map((x) => x.name))} />
             Separate Gmail categories: INBOX shows Primary; Social, Promotions, Updates and Forums get folders of their own</label>
         {/if}
         <table class="small">

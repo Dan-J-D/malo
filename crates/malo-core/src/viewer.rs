@@ -434,6 +434,7 @@ pub fn render(
         from_name,
         to: address_list(msg.to()),
         cc: address_list(msg.cc()),
+        reply_to: address_list(msg.reply_to()),
         subject: msg.subject().unwrap_or("").to_string(),
         date: msg
             .date()

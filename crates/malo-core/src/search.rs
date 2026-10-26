@@ -15,6 +15,7 @@ use serde::Serialize;
 use crate::crypto;
 use crate::ctx::JobCtx;
 use crate::index::{fold, Index};
+use crate::mailview::ImapMeta;
 
 /// Body text indexed per message; the rest of a very long message isn't searchable.
 pub const MAX_BODY_CHARS: usize = 200_000;
@@ -22,6 +23,10 @@ pub const MAX_BODY_CHARS: usize = 200_000;
 const CONCURRENCY: usize = 8;
 /// kv: how many messages the last search-index job couldn't read.
 pub const UNAVAILABLE_KEY: &str = "search_unavailable";
+
+/// Messages whose content isn't indexed: no searchable text, or no header data for mail apps.
+const PENDING: &str = "indexed_sha IS NOT sha256
+    OR NOT EXISTS(SELECT 1 FROM imap_meta i WHERE i.sha256=messages.sha256)";
 
 /// The searchable text of one message. It keeps its case (the tokenizer ignores case and
 /// accents) so snippets read naturally, but not characters that hide words (see [`clean`]).
@@ -32,13 +37,22 @@ pub struct SearchDoc {
     pub recipients: String,
     pub attachments: String,
     pub body: String,
+    /// The conversation it belongs to: the first Message-ID of References, else In-Reply-To,
+    /// else its own Message-ID (lower case, without angle brackets).
+    pub thread: Option<String>,
+    /// What mail apps fetch without the message: header, ENVELOPE and BODYSTRUCTURE.
+    pub imap: Option<ImapMeta>,
 }
 
 /// Text of a raw message: headers people search by, attachment names and the readable body
 /// (HTML-only mail as text). Unparseable mail gives an empty document.
 pub fn extract(raw: &[u8]) -> SearchDoc {
+    let imap = Some(ImapMeta::of(raw));
     let Some(msg) = MessageParser::default().parse(raw) else {
-        return SearchDoc::default();
+        return SearchDoc {
+            imap,
+            ..SearchDoc::default()
+        };
     };
     let addresses = |list: &[Option<&mail_parser::Address>]| {
         let mut out = String::new();
@@ -67,13 +81,27 @@ pub fn extract(raw: &[u8]) -> SearchDoc {
         .attachments()
         .filter_map(|p| p.attachment_name())
         .collect();
+    let first = |v: &mail_parser::HeaderValue| {
+        v.as_text_list()
+            .and_then(|l| l.first().map(|s| s.to_string()))
+    };
+    let thread = first(msg.references())
+        .or_else(|| first(msg.in_reply_to()))
+        .or_else(|| msg.message_id().map(str::to_string))
+        .map(|id| {
+            id.trim_matches(|c: char| c == '<' || c == '>' || c.is_whitespace())
+                .to_lowercase()
+        })
+        .filter(|id| !id.is_empty());
     SearchDoc {
+        thread,
         subject: clean(msg.subject().unwrap_or("")),
         sender: clean(&addresses(&[msg.from(), msg.sender(), msg.reply_to()])),
         recipients: clean(&addresses(&[msg.to(), msg.cc(), msg.bcc()])),
         // One name per line, so suggestions can tell them apart.
         attachments: clean(&attachments.join("\n")),
         body: clean(&body),
+        imap,
     }
 }
 
@@ -150,7 +178,13 @@ pub struct Search {
     /// Deleted on the mail server (only the backup has it).
     pub purged: Option<bool>,
     pub unread: Option<bool>,
+    /// Gmail category (`primary`, `social`, `promotions`, `updates`, `forums`), and whether the
+    /// message must be in it (false: `-category:`).
+    pub category: Option<(String, bool)>,
 }
+
+/// Gmail's inbox categories, Primary first.
+pub const CATEGORIES: [&str; 5] = ["primary", "social", "promotions", "updates", "forums"];
 
 impl Search {
     /// Whether a term with words must match (through the index or the envelope).
@@ -220,7 +254,10 @@ fn terms(input: &str) -> Vec<Term> {
                     let name = word.to_ascii_lowercase();
                     if let Some(c) = column_of(&name) {
                         column = Some(c);
-                    } else if matches!(name.as_str(), "has" | "is" | "before" | "after") {
+                    } else if matches!(
+                        name.as_str(),
+                        "has" | "is" | "before" | "after" | "category"
+                    ) {
                         operator = Some(name);
                     } else {
                         word.push(':');
@@ -253,7 +290,8 @@ fn terms(input: &str) -> Vec<Term> {
 ///   phrase to that part; `column` does that for words without one;
 /// - `OR` between two words or phrases, `-word` leaves out messages with it;
 /// - `after:2024-03-01` and `before:2024` (received; a day, month or year), `has:attachment`,
-///   `is:purged` (deleted on the mail server), `is:unread`, `is:read`; `-` negates them too.
+///   `is:purged` (deleted on the mail server), `is:unread`, `is:read`, `category:social` (Gmail:
+///   primary, social, promotions, updates, forums); `-` negates them too.
 pub fn parse(input: &str, column: Option<&str>) -> Search {
     let column = column.and_then(|c| COLUMNS.iter().copied().find(|x| *x == c));
     let mut s = Search::default();
@@ -272,6 +310,9 @@ pub fn parse(input: &str, column: Option<&str>) -> Search {
                 ("is", "purged" | "deleted") => s.purged = flag,
                 ("is", "unread" | "new") => s.unread = flag,
                 ("is", "read") => s.unread = Some(t.negate),
+                ("category", c) if CATEGORIES.contains(&c) => {
+                    s.category = Some((c.to_string(), !t.negate))
+                }
                 ("after", d) if !t.negate => s.after = date_prefix(d).or(s.after),
                 ("before", d) if !t.negate => s.before = date_prefix(d).or(s.before),
                 _ => {}
@@ -389,9 +430,16 @@ impl Index {
                 ],
             )?;
             tx.execute(
-                "UPDATE messages SET indexed_sha=?2 WHERE id=?1",
-                params![id, sha256],
+                "UPDATE messages SET indexed_sha=?2, thread=?3 WHERE id=?1",
+                params![id, sha256, doc.thread],
             )?;
+            if let Some(m) = &doc.imap {
+                tx.execute(
+                    "INSERT OR REPLACE INTO imap_meta(sha256, header, envelope, bodystructure, body)
+                     VALUES(?1,?2,?3,?4,?5)",
+                    params![sha256, m.header, m.envelope, m.bodystructure, m.body],
+                )?;
+            }
             tx.commit()?;
             Ok(true)
         })
@@ -401,7 +449,8 @@ impl Index {
     pub fn search_indexed(&self, id: i64, sha256: &str) -> anyhow::Result<bool> {
         self.with(|c| {
             c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM messages WHERE id=?1 AND indexed_sha=?2)",
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE id=?1 AND indexed_sha=?2)
+                   AND EXISTS(SELECT 1 FROM imap_meta WHERE sha256=?2)",
                 params![id, sha256],
                 |r| r.get(0),
             )
@@ -421,12 +470,12 @@ impl Index {
         limit: u32,
     ) -> anyhow::Result<Vec<(i64, String)>> {
         self.with(|c| {
-            let mut stmt = c.prepare(
+            let mut stmt = c.prepare(&format!(
                 "SELECT id, sha256 FROM messages
                  WHERE id<?2 AND (?1 IS NULL OR account=?1) AND sha256 IS NOT NULL
-                   AND indexed_sha IS NOT sha256
-                 ORDER BY id DESC LIMIT ?3",
-            )?;
+                   AND ({PENDING})
+                 ORDER BY id DESC LIMIT ?3"
+            ))?;
             let rows = stmt
                 .query_map(params![account, before, limit], |r| {
                     Ok((r.get(0)?, r.get(1)?))
@@ -440,8 +489,10 @@ impl Index {
     pub fn search_pending_count(&self, account: Option<&str>) -> anyhow::Result<u64> {
         self.with(|c| {
             c.query_row(
-                "SELECT COUNT(*) FROM messages WHERE (?1 IS NULL OR account=?1)
-                   AND sha256 IS NOT NULL AND indexed_sha IS NOT sha256",
+                &format!(
+                    "SELECT COUNT(*) FROM messages WHERE (?1 IS NULL OR account=?1)
+                       AND sha256 IS NOT NULL AND ({PENDING})"
+                ),
                 params![account],
                 |r| r.get::<_, i64>(0),
             )
@@ -670,8 +721,22 @@ JVBERg==\r\n\
         assert!(d.recipients.contains("bob@example.org"));
         assert!(d.attachments.contains("receipt-march.pdf"));
         assert!(d.body.contains("café bill by Friday"), "{}", d.body);
-        assert!(!d.body.contains("<p>"));
-        assert_eq!(extract(b""), SearchDoc::default());
+        assert_eq!(extract(b"").subject, "");
+        assert!(
+            extract(b"").imap.is_some(),
+            "mail apps can still list unparseable mail"
+        );
+        assert_eq!(d.thread, None, "no Message-ID, no References");
+        let reply = extract(
+            b"Message-ID: <c@x>\r\nIn-Reply-To: <B@x>\r\nReferences: <A@x> <B@x>\r\n\r\nhi\r\n",
+        );
+        assert_eq!(reply.thread.as_deref(), Some("a@x"));
+        assert_eq!(
+            extract(b"Message-ID: <Root@x>\r\n\r\nhi\r\n")
+                .thread
+                .as_deref(),
+            Some("root@x")
+        );
     }
 
     #[test]
@@ -803,6 +868,38 @@ JVBERg==\r\n\
         assert_eq!(hits("is:purged"), vec![ids[2]]);
         assert_eq!(hits("is:unread from:al"), vec![ids[1], ids[2]]);
         assert_eq!(hits("alice -has:attachment"), vec![ids[1]]);
+        idx.with(|c| {
+            c.execute(
+                "UPDATE messages SET category='social' WHERE id=?1",
+                [ids[1]],
+            )
+        })
+        .unwrap();
+        assert_eq!(hits("category:social"), vec![ids[1]]);
+        assert_eq!(hits("-category:social"), vec![ids[0], ids[2]]);
+        assert_eq!(hits("category:primary"), vec![ids[0], ids[2]]);
+        let in_category = |c: &str| {
+            idx.list_messages(
+                &MessageQuery {
+                    category: Some(c.into()),
+                    ..Default::default()
+                },
+                1,
+            )
+            .unwrap()
+            .1
+        };
+        let social = in_category("social");
+        assert_eq!(
+            (social.len(), social[0].category.as_deref()),
+            (1, Some("social"))
+        );
+        assert_eq!(in_category("primary").len(), 2);
+        assert_eq!(
+            in_category("bogus").len(),
+            3,
+            "an unknown category doesn't filter"
+        );
         assert!(
             hits("body:alice").is_empty(),
             "not indexed: no body to search"
@@ -846,6 +943,15 @@ JVBERg==\r\n\
         assert!(!idx.search_index_raw(id, "other", RAW).unwrap());
         assert!(idx.search_index_raw(id, "s1", RAW).unwrap());
         assert_eq!(idx.search_pending_count(None).unwrap(), 0);
+        // Mail apps' header data is stored with it; without it the message is pending again.
+        let meta = idx.imap_meta("s1").unwrap().expect("IMAP header data");
+        assert!(meta.envelope.starts_with(b"("));
+        idx.with(|c| c.execute("DELETE FROM imap_meta", []))
+            .unwrap();
+        assert_eq!(idx.search_pending_count(None).unwrap(), 1);
+        assert!(!idx.search_indexed(id, "s1").unwrap());
+        assert!(idx.search_index_raw(id, "s1", RAW).unwrap());
+        assert_eq!(idx.search_pending_count(None).unwrap(), 0);
         let hits = |q: &str| idx.search_ids(&query(q).unwrap(), None).unwrap();
         for q in [
             "invoice",
@@ -879,8 +985,39 @@ JVBERg==\r\n\
             .search_suggest("file", "zzz", None, 8)
             .unwrap()
             .is_empty());
+        // Its conversation: itself, plus a reply that references it.
+        assert_eq!(idx.thread(id, 1).unwrap().len(), 1);
+        let reply = idx
+            .insert_message(&NewMessage {
+                account: "a",
+                run: None,
+                size: 1,
+                internaldate: None,
+                message_id_hdr: Some("<r@x>"),
+                gm_msgid: None,
+                envelope: &env,
+                state: MessageState::Verified,
+                sha256: Some("s2"),
+            })
+            .unwrap();
+        let mut doc = extract(b"Message-ID: <r@x>\r\nIn-Reply-To: <t@x>\r\n\r\nok\r\n");
+        assert_eq!(doc.thread.as_deref(), Some("t@x"));
+        idx.search_put(
+            id,
+            "s1",
+            &SearchDoc {
+                thread: Some("t@x".into()),
+                ..extract(RAW)
+            },
+        )
+        .unwrap();
+        doc.body = "ok".into();
+        idx.search_put(reply, "s2", &doc).unwrap();
+        let t = idx.thread(reply, 1).unwrap();
+        assert_eq!(t.iter().map(|m| m.id).collect::<Vec<_>>(), vec![id, reply]);
+        assert!(t.iter().all(|m| m.thread_size == 2));
         // Deleting the message deletes its text.
-        idx.forget_messages(&[id]).unwrap();
+        idx.forget_messages(&[id, reply]).unwrap();
         assert!(hits("invoice").is_empty());
         let n: i64 = idx
             .with(|c| c.query_row("SELECT COUNT(*) FROM search", [], |r| r.get(0)))

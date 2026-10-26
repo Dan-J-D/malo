@@ -90,7 +90,7 @@
       <label>Quick check every (hours, 0 = off) <input type="number" min="0" bind:value={settings.quick_check_hours} /></label>
       <label>Deep check every (hours, 0 = off) <input type="number" min="0" bind:value={settings.deep_check_hours} /></label>
     </div>
-    <label class="check"><input type="checkbox" bind:checked={settings.auto_repair} /> Repair damaged copies automatically during scheduled checks</label>
+    <label class="check"><input type="checkbox" class="switch" bind:checked={settings.auto_repair} /> Repair damaged copies automatically during scheduled checks</label>
     <div class="mt-4"><button class="primary" onclick={saveSettings}>Save</button></div>
   </div>
 {/if}
@@ -116,7 +116,7 @@
 {#if session.local}
   <div class="panel">
     <h2>Local server</h2>
-    <label class="check"><input type="checkbox" bind:checked={tray} onchange={setTray} /> Keep backing up in the system tray when the window is closed</label>
+    <label class="check"><input type="checkbox" class="switch" bind:checked={tray} onchange={setTray} /> Keep backing up in the system tray when the window is closed</label>
     <h3 class="mt-5">Data</h3>
     <LocalData />
   </div>

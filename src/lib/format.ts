@@ -79,3 +79,53 @@ export function reveal(s: string | null | undefined): string {
   if (!s) return '';
   return s.replace(INVISIBLE, (c) => `⟨U+${(c.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0')}⟩`);
 }
+
+/** Gmail's inbox categories, as tabs, badges and chips. Primary has no badge: it's the default. */
+export const CATEGORIES = {
+  primary: { label: 'Primary', icon: 'zap', tone: 'text-accent-2', bg: 'bg-accent-2/15' },
+  social: { label: 'Social', icon: 'users', tone: 'text-ok', bg: 'bg-ok/15' },
+  updates: { label: 'Updates', icon: 'bell', tone: 'text-violet', bg: 'bg-violet/15' },
+  promotions: { label: 'Promotions', icon: 'tag', tone: 'text-rose-400', bg: 'bg-rose-400/15' },
+  forums: { label: 'Forums', icon: 'forums', tone: 'text-sky-400', bg: 'bg-sky-400/15' },
+} as const;
+export type Category = keyof typeof CATEGORIES;
+
+/** Whether an account is Gmail (and so has categories). */
+export function isGmail(a: { host: string } | null | undefined): boolean {
+  return !!a && /(^|\.)(gmail|googlemail)\.com$/i.test(a.host);
+}
+
+/** "March 25" or "March 25 – March 29" (with years when they differ from this one). */
+export function dateRange(from: string | null | undefined, to: string | null | undefined): string {
+  if (!from) return '';
+  const now = new Date().getFullYear();
+  const f = (ts: string) => {
+    const d = new Date(ts);
+    return d.toLocaleDateString(undefined, d.getFullYear() === now ? { month: 'long', day: 'numeric' } : { month: 'long', day: 'numeric', year: 'numeric' });
+  };
+  const a = f(from);
+  const b = to ? f(to) : a;
+  return a === b ? a : `${a} – ${b}`;
+}
+
+/** Icon and colour of an attachment chip, from its name and type. */
+export function fileKind(name: string, type: string): { icon: string; tone: string } {
+  const ext = name.toLowerCase().split('.').pop() ?? '';
+  if (type === 'application/pdf' || ext === 'pdf') return { icon: 'file', tone: 'text-bad' };
+  if (type.startsWith('image/')) return { icon: 'image', tone: 'text-violet' };
+  if (/^(zip|rar|7z|gz|tar|tgz|bz2|xz)$/.test(ext)) return { icon: 'archive', tone: 'text-warn' };
+  if (/^(xlsx?|csv|ods|numbers)$/.test(ext)) return { icon: 'file', tone: 'text-ok' };
+  return { icon: 'file', tone: 'text-info' };
+}
+
+/** "Name <addr>" → "Name"; a bare address stays as it is. */
+export function personName(s: string): string {
+  const m = /^\s*"?([^"<]*?)"?\s*<([^>]+)>\s*$/.exec(s);
+  return m ? m[1] || m[2] : s.trim();
+}
+
+/** The address of "Name <addr>" or a bare address, lower case. */
+export function addressOf(s: string): string {
+  const m = /<([^>]+)>\s*$/.exec(s);
+  return (m ? m[1] : s).trim().toLowerCase();
+}

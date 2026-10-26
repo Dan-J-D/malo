@@ -190,7 +190,7 @@
   onclick={() => (open ? close() : show())}
   {onkeydown}>
   <span class="untrusted min-w-0 flex-1 truncate text-left">{current?.label ?? ''}</span>
-  <span class="flex-none text-faint transition-transform duration-150 {open ? 'rotate-180' : ''}"><Icon name="chevron" size={14} /></span>
+  <span class="flex-none text-faint transition-transform duration-300 ease-[var(--ease-spring)] {open ? 'rotate-180' : ''}"><Icon name="chevron" size={14} /></span>
 </button>
 
 {#if open}
@@ -200,7 +200,7 @@
     {id}
     role="listbox"
     aria-label={ariaLabel ?? current?.label}
-    class="select-list fixed z-[210] m-0 list-none overflow-y-auto rounded-xl border border-line bg-panel p-1 text-[0.9rem] shadow-2xl shadow-black/30"
+    class="select-list {pos.up ? 'pop-up' : 'pop-down'} fixed z-[210] m-0 list-none overflow-y-auto rounded-xl border border-line bg-panel p-1 text-[0.9rem] shadow-2xl shadow-black/30"
     style="left: {pos.left}px; {pos.up ? `bottom: ${window.innerHeight - pos.top}px` : `top: ${pos.top}px`}; min-width: {Math.max(pos.width, 160)}px; max-width: min(28rem, calc(100vw - 16px)); max-height: {pos.maxHeight}px">
     {#each options as o, i (i)}
       <!-- Keys go to the combobox button, which keeps focus (aria-activedescendant). -->

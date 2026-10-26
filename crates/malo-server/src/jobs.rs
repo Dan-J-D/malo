@@ -487,6 +487,12 @@ fn index_for_search_after(state: &SharedState, user: &UnlockedUser, kind: &JobKi
     ) {
         return;
     }
+    index_if_pending(state, user);
+}
+
+/// Queues the search-index job when messages lack searchable text or the header data mail apps
+/// fetch. Also called when a mail app logs in, so its first sync doesn't download every message.
+pub(crate) fn index_if_pending(state: &SharedState, user: &UnlockedUser) {
     // Messages the last run couldn't read (no destination reachable) don't queue it again by
     // themselves; new ones do, and that run retries them too.
     let unavailable = user

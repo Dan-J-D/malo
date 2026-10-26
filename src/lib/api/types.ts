@@ -270,7 +270,15 @@ export type MessageSummary = { id: number, account_id: string, mailboxes: Array<
 /**
  * With a full-text search: the best-matching text, matches between U+0002 and U+0003.
  */
-snippet?: string | null, };
+snippet?: string | null, 
+/**
+ * Gmail category other than Primary (`social`, `promotions`, `updates`, `forums`).
+ */
+category: string | null, 
+/**
+ * Messages in its conversation, itself included.
+ */
+thread_size: number, };
 
 export type MessageList = { total: number, messages: Array<MessageSummary>, 
 /**
@@ -285,6 +293,43 @@ export type SearchSuggestion = { value: string,
  */
 name: string | null, count: number, };
 
+export type SendRequest = { 
+/**
+ * Sender address; the account's username when it is an address.
+ */
+from?: string, 
+/**
+ * `Name <addr>` or `addr`.
+ */
+to: Array<string>, cc: Array<string>, bcc: Array<string>, subject: string, body: string, 
+/**
+ * The message this answers (In-Reply-To, References).
+ */
+in_reply_to?: number, 
+/**
+ * A message whose attachments go along (forwarding).
+ */
+attachments_of?: number, 
+/**
+ * The draft this was written in: deleted once the message is sent.
+ */
+draft_id?: number, };
+
+export type SendResult = { message_id: string, 
+/**
+ * The sent copy was saved in this mailbox on the account's server (not for Gmail, which
+ * files sent mail itself).
+ */
+saved_to: string | null, };
+
+export type DraftView = { id: number, account_id: string, message: SendRequest, updated_at: string, };
+
+export type DraftInput = { 
+/**
+ * The draft to update; a new one without it.
+ */
+id?: number, account_id: string, message: SendRequest, };
+
 export type MailboxInfo = { account_id: string, name: string, display_name: string, special_use: string | null, uidvalidity: number, message_count: number, new_count: number, };
 
 export type ReviewedRequest = { ids: Array<number>, 
@@ -297,7 +342,11 @@ all: boolean, account_id: string | null,
  */
 reviewed: boolean, };
 
-export type MessageView = { id: number, headers: Array<[string, string]>, from: string, from_name: string | null, to: Array<string>, cc: Array<string>, subject: string, date: string | null, text: string, 
+export type MessageView = { id: number, headers: Array<[string, string]>, from: string, from_name: string | null, to: Array<string>, cc: Array<string>, 
+/**
+ * Where replies go, when the sender asks for another address (Reply-To).
+ */
+reply_to: Array<string>, subject: string, date: string | null, text: string, 
 /**
  * Sanitized HTML, present only when requested with `html=true`.
  */

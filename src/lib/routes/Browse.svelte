@@ -6,14 +6,16 @@
   import { live, route, scope, go, attempt, accountName, setReviewed, notify } from '../state.svelte';
   import { commands, type Command } from '../commands.svelte';
   import { contextMenu, menuUnder, copy, type Entry } from '../menu.svelte';
-  import { reveal, shortDate, highlights } from '../format';
+  import { reveal, shortDate, highlights, when, CATEGORIES, isGmail, type Category } from '../format';
   import { panes, savePanes, LIST_MIN, LIST_MAX, LIST_DEFAULT } from '../layout.svelte';
   import Viewer from '../components/Viewer.svelte';
+  import Composer, { type ComposeInit } from '../components/Composer.svelte';
   import Avatar from '../components/Avatar.svelte';
   import Icon from '../components/Icon.svelte';
   import Resizer from '../components/Resizer.svelte';
   import SearchBox from '../components/SearchBox.svelte';
   import Select from '../components/Select.svelte';
+  import Segmented from '../components/Segmented.svelte';
   import DeleteMessages from '../components/DeleteMessages.svelte';
   import { fade } from 'svelte/transition';
   import { ms } from '../motion';
@@ -31,6 +33,8 @@
   let q = $state('');
   /** Search column for words without an operator ("Search in"). */
   let field = $state('');
+  /** Gmail category tab ('' is every category). */
+  let category: Category | '' = $state('');
   const sorts = [['newest', 'Newest'], ['oldest', 'Oldest'], ['sender', 'Sender A–Z'], ['largest', 'Largest'], ['relevance', 'Best match']];
   let sort = $state(readSort());
   function readSort() {
@@ -59,6 +63,49 @@
   $effect.pre(() => {
     void account;
     mailbox = '';
+  });
+
+  // Gmail sorts mail into categories; the tabs show when the account in view (or, with every
+  // account in view, any of them) is a Gmail account.
+  const tabs = $derived(account ? isGmail(live.accounts.find((a) => a.id === account)) : live.accounts.some(isGmail));
+  const categoryParam = $derived(tabs ? category : '');
+
+  // ── Writing ──
+  // A new message, or a draft being continued, takes the place of the reader.
+  let composing: ComposeInit | null = $state(null);
+  let showDrafts = $state(false);
+  let drafts: T.DraftView[] = $state([]);
+
+  function loadDrafts() {
+    api.get<T.DraftView[]>('/drafts').then((d) => (drafts = d)).catch(() => undefined);
+  }
+  $effect(() => untrack(loadDrafts));
+  const draftsInView = $derived(account ? drafts.filter((d) => d.account_id === account) : drafts);
+
+  function compose() {
+    const from = (account && live.accounts.find((a) => a.id === account && !a.imported)) || live.accounts.find((a) => a.smtp && !a.imported) || live.accounts.find((a) => !a.imported);
+    if (!from) return notify('Add an account to write mail from', 'info');
+    composing = { account_id: from.id, title: 'New message', message: { to: [], cc: [], bcc: [], subject: '', body: '' } };
+  }
+
+  function openDraft(d: T.DraftView) {
+    composing = {
+      account_id: d.account_id,
+      draft_id: d.id,
+      title: d.message.in_reply_to != null ? 'Reply' : 'Draft',
+      message: d.message,
+    };
+  }
+
+  function closeComposer() {
+    composing = null;
+    loadDrafts();
+  }
+
+  // Opening a message puts the reader back.
+  $effect(() => {
+    void openId;
+    untrack(() => (composing = null));
   });
 
   // Also reloaded after marking mail, for the per-mailbox counts of new messages.
@@ -99,7 +146,7 @@
   const at = (i: number) => pages[Math.floor(i / PAGE)]?.[i % PAGE];
 
   const query = (p: number) =>
-    `/messages${qs({ account, mailbox: account ? mailbox : '', new: newOnly, q, field: q.trim() ? field : '', sort, limit: PAGE, offset: p * PAGE, max_id: maxId })}`;
+    `/messages${qs({ account, mailbox: account ? mailbox : '', new: newOnly, q, field: q.trim() ? field : '', category: categoryParam, sort, limit: PAGE, offset: p * PAGE, max_id: maxId })}`;
 
   async function fetchPage(p: number) {
     if (pages[p] || inflight.has(p)) return;
@@ -133,7 +180,7 @@
   }
 
   $effect(() => {
-    void account; void mailbox; void newOnly; void sort;
+    void account; void mailbox; void newOnly; void sort; void categoryParam;
     untrack(reset);
   });
 
@@ -189,6 +236,11 @@
   function clearSelection() {
     selected.clear();
     anchor = -1;
+  }
+
+  function isSelected(i: number): boolean {
+    const m = i >= 0 ? at(i) : undefined;
+    return !!m && selected.has(m.id);
   }
 
   function toggle(m: T.MessageSummary, i: number) {
@@ -397,7 +449,7 @@
     { label: 'Select all in this view', icon: 'checks', keys: 'mod+a', disabled: total === 0, run: selectAll },
     { label: newOnly ? 'Show all messages' : 'Show only new messages', icon: 'mail', keys: 'n', run: () => (newOnly = !newOnly) },
     { label: 'Mark all read', icon: 'checks', keys: 'shift+a', run: markAll },
-    { label: 'Reload list', icon: 'refresh', keys: 'r', run: reset },
+    { label: 'Reload list', icon: 'refresh', keys: 'shift+r', run: reset },
     '-',
     ...sorts.map(([k, label]): Entry => ({ label: `Sort: ${label}`, icon: k === sort ? 'check' : undefined, run: () => setSort(k) })),
   ];
@@ -426,6 +478,11 @@
       { id: 'last', group: 'Mail', label: 'Last message', keys: 'end', run: () => openAt(total - 1) },
       { id: 'close', group: 'Mail', label: 'Close message', keys: 'escape', disabled: openId === null || sel, run: () => go('/browse') },
       { id: 'search', group: 'Mail', label: 'Search', keys: '/', run: () => searchBox?.focus() },
+      { id: 'compose', group: 'Mail', label: 'Write a message', keys: 'c', run: compose },
+      { id: 'drafts', group: 'Mail', label: showDrafts ? 'Show messages' : 'Show drafts', keys: 'shift+d', run: () => { showDrafts = !showDrafts; loadDrafts(); } },
+      ...(tabs ? (['', ...Object.keys(CATEGORIES)] as (Category | '')[]).map((c): Command => ({
+        id: `category-${c || 'all'}`, group: 'Categories', label: c ? CATEGORIES[c].label : 'Every category', disabled: category === c, run: () => (category = c),
+      })) : []),
       { id: 'search-f', group: 'Mail', label: 'Search', keys: 'mod+f', anywhere: true, hidden: true, run: () => searchBox?.focus() },
       { id: 'actions', group: 'Mail', label: sel ? 'Selection actions…' : 'Message actions…', keys: '.', disabled: !m && !sel,
         run: () => (sel ? menuUnder(selBar ?? scroller, selectionMenu()) : m && menuUnder(rowAt(index) ?? scroller, messageMenu(m, index))) },
@@ -435,7 +492,7 @@
       { id: 'from-sender', group: 'Mail', label: 'Search mail from this sender', disabled: !m, run: () => m && fromSender(m) },
       { id: 'copy-sender', group: 'Mail', label: 'Copy sender address', disabled: !m, run: () => m && copy(m.envelope.from, 'Address copied') },
       { id: 'new-only', group: 'Mail', label: newOnly ? 'Show all messages' : 'Show only new messages', keys: 'n', run: () => (newOnly = !newOnly) },
-      { id: 'reload', group: 'Mail', label: 'Reload list', keys: 'r', run: reset },
+      { id: 'reload', group: 'Mail', label: 'Reload list', keys: 'shift+r', run: reset },
       { id: 'sort', group: 'Mail', label: 'Next sort order', keys: 's', run: cycleSort },
       ...sorts.map(([k, label]): Command => ({ id: `sort-${k}`, group: 'Mail', label: `Sort by ${label}`, disabled: k === sort, run: () => setSort(k) })),
       ...(account ? [{ id: 'box-all', group: 'Mailboxes', label: 'All mailboxes', disabled: mailbox === '', run: () => (mailbox = '') }] : []),
@@ -483,8 +540,11 @@
       <header class="flex h-13 flex-none items-center gap-2 border-b border-line px-4">
         <Icon name="inbox" />
         <h1 class="m-0 flex-1 truncate text-base font-semibold">{title}</h1>
-        <button class="bg-transparent px-2 py-1 text-muted hover:text-fg" onclick={markAll} title="Mark everything in this view as read (Shift+A)">
-          <Icon name="checks" size={15} /> Mark all read
+        <button class="bg-transparent p-1.5 text-muted hover:text-fg" onclick={markAll} title="Mark everything in this view as read (Shift+A)" aria-label="Mark all read">
+          <Icon name="checks" size={15} />
+        </button>
+        <button class="primary px-2.5 py-1 text-[0.9rem]" onclick={compose} title="Write a message (c)">
+          <Icon name="pencil" size={14} /> Compose
         </button>
       </header>
     {/if}
@@ -492,15 +552,21 @@
     <div class="flex flex-col gap-2.5 px-3 pt-3 pb-2">
       <SearchBox bind:this={searchBox} bind:value={q} bind:field {account} onchange={onSearch} />
 
-      <div class="flex gap-1.5">
-        <button class="flex-1 justify-center py-1.5 {newOnly ? 'bg-raised text-muted' : 'bg-accent! text-white'}" onclick={() => (newOnly = false)}>
-          All
-        </button>
-        <button class="flex-1 justify-center py-1.5 {newOnly ? 'bg-accent! text-white' : 'bg-raised text-muted'}" onclick={() => (newOnly = true)}
-          title="Messages you haven't read yet">
-          New <span class="tabular-nums opacity-75">{newTotal}</span>
-        </button>
-      </div>
+      <Segmented label="Show" value={showDrafts ? 'drafts' : newOnly ? 'new' : 'all'}
+        onchange={(v) => { showDrafts = v === 'drafts'; newOnly = v === 'new'; if (showDrafts) loadDrafts(); }}
+        options={[
+          { value: 'all', label: 'All' },
+          { value: 'new', label: 'New', count: newTotal, title: "Messages you haven't read yet" },
+          { value: 'drafts', label: 'Drafts', count: draftsInView.length || undefined, title: 'Messages you started writing (Shift+D)' },
+        ]} />
+
+      {#if tabs && !showDrafts}
+        <!-- Gmail categories: the chosen one is named, the others are icons with a tooltip. -->
+        <Segmented label="Gmail categories" compact bind:value={category} options={[
+          { value: '', label: 'All', icon: 'layers', title: 'Every category', bg: 'bg-panel', tone: 'text-fg' },
+          ...(Object.keys(CATEGORIES) as Category[]).map((c) => ({ value: c, label: CATEGORIES[c].label, icon: CATEGORIES[c].icon, bg: CATEGORIES[c].bg, tone: CATEGORIES[c].tone })),
+        ]} />
+      {/if}
 
       {#if account}
         <div class="flex gap-1.5">
@@ -517,6 +583,39 @@
       {/if}
     </div>
 
+    {#if showDrafts}
+    <div class="min-h-0 flex-1 overflow-y-auto px-2 pt-1 pb-2">
+      {#if draftsInView.length === 0}
+        <div class="flex flex-col items-center gap-3 px-3 py-10 text-center text-muted">
+          <p class="m-0">No drafts. What you start writing is kept here until you send it.</p>
+          <button class="primary" onclick={compose}><Icon name="pencil" size={14} /> Write a message</button>
+        </div>
+      {:else}
+        <ul class="m-0 flex list-none flex-col p-0">
+          {#each draftsInView as d (d.id)}
+            {@const to = d.message.to.join(', ')}
+            <li class="mt-0">
+              <button class="flex w-full items-start gap-3 rounded-lg py-2.5 pr-2.5 pl-3 text-left {composing?.draft_id === d.id ? 'bg-raised!' : 'bg-transparent'}" onclick={() => openDraft(d)}
+                {@attach contextMenu(() => [
+                  { label: 'Continue writing', icon: 'pencil', run: () => openDraft(d) },
+                  { label: 'Delete draft', icon: 'trash', danger: true, run: async () => { await attempt(() => api.del(`/drafts/${d.id}`)); if (composing?.draft_id === d.id) composing = null; loadDrafts(); } },
+                ])}>
+                <span class="mt-0.5 grid size-[34px] flex-none place-items-center rounded-full bg-raised text-muted"><Icon name={d.message.in_reply_to != null ? 'reply' : 'draft'} size={15} /></span>
+                <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <span class="flex items-baseline gap-2">
+                    <span class="untrusted flex-1 truncate {to ? 'text-fg' : 'text-faint'}">{to ? `To ${to}` : 'No recipients yet'}</span>
+                    <span class="flex-none text-[0.8rem] text-muted tabular-nums" title={when(d.updated_at)}>{shortDate(d.updated_at)}</span>
+                  </span>
+                  <span class="subject truncate text-muted">{d.message.subject || '(no subject)'}</span>
+                  <span class="untrusted truncate text-[0.8rem] text-faint">{d.message.body.trim().split('\n')[0] || (!account ? accountName(d.account_id) : '')}</span>
+                </span>
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </div>
+    {:else}
     <div class="flex items-center justify-between gap-2 px-4 pt-2 pb-1 text-[0.85rem] text-muted">
       <span class="flex-1 truncate">{newOnly ? 'New since last visit' : 'Messages'} <span class="text-faint tabular-nums">[{total.toLocaleString()}]</span></span>
       {#if fresh > 0}
@@ -540,21 +639,21 @@
         <ul class="relative m-0 list-none p-0" style="height: {total * ROW}px">
           {#each visible as i (i)}
             {@const m = at(i)}
-            <li class="group absolute inset-x-0" style="top: {i * ROW}px; height: {ROW}px" role="option" aria-selected={!!m && (openId === m.id || selected.has(m.id))} aria-setsize={total} aria-posinset={i + 1}>
+            <li class="group absolute inset-x-0 mt-0" style="top: {i * ROW}px; height: {ROW}px" role="option" aria-selected={!!m && (openId === m.id || selected.has(m.id))} aria-setsize={total} aria-posinset={i + 1}>
               {#if m}
                 {@render row(m, i)}
                 <!-- Its own column left of the avatar, the full height of the row: shown on hover, and
                      on every row while something is selected. -->
                 {@const on = selected.has(m.id)}
-                <button class="absolute inset-y-0 left-0 z-10 grid w-8 place-items-center rounded-l-lg bg-transparent p-0 hover:bg-transparent! active:scale-100! {on || selected.size ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100'}"
+                <button class="absolute inset-y-0 left-0 z-10 flex w-11 items-start justify-center rounded-l-lg bg-transparent p-0 pt-5 hover:bg-transparent! active:scale-100! {on || selected.size ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100'}"
                   role="checkbox" aria-checked={on} aria-label="Select message" title="Select (x, or Ctrl/Shift-click the row)"
                   onclick={(e) => { if (e.shiftKey) void selectRange(i); else toggle(m, i); }}>
                   <span class="grid size-[18px] place-items-center rounded-[6px] border-[1.5px] transition-colors {on ? 'border-accent bg-accent text-white' : 'border-fg/30 hover:border-accent-2'}">
-                    {#if on}<Icon name="check" size={12} />{/if}
+                    {#if on}<span class="grid animate-[check-pop_300ms_var(--ease-spring)]"><Icon name="check" size={12} /></span>{/if}
                   </span>
                 </button>
               {:else}
-                <div class="flex h-full items-start gap-3 py-2.5 pr-2.5 pl-8" aria-label="Loading">
+                <div class="flex h-full items-start gap-3 py-2.5 pr-2.5 pl-11" aria-label="Loading">
                   <span class="mt-0.5 size-[34px] flex-none rounded-full bg-raised"></span>
                   <span class="flex flex-1 flex-col gap-2 pt-1">
                     <span class="h-3 w-2/5 rounded bg-raised"></span>
@@ -567,6 +666,7 @@
         </ul>
       {/if}
     </div>
+    {/if}
   </section>
   <Resizer label="Resize message list" width={Math.min(panes.list, LIST_MAX)} min={LIST_MIN} max={LIST_MAX} set={(w) => (panes.list = Math.min(LIST_MAX, Math.max(LIST_MIN, w)))}
     reset={() => (panes.list = LIST_DEFAULT)} done={savePanes} />
@@ -574,8 +674,12 @@
 
   <!-- Reader -->
   <section class="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border border-line bg-panel">
-    {#if openId !== null}
-      <Viewer id={openId}>
+    {#if composing}
+      {#key composing}
+        <Composer init={composing} onclose={closeComposer} onsent={closeComposer} />
+      {/key}
+    {:else if openId !== null}
+      <Viewer id={openId} ondelete={deleteOne}>
         {#snippet toolbar()}
           <button class="bg-transparent p-1.5 text-muted hover:text-fg" onclick={() => go('/browse')} aria-label="Close message" title="Close (Esc)"><Icon name="x" /></button>
           <span class="mx-1 h-4 w-px bg-line"></span>
@@ -598,8 +702,13 @@
 {#snippet row(m: T.MessageSummary, i: number)}
   {@const sender = reveal(m.envelope.from_name ?? m.envelope.from) || '(unknown sender)'}
   {@const st = stateIcon[m.state]}
+  {@const cat = tabs && !categoryParam && m.category && m.category in CATEGORIES ? CATEGORIES[m.category as Category] : null}
   {@const meta = [!account ? accountName(m.account_id) : '', reveal(m.labels.join(', '))].filter(Boolean).join(' · ')}
-  <button class="flex h-full w-full items-start gap-3 overflow-hidden rounded-lg py-2.5 pr-2.5 pl-8 text-left active:scale-[0.99] {selected.has(m.id) ? 'bg-accent/12!' : openId === m.id ? 'bg-raised!' : 'bg-transparent'}" onclick={(e) => rowClick(e, m, i)}
+  <!-- Neighbouring selected rows join into one block. -->
+  {@const on = selected.has(m.id)}
+  {@const joinUp = on && isSelected(i - 1)}
+  {@const joinDown = on && isSelected(i + 1)}
+  <button class="flex h-full w-full items-start gap-3 overflow-hidden rounded-lg py-2.5 pr-2.5 pl-11 text-left active:scale-[0.99] {joinUp ? 'rounded-t-none' : ''} {joinDown ? 'rounded-b-none' : ''} {on ? 'bg-accent/12!' : openId === m.id ? 'bg-raised!' : 'bg-transparent'}" onclick={(e) => rowClick(e, m, i)}
     {@attach contextMenu(() => messageMenu(m, i))}>
     <span class="relative mt-0.5">
       <Avatar name={sender} seed={m.envelope.from} size={34} />
@@ -607,12 +716,16 @@
     </span>
     <span class="flex min-w-0 flex-1 flex-col gap-0.5">
       <span class="flex items-baseline gap-2">
-        <span class="untrusted flex-1 truncate {m.reviewed ? 'text-fg/80' : 'font-semibold text-fg'}">{sender}</span>
+        <span class="flex min-w-0 flex-1 items-baseline gap-1.5">
+          <span class="untrusted truncate {m.reviewed ? 'text-fg/80' : 'font-semibold text-fg'}">{sender}</span>
+          {#if m.thread_size > 1}<span class="flex-none text-[0.8rem] text-faint tabular-nums" title="{m.thread_size} messages in this conversation">[{m.thread_size}]</span>{/if}
+        </span>
         <span class="flex-none text-[0.8rem] text-muted tabular-nums">{shortDate(m.envelope.date ?? m.internal_date)}</span>
       </span>
       <span class="flex items-center gap-2">
         <span class="subject flex-1 truncate text-muted">{reveal(m.envelope.subject) || '(no subject)'}</span>
         <span class="flex flex-none items-center gap-1.5">
+          {#if cat}<span class={cat.tone} title={cat.label}><Icon name={cat.icon} size={13} /></span>{/if}
           {#if m.envelope.attachment_count}<span class="text-faint" title="{m.envelope.attachment_count} attachment(s)"><Icon name="paperclip" size={13} /></span>{/if}
           {#if m.deleted_on_server}<span class="text-faint" title="Deleted on the mail server; only the backup remains"><Icon name="trash" size={13} /></span>{/if}
           {#if st}<span class={st[1]} title={m.state === 'stored' ? `Stored on ${m.stored}/${m.destinations} destinations` : (m.error ?? st[2])}><Icon name={st[0]} size={13} /></span>{/if}

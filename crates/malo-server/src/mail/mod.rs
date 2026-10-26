@@ -8,7 +8,7 @@
 //! doesn't change that.
 
 pub mod imap;
-pub mod mime;
+pub use malo_core::mime;
 pub mod smtp;
 
 use std::net::{IpAddr, SocketAddr};
