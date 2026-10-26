@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Select from '../components/Select.svelte';
   import { onMount } from 'svelte';
   import { api } from '../api/client';
   import type * as T from '../api/types';
@@ -54,11 +55,11 @@
 
 <div class="panel row">
   <label>Scope
-    <select bind:value={scope}>
-      <option value="all">Everything</option>
-      {#each live.accounts as a}<option value={'a:' + a.id}>Account · {a.name}</option>{/each}
-      {#each live.destinations as d}<option value={'d:' + d.id}>Destination · {d.name}</option>{/each}
-    </select>
+    <Select bind:value={scope} options={[
+      { value: 'all', label: 'Everything' },
+      ...live.accounts.map((a) => ({ value: `a:${a.id}`, label: `Account · ${a.name}` })),
+      ...live.destinations.map((d) => ({ value: `d:${d.id}`, label: `Destination · ${d.name}` })),
+    ]} />
   </label>
   <button onclick={() => check(false)}>Quick verify now</button>
   <button onclick={() => check(true)}>Deep verify now</button>

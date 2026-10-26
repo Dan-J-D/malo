@@ -88,7 +88,32 @@
   label { display: flex; flex-direction: column; gap: 0.35rem; font-weight: 500; font-size: 0.9rem; margin-bottom: 0.85rem; }
   input, select, textarea { background: var(--raised); border: 1px solid var(--line); border-radius: 8px; padding: 0.5rem 0.7rem; }
   input::placeholder, textarea::placeholder { color: var(--faint); }
-  input[type='checkbox'] { accent-color: var(--accent); padding: 0; }
+  /* Checkboxes in the theme (the toolkit's own ignore it): a rounded box that fills with the accent. */
+  input[type='checkbox'] {
+    appearance: none; -webkit-appearance: none; flex: none; display: inline-grid; place-content: center;
+    width: 1rem; height: 1rem; margin: 0; padding: 0; cursor: pointer; vertical-align: -0.15em;
+    border: 1.5px solid color-mix(in srgb, var(--text) 32%, transparent); border-radius: 5px; background: transparent;
+  }
+  input[type='checkbox']::before {
+    content: ''; width: 0.66rem; height: 0.66rem; background: #fff; transform: scale(0); transition: transform 120ms cubic-bezier(0.215, 0.61, 0.355, 1);
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E") center / contain no-repeat;
+  }
+  input[type='checkbox']:checked { background: var(--accent); border-color: var(--accent); }
+  input[type='checkbox']:checked::before { transform: scale(1); }
+  input[type='checkbox']:hover:not(:disabled):not(:checked) { border-color: var(--accent-2); }
+  input[type='checkbox']:disabled { opacity: 0.45; cursor: not-allowed; }
+  input[type='checkbox']:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+  input[type='radio'] {
+    appearance: none; -webkit-appearance: none; flex: none; display: inline-grid; place-content: center;
+    width: 1rem; height: 1rem; margin: 0; padding: 0; cursor: pointer; vertical-align: -0.15em;
+    border: 1.5px solid color-mix(in srgb, var(--text) 32%, transparent); border-radius: 50%; background: transparent;
+  }
+  input[type='radio']::before { content: ''; width: 0.45rem; height: 0.45rem; border-radius: 50%; background: #fff; transform: scale(0); transition: transform 120ms cubic-bezier(0.215, 0.61, 0.355, 1); }
+  input[type='radio']:checked { background: var(--accent); border-color: var(--accent); }
+  input[type='radio']:checked::before { transform: scale(1); }
+  input[type='radio']:hover:not(:disabled):not(:checked) { border-color: var(--accent-2); }
+  input[type='radio']:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+  input[type='date'] { color-scheme: inherit; }
   input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent-2); outline-offset: -1px; }
 
   button { cursor: pointer; background: var(--raised); border-radius: 8px; padding: 0.4rem 0.8rem; display: inline-flex; align-items: center; gap: 0.4rem; }
@@ -130,7 +155,16 @@
   .panel h2 { margin-top: 1.5rem; }
   .panel > h2:first-child, .panel > h3:first-child { margin-top: 0; }
   /* A lone number or text field doesn't need the full width of a wide panel. */
-  main .panel label > :is(input, select):not([type='checkbox']) { max-width: 28rem; }
+  main .panel label > :is(input, select, .select-trigger):not([type='checkbox']) { max-width: 28rem; }
+
+  /* Select.svelte's button: like an input (field) or plain toolbar text (ghost). */
+  .select-trigger { display: flex; align-items: center; gap: 0.4rem; min-width: 0; font-weight: 400; color: var(--text); }
+  .select-trigger.field { width: 100%; background: var(--raised); border: 1px solid var(--line); border-radius: 8px; padding: 0.5rem 0.55rem 0.5rem 0.7rem; }
+  .select-trigger.field:hover:not(:disabled) { background: var(--raised); border-color: color-mix(in srgb, var(--text) 16%, var(--line)); }
+  .select-trigger.field[aria-expanded='true'] { outline: 2px solid var(--accent-2); outline-offset: -1px; }
+  .select-trigger.ghost { background: transparent; padding: 0.15rem 0.35rem; color: var(--muted); border-radius: 6px; }
+  .select-trigger.ghost:hover:not(:disabled), .select-trigger.ghost[aria-expanded='true'] { background: var(--hover); color: var(--text); }
+  .select-trigger:active:not(:disabled) { transform: none; }
   .row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
   .grow { flex: 1; }
   .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 0.75rem; }

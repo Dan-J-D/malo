@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Select from '../components/Select.svelte';
   import { api } from '../api/client';
   import type * as T from '../api/types';
   import { live, route, attempt, refreshAccounts, destName, notify } from '../state.svelte';
@@ -113,9 +114,7 @@
 
 <div class="panel row">
   <label>Account
-    <select bind:value={accountId}>
-      {#each live.accounts.filter((a) => !a.imported) as a}<option value={a.id}>{a.name}</option>{/each}
-    </select>
+    <Select bind:value={accountId} options={live.accounts.filter((a) => !a.imported).map((a) => ({ value: a.id, label: a.name }))} />
   </label>
   {#if account}
     {#if account.policy.armed}

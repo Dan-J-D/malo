@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Select from '../components/Select.svelte';
   import { onMount, untrack } from 'svelte';
   import { api, app, ApiError } from '../api/client';
   import type * as T from '../api/types';
@@ -231,7 +232,7 @@
         <label>IMAP host <input bind:value={form.host} /></label>
         <label>Port <input type="number" bind:value={form.port} /></label>
         <label>Security
-          <select bind:value={form.tls}><option value="implicit">TLS (port 993)</option><option value="starttls">STARTTLS (port 143)</option></select>
+          <Select bind:value={form.tls} options={[{ value: 'implicit', label: 'TLS (port 993)' }, { value: 'starttls', label: 'STARTTLS (port 143)' }]} />
         </label>
         <label>Backup every (minutes) <input type="number" min="1" bind:value={form.backup_interval_minutes} /></label>
       </div>
@@ -246,7 +247,7 @@
           <label>SMTP host <input bind:value={smtp.host} placeholder="smtp.example.com" /></label>
           <label>Port <input type="number" bind:value={smtp.port} /></label>
           <label>Security
-            <select bind:value={smtp.tls} onchange={() => (smtp.port = smtp.tls === 'implicit' ? 465 : 587)}><option value="implicit">TLS (port 465)</option><option value="starttls">STARTTLS (port 587)</option></select>
+            <Select bind:value={smtp.tls} onchange={(tls) => (smtp.port = tls === 'implicit' ? 465 : 587)} options={[{ value: 'implicit', label: 'TLS (port 465)' }, { value: 'starttls', label: 'STARTTLS (port 587)' }]} />
           </label>
         </div>
         {#if authKind === 'oauth2' && oauth.provider === 'microsoft'}<p class="muted small">Microsoft needs the <code>https://outlook.office.com/SMTP.Send</code> scope as well: add it to the scopes and sign in again.</p>{/if}

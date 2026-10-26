@@ -13,6 +13,7 @@
   import Icon from '../components/Icon.svelte';
   import Resizer from '../components/Resizer.svelte';
   import SearchBox from '../components/SearchBox.svelte';
+  import Select from '../components/Select.svelte';
   import DeleteMessages from '../components/DeleteMessages.svelte';
   import { fade } from 'svelte/transition';
   import { ms } from '../motion';
@@ -503,12 +504,15 @@
 
       {#if account}
         <div class="flex gap-1.5">
-          <select class="min-w-0 flex-1 border-transparent py-1.5 text-[0.9rem]" aria-label="Mailbox" bind:value={mailbox}>
-            <option value="">All mailboxes</option>
-            {#each boxes as b}
-              <option value={b.name}>{'  '.repeat(b.display_name.split('/').length - 1)}{reveal(b.display_name.split('/').pop())} ({Number(b.new_count) > 0 ? `${b.new_count} new · ` : ''}{b.message_count})</option>
-            {/each}
-          </select>
+          <Select class="min-w-0 flex-1 text-[0.9rem]" label="Mailbox" bind:value={mailbox} options={[
+            { value: '', label: 'All mailboxes' },
+            ...boxes.map((b) => ({
+              value: b.name,
+              label: reveal(b.display_name.split('/').pop()),
+              depth: b.display_name.split('/').length - 1,
+              hint: `${Number(b.new_count) > 0 ? `${Number(b.new_count).toLocaleString()} new · ` : ''}${Number(b.message_count).toLocaleString()}`,
+            })),
+          ]} />
         </div>
       {/if}
     </div>
@@ -520,14 +524,8 @@
           <Icon name="refresh" size={12} /> {fresh.toLocaleString()} new · show
         </button>
       {/if}
-      <label class="m-0 flex-row items-center gap-1 font-normal">
-        <span class="sr-only">Sort by</span>
-        <Icon name="filter" size={13} />
-        <select class="cursor-pointer border-transparent bg-transparent py-0.5 pr-1 pl-0.5 text-[0.85rem] text-muted hover:text-fg"
-          value={sort} onchange={(e) => setSort(e.currentTarget.value)} title="Sort by">
-          {#each sorts as [k, label]}<option value={k}>{label}</option>{/each}
-        </select>
-      </label>
+      <Select variant="ghost" class="text-[0.85rem]" label="Sort by" title="Sort by" value={sort} onchange={setSort}
+        options={sorts.map(([k, label]) => ({ value: k, label }))} />
     </div>
     {#if unindexed > 0}
       <p class="m-0 px-4 pb-1 text-[0.8rem] text-faint">{unindexed.toLocaleString()} message{unindexed === 1 ? '' : 's'} aren't indexed for full-text search yet, so only their sender, recipients and subject are searched. <button class="link text-[0.8rem]" onclick={indexNow}>Index now</button></p>
@@ -545,14 +543,18 @@
             <li class="group absolute inset-x-0" style="top: {i * ROW}px; height: {ROW}px" role="option" aria-selected={!!m && (openId === m.id || selected.has(m.id))} aria-setsize={total} aria-posinset={i + 1}>
               {#if m}
                 {@render row(m, i)}
-                <!-- Over the avatar: shown on hover, and on every row while something is selected. -->
-                <label class="absolute top-2.5 left-2.5 z-10 m-0 grid size-[34px] cursor-pointer place-items-center rounded-full bg-raised transition-opacity {selected.size ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'}"
-                  title="Select (x, or Ctrl/Shift-click the row)">
-                  <input type="checkbox" class="m-0 size-4 cursor-pointer accent-[var(--color-accent)]" checked={selected.has(m.id)}
-                    onclick={(e) => { e.preventDefault(); if (e.shiftKey) void selectRange(i); else toggle(m, i); }} aria-label="Select message" />
-                </label>
+                <!-- Its own column left of the avatar, the full height of the row: shown on hover, and
+                     on every row while something is selected. -->
+                {@const on = selected.has(m.id)}
+                <button class="absolute inset-y-0 left-0 z-10 grid w-8 place-items-center rounded-l-lg bg-transparent p-0 hover:bg-transparent! active:scale-100! {on || selected.size ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100'}"
+                  role="checkbox" aria-checked={on} aria-label="Select message" title="Select (x, or Ctrl/Shift-click the row)"
+                  onclick={(e) => { if (e.shiftKey) void selectRange(i); else toggle(m, i); }}>
+                  <span class="grid size-[18px] place-items-center rounded-[6px] border-[1.5px] transition-colors {on ? 'border-accent bg-accent text-white' : 'border-fg/30 hover:border-accent-2'}">
+                    {#if on}<Icon name="check" size={12} />{/if}
+                  </span>
+                </button>
               {:else}
-                <div class="flex h-full items-start gap-3 px-2.5 py-2.5" aria-label="Loading">
+                <div class="flex h-full items-start gap-3 py-2.5 pr-2.5 pl-8" aria-label="Loading">
                   <span class="mt-0.5 size-[34px] flex-none rounded-full bg-raised"></span>
                   <span class="flex flex-1 flex-col gap-2 pt-1">
                     <span class="h-3 w-2/5 rounded bg-raised"></span>
@@ -597,7 +599,7 @@
   {@const sender = reveal(m.envelope.from_name ?? m.envelope.from) || '(unknown sender)'}
   {@const st = stateIcon[m.state]}
   {@const meta = [!account ? accountName(m.account_id) : '', reveal(m.labels.join(', '))].filter(Boolean).join(' · ')}
-  <button class="flex h-full w-full items-start gap-3 overflow-hidden rounded-lg px-2.5 py-2.5 text-left active:scale-[0.99] {selected.has(m.id) ? 'bg-accent/12!' : openId === m.id ? 'bg-raised!' : 'bg-transparent'}" onclick={(e) => rowClick(e, m, i)}
+  <button class="flex h-full w-full items-start gap-3 overflow-hidden rounded-lg py-2.5 pr-2.5 pl-8 text-left active:scale-[0.99] {selected.has(m.id) ? 'bg-accent/12!' : openId === m.id ? 'bg-raised!' : 'bg-transparent'}" onclick={(e) => rowClick(e, m, i)}
     {@attach contextMenu(() => messageMenu(m, i))}>
     <span class="relative mt-0.5">
       <Avatar name={sender} seed={m.envelope.from} size={34} />

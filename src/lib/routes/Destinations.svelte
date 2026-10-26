@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Select from '../components/Select.svelte';
   import { api } from '../api/client';
   import type * as T from '../api/types';
   import { live, attempt, refreshDestinations, errorText } from '../state.svelte';
@@ -185,9 +186,7 @@
     <div class="cards">
       <label>Name <input bind:value={form.name} placeholder="NAS, S3 Frankfurt…" /></label>
       <label>Type
-        <select bind:value={kind} disabled={!!editing}>
-          {#each Object.entries(schemes) as [k, s]}<option value={k}>{s.label}</option>{/each}
-        </select>
+        <Select bind:value={kind} disabled={!!editing} options={Object.entries(schemes).map(([k, s]) => ({ value: k, label: s.label }))} />
       </label>
       {#if kind === 'other'}<label>OpenDAL scheme <input bind:value={customScheme} disabled={!!editing} placeholder="e.g. oss, cos, sftp" /></label>{/if}
       <label>Prefix inside the storage <input bind:value={form.root} disabled={!!editing} placeholder="malo" /></label>
@@ -205,14 +204,15 @@
     <label class="check"><input type="checkbox" bind:checked={form.required_for_purge} /> Offer as a required destination for purges</label>
     <div class="row">
       <label>Deep check
-        <select value={form.deep_check.mode} onchange={(e) => {
-          const m = (e.target as HTMLSelectElement).value;
-          form.deep_check = m === 'rotating' ? { mode: 'rotating', slices: 7 } : m === 'off' ? { mode: 'off' } : { mode: 'full' };
-        }}>
-          <option value="full">Re-hash everything</option>
-          <option value="rotating">Rotating slice (saves egress)</option>
-          <option value="off">Never download (metadata only)</option>
-        </select>
+        <Select value={form.deep_check.mode}
+          options={[
+            { value: 'full', label: 'Re-hash everything' },
+            { value: 'rotating', label: 'Rotating slice (saves egress)' },
+            { value: 'off', label: 'Never download (metadata only)' },
+          ]}
+          onchange={(m) => {
+            form.deep_check = m === 'rotating' ? { mode: 'rotating', slices: 7 } : m === 'off' ? { mode: 'off' } : { mode: 'full' };
+          }} />
       </label>
       {#if form.deep_check.mode === 'rotating'}
         <label>Slices <input type="number" min="2" value={form.deep_check.slices} oninput={(e) => (form.deep_check = { mode: 'rotating', slices: Number((e.target as HTMLInputElement).value) || 7 })} /></label>

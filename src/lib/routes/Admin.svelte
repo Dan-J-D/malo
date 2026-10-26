@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Select from '../components/Select.svelte';
   import { onMount } from 'svelte';
   import { api, ApiError } from '../api/client';
   import type * as T from '../api/types';
@@ -12,6 +13,7 @@
   let invite: T.Invite | null = $state(null);
   let inviteUser = $state('');
   let inviteRole: T.Role = $state('user');
+  const ROLES: { value: T.Role; label: string }[] = [{ value: 'user', label: 'user' }, { value: 'admin', label: 'admin' }];
   let inviteHours = $state(72);
   let mounts = $state('');
   let invites: T.InviteInfo[] = $state([]);
@@ -111,9 +113,7 @@
         <tr tabindex="0" {@attach contextMenu(() => userMenu(u))}>
           <td>{u.username}</td>
           <td>
-            <select value={u.role} disabled={u.id === session.me?.id} onchange={(e) => update(u, { role: (e.target as HTMLSelectElement).value as T.Role })}>
-              <option value="user">user</option><option value="admin">admin</option>
-            </select>
+            <Select value={u.role} disabled={u.id === session.me?.id} label="Role of {u.username}" options={ROLES} onchange={(role) => update(u, { role })} />
           </td>
           <td class="small">{when(u.created_at)}</td>
           <td>{#if u.disabled}<span class="pill bad">disabled</span>{:else if u.unlocked}<span class="pill ok">unlocked</span>{:else}<span class="pill muted">sealed</span>{/if}</td>
@@ -134,7 +134,7 @@
   <h2>Invite a user</h2>
   <div class="cards">
     <label>Username (optional) <input bind:value={inviteUser} /></label>
-    <label>Role <select bind:value={inviteRole}><option value="user">user</option><option value="admin">admin</option></select></label>
+    <label>Role <Select bind:value={inviteRole} options={ROLES} /></label>
     <label>Valid for (hours) <input type="number" min="1" bind:value={inviteHours} /></label>
   </div>
   <button onclick={createInvite}>Create invite code</button>

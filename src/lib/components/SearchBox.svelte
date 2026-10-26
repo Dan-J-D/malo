@@ -93,6 +93,7 @@
 </script>
 
 <script lang="ts">
+  import Select from './Select.svelte';
   import { untrack } from 'svelte';
   import { api, qs } from '../api/client';
   import type * as T from '../api/types';
@@ -470,16 +471,16 @@
 
   {#if filtering}
     <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[0.8rem] text-muted">
-      <label class="m-0 flex flex-row items-center gap-1 font-normal">Search in
-        <select class="border-transparent py-0.5 text-[0.8rem]" bind:value={field} onchange={() => onchange(true)}>
-          <option value="">Anywhere</option>
-          <option value="subject">Subject</option>
-          <option value="sender">Sender</option>
-          <option value="recipients">Recipients</option>
-          <option value="body">Message text</option>
-          <option value="attachments">Attachment names</option>
-        </select>
-      </label>
+      <span class="flex items-center gap-1">Search in
+        <Select variant="ghost" class="text-[0.8rem]" label="Search in" bind:value={field} onchange={() => onchange(true)} options={[
+          { value: '', label: 'Anywhere' },
+          { value: 'subject', label: 'Subject' },
+          { value: 'sender', label: 'Sender' },
+          { value: 'recipients', label: 'Recipients' },
+          { value: 'body', label: 'Message text' },
+          { value: 'attachments', label: 'Attachment names' },
+        ]} />
+      </span>
       <label class="m-0 flex flex-row items-center gap-1 font-normal">From
         <input type="date" class="py-0.5 text-[0.8rem]" value={chipValue('after').length === 10 ? chipValue('after') : ''} onchange={(e) => setDate('after', e.currentTarget.value)} />
       </label>

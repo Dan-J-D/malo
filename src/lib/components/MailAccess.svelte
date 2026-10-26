@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Select from './Select.svelte';
   import { onMount } from 'svelte';
   import { api, ApiError } from '../api/client';
   import type * as T from '../api/types';
@@ -143,7 +144,7 @@
       <div class="cards">
         <label>Username <input bind:value={username} autocomplete="off" spellcheck="false" placeholder="work-mail" /></label>
         <label>Password length
-          <select bind:value={length}><option value={20}>20</option><option value={24}>24</option><option value={32}>32</option><option value={48}>48</option><option value={64}>64</option></select>
+          <Select bind:value={length} options={[20, 24, 32, 48, 64].map((n) => ({ value: n, label: `${n} characters` }))} />
         </label>
       </div>
       <p class="muted small">Letters, digits and <code>. _ - + @</code>; unique on this server. The password is random letters and digits.</p>
