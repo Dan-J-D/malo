@@ -845,6 +845,9 @@
 {#snippet row(m: T.MessageSummary, i: number)}
   {@const sender = reveal(m.envelope.from_name || m.envelope.from) || '(unknown sender)'}
   {@const st = stateIcon[m.state]}
+  {@const savedOk = m.state === 'verified' || m.state === 'stored'}
+  {@const savedText = m.state === 'stored' ? `Backed up on ${m.stored} of ${m.destinations} destinations, waiting for verification` : m.state === 'error' ? `Not backed up: ${m.error ?? 'error'} (will retry)` : m.state === 'verified' ? 'Backed up and verified on every destination' : m.state === 'downloading' ? 'Not backed up yet: downloading' : 'Not backed up yet'}
+  {@const serverText = m.deleted_on_server ? 'Not on the mail server any more: only the backup has it' : `On the mail server (${accountName(m.account_id)})`}
   {@const cat = tabs && !categoryParam && m.category && m.category in CATEGORIES ? CATEGORIES[m.category as Category] : null}
   {@const meta = [!account ? accountName(m.account_id) : '', reveal(m.labels.join(', '))].filter(Boolean).join(' · ')}
   <!-- Neighbouring selected rows join into one block. -->
@@ -871,11 +874,17 @@
           {#if cat}<span class={cat.tone} title={cat.label}><Icon name={cat.icon} size={13} /></span>{/if}
           {#if m.envelope.attachment_count}<span class="text-faint" title="{m.envelope.attachment_count} attachment(s)"><Icon name="paperclip" size={13} /></span>{/if}
           {#if m.spam && folder !== 'spam'}<span class="text-warn" title="Spam"><Icon name="ban" size={13} /></span>{/if}
-          {#if st}<span class={st[1]} title={m.state === 'stored' ? `Stored on ${m.stored}/${m.destinations} destinations` : (m.error ?? st[2])}><Icon name={st[0]} size={13} /></span>{/if}
-          <!-- Still on the account's mail server, or only in the backup. -->
-          <span class="flex items-center {m.deleted_on_server ? 'text-faint' : 'text-ok'}"
-            title={m.deleted_on_server ? 'Not on the mail server any more: only the backup has it' : `On the mail server (${accountName(m.account_id)})`}>
-            <Icon name="server" size={12} /><Icon name={m.deleted_on_server ? 'x' : 'check'} size={13} />
+          <!-- Two marks side by side, like sent/delivered ticks: the first for the backup, the
+               second for the account's mail server. A cross where it isn't (yet). -->
+          <span class="flex" title={`${savedText}\n${serverText}`} role="img" aria-label="{savedText}. {serverText}.">
+            <svg width="20" height="13" viewBox="0 0 30 20" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <g class={st?.[1] ?? 'text-faint'}>
+                {#if savedOk}<path d="M2 10.5l5 5L18 4" />{:else}<path d="M4 5l10 10M14 5 4 15" />{/if}
+              </g>
+              <g class={m.deleted_on_server ? 'text-faint' : 'text-ok'}>
+                {#if !m.deleted_on_server}<path d="M12.5 13l2.5 2.5L26 4" />{:else}<path d="M17 5l10 10M27 5 17 15" />{/if}
+              </g>
+            </svg>
           </span>
         </span>
       </span>
