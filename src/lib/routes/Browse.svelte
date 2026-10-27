@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import { api, app, qs } from '../api/client';
   import type * as T from '../api/types';
@@ -468,9 +468,15 @@
     if (i < 0 || i >= total) return;
     if (!at(i)) await fetchPage(Math.floor(i / PAGE));
     const m = at(i);
-    if (m) {
-      open(m, i);
-      showRow(i);
+    if (!m) return;
+    // Focus follows the open message when it was on a row (e.g. one clicked before j/k), so the
+    // focus ring doesn't stay behind on another row.
+    const followFocus = !!scroller?.contains(document.activeElement) && document.activeElement !== scroller;
+    open(m, i);
+    showRow(i);
+    if (followFocus) {
+      await tick();
+      rowAt(i)?.querySelector<HTMLElement>(':scope > button:first-child')?.focus({ preventScroll: true });
     }
   }
 
@@ -865,8 +871,12 @@
           {#if cat}<span class={cat.tone} title={cat.label}><Icon name={cat.icon} size={13} /></span>{/if}
           {#if m.envelope.attachment_count}<span class="text-faint" title="{m.envelope.attachment_count} attachment(s)"><Icon name="paperclip" size={13} /></span>{/if}
           {#if m.spam && folder !== 'spam'}<span class="text-warn" title="Spam"><Icon name="ban" size={13} /></span>{/if}
-          {#if m.deleted_on_server}<span class="text-faint" title="Deleted on the mail server; only the backup remains"><Icon name="trash" size={13} /></span>{/if}
           {#if st}<span class={st[1]} title={m.state === 'stored' ? `Stored on ${m.stored}/${m.destinations} destinations` : (m.error ?? st[2])}><Icon name={st[0]} size={13} /></span>{/if}
+          <!-- Still on the account's mail server, or only in the backup. -->
+          <span class="flex items-center {m.deleted_on_server ? 'text-faint' : 'text-ok'}"
+            title={m.deleted_on_server ? 'Not on the mail server any more: only the backup has it' : `On the mail server (${accountName(m.account_id)})`}>
+            <Icon name="server" size={12} /><Icon name={m.deleted_on_server ? 'x' : 'check'} size={13} />
+          </span>
         </span>
       </span>
       {#if m.snippet}

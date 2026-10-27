@@ -58,8 +58,9 @@
     <div class="flex h-dvh flex-col bg-frame">
       <main class={top === '/browse'
         ? 'min-h-0 flex-1 overflow-hidden pt-[env(safe-area-inset-top)]'
-        : 'min-h-0 flex-1 overflow-auto bg-panel px-4 pt-[calc(env(safe-area-inset-top)+1.25rem)] pb-6'}>
+        : 'min-h-0 flex-1 overflow-auto bg-panel px-4 pt-[calc(env(safe-area-inset-top)+1.25rem)]'}>
         {@render page()}
+        {#if top !== '/browse'}<div class="h-10" aria-hidden="true"></div>{/if}
       </main>
       {#if !reading && !screen.writing}<TabBar />{/if}
     </div>
@@ -79,8 +80,10 @@
     </div>
     <main class={top === '/browse'
       ? 'min-w-0 overflow-hidden py-2 pr-2'
-      : 'm-2 ml-0 min-w-0 overflow-auto rounded-xl border border-line bg-panel px-9 py-7'}>
+      : 'm-2 ml-0 min-w-0 overflow-auto rounded-xl border border-line bg-panel px-9 pt-7'}>
       {@render page()}
+      <!-- A spacer, not padding: scroll containers don't always keep bottom padding. -->
+      {#if top !== '/browse'}<div class="h-14" aria-hidden="true"></div>{/if}
     </main>
   </div>
   {/if}
