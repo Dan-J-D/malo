@@ -135,13 +135,43 @@ impl UserConfig {
     }
 
     /// Identifies the destinations as a recovery kit holds them (credentials only where kept).
+    ///
+    /// Only what a restore needs to reach the backups counts: compression, Object Lock, speed
+    /// limits and the price are left out, so changing them (or a new version adding settings of
+    /// that kind) doesn't ask for a new kit. The fingerprint is the same as before those settings
+    /// existed, so kits saved by older versions still count as current.
     pub fn destinations_hash(&self) -> String {
-        let kept: Vec<Destination> = self
-            .destinations
+        /// A destination without its features, serialized in the field order of older versions.
+        #[derive(Serialize)]
+        struct Kept<'a> {
+            id: &'a str,
+            name: &'a str,
+            scheme: &'a str,
+            options: &'a BTreeMap<String, String>,
+            root: &'a str,
+            encrypt: bool,
+            required_for_purge: bool,
+            deep_check: &'a DeepCheckMode,
+            revision: u64,
+            recovery_secrets: bool,
+            #[serde(skip_serializing_if = "<[String]>::is_empty")]
+            missing_secrets: &'a [String],
+        }
+        let recovery = self.recovery_destinations();
+        let kept: Vec<Kept> = recovery
             .iter()
-            .map(|d| Destination {
+            .map(|d| Kept {
+                id: &d.id,
+                name: &d.name,
+                scheme: &d.scheme,
+                options: &d.options,
+                root: &d.root,
+                encrypt: d.encrypt,
+                required_for_purge: d.required_for_purge,
+                deep_check: &d.deep_check,
                 revision: 0,
-                ..d.for_recovery()
+                recovery_secrets: d.recovery_secrets,
+                missing_secrets: &d.missing_secrets,
             })
             .collect();
         let json = Zeroizing::new(serde_json::to_vec(&kept).unwrap_or_default());
@@ -823,6 +853,19 @@ mod tests {
             .options
             .insert("secret_access_key".into(), "new".into());
         cfg.destinations[0].revision += 1;
+        assert_eq!(cfg.destinations_hash(), before);
+        // The same fingerprint as versions without destination features: their kits stay current.
+        let full = serde_json::to_string(&Destination {
+            revision: 0,
+            ..cfg.destinations[0].for_recovery()
+        })
+        .unwrap();
+        let old = format!("[{}}}]", &full[..full.rfind(",\"features\"").unwrap()]);
+        assert_eq!(before, crypto::sha256_hex(old.as_bytes()));
+        // Nor do compression, Object Lock, speed limits or the price.
+        cfg.destinations[0].features.compress = !cfg.destinations[0].features.compress;
+        cfg.destinations[0].features.price_per_gb_month = Some(0.02);
+        cfg.destinations[0].features.upload_kib_per_sec = 512;
         assert_eq!(cfg.destinations_hash(), before);
         cfg.destinations[0].name = "Other".into();
         assert_ne!(cfg.destinations_hash(), before);
