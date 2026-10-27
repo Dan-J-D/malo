@@ -88,9 +88,22 @@
   const collectionId = $derived(params.get('collection'));
   const viewing = $derived(live.collections.find((c) => c.id === collectionId) ?? null);
   const collectionQuery = $derived(viewing ? `tag:"${viewing.name}"` : '');
+  // The search a collection put in the box: leaving the collection (or deleting it) clears it
+  // again, unless it was changed meanwhile.
+  let collectionSearch = '';
   $effect(() => {
     const cq = collectionQuery;
-    if (!cq) return;
+    if (!cq) {
+      untrack(() => {
+        if (collectionSearch && q.trim() === collectionSearch) {
+          q = '';
+          onSearch(true);
+        }
+        collectionSearch = '';
+      });
+      return;
+    }
+    collectionSearch = cq;
     untrack(() => {
       scope.account = '';
       field = '';

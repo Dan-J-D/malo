@@ -139,6 +139,17 @@
     input?.focus();
   }
 
+  // A search set from outside (a saved search or collection in the sidebar) shows as chips too.
+  $effect(() => {
+    const v = value;
+    untrack(() => {
+      if (v === compose()) return;
+      const r = extract(v, true);
+      chips = r.chips;
+      text = r.text;
+    });
+  });
+
   function publish(immediate: boolean) {
     const q = compose();
     if (q === value) return;
