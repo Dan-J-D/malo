@@ -4,7 +4,10 @@
 //! logout, lock, auto-lock, password change, self-deletion, admin disable/delete, server restart,
 //! accounts and destinations (also on shared storage), backups/checks/repairs/rebuilds/purges that
 //! overlap with all of the above, and outside-world faults (mail added/deleted by other clients,
-//! mailboxes recreated, IMAP connections kicked, storage objects deleted/corrupted, storage outages).
+//! mailboxes recreated, IMAP connections kicked, storage objects deleted/corrupted, storage outages),
+//! and recovery: saving kits, choosing which credentials the kit and settings copies keep, deleted
+//! users coming back from their kit, entering the credentials the kit left out, signing restored
+//! accounts in again, the password check before an app keeps a password, and conversation views.
 //! After every step a set of invariants is checked against a model of what should be true.
 //! A failure is shrunk to a minimal sequence (delta debugging) and saved for replay.
 //!
@@ -226,6 +229,44 @@ enum Op {
     ReadOnlyPrimary {
         u: usize,
         ms: u64,
+    },
+    /// The user saves a recovery kit (and the app confirms it was written).
+    SaveKit {
+        u: usize,
+    },
+    /// Keep (or stop keeping) a shared-S3 destination's credentials in the kit and settings copies.
+    KeepSecrets {
+        u: usize,
+        slot: usize,
+        keep: bool,
+    },
+    /// Mail passwords in the settings copies on or off.
+    CopyMailCreds {
+        u: usize,
+        on: bool,
+    },
+    /// A deleted user who saved a kit comes back as a new user restored from it (same slot).
+    RestoreFromKit {
+        u: usize,
+    },
+    /// The restored user types the storage credentials the kit left out.
+    EnterCredentials {
+        u: usize,
+    },
+    /// The restored user signs a restored (imported) account in again.
+    SignInAgain {
+        u: usize,
+        slot: usize,
+    },
+    /// The app checks a password before keeping it in a profile.
+    VerifyPassword {
+        u: usize,
+        right: bool,
+    },
+    /// Opens a conversation (with text previews).
+    ReadThread {
+        u: usize,
+        pick: u32,
     },
 }
 
@@ -557,7 +598,7 @@ fn gen_op(rng: &mut StdRng, depth: u32) -> Op {
     let u = rng.gen_range(0..USERS);
     let slot = rng.gen_range(0..3);
     let wait = rng.gen_bool(0.4);
-    match rng.gen_range(0..100) {
+    match rng.gen_range(0..112) {
         0..=5 => Op::Register { u },
         6..=13 => Op::Login { u },
         14..=15 => Op::Logout { u },
@@ -732,6 +773,24 @@ fn gen_op(rng: &mut StdRng, depth: u32) -> Op {
             u,
             ms: rng.gen_range(300..3000),
         },
+        100..=101 => Op::SaveKit { u },
+        102 => Op::KeepSecrets {
+            u,
+            slot,
+            keep: rng.gen_bool(0.6),
+        },
+        103 => Op::CopyMailCreds {
+            u,
+            on: rng.gen_bool(0.5),
+        },
+        104..=105 => Op::RestoreFromKit { u },
+        106 => Op::EnterCredentials { u },
+        107 => Op::SignInAgain { u, slot },
+        108 => Op::VerifyPassword {
+            u,
+            right: rng.gen_bool(0.7),
+        },
+        109..=110 => Op::ReadThread { u, pick: rng.gen() },
         _ if depth == 0 => Op::Burst {
             ops: (0..rng.gen_range(2..5)).map(|_| gen_op(rng, 1)).collect(),
         },
@@ -767,6 +826,8 @@ fn gen_sequence(seed: u64, steps: usize) -> Vec<Op> {
             folder: None,
             shape: None,
         },
+        // User 0 keeps a kit, so a deletion later can be undone from it.
+        Op::SaveKit { u: 0 },
     ];
     ops.extend((0..steps).map(|_| gen_op(&mut rng, 0)));
     ops
@@ -830,6 +891,19 @@ struct UserModel {
     /// Name of the user's folder in the shared mount, derived from their archive key (known
     /// once they were unlocked).
     owner_dir: Option<String>,
+    /// The last recovery kit saved, with its passphrase.
+    kit: Option<(SealedRecoveryKit, String)>,
+    /// `recovery_secrets` of each destination when that kit was saved.
+    kit_dests: HashMap<String, bool>,
+    /// A destination's credentials were ever kept in the kit and settings copies (also by a user
+    /// this one was restored from).
+    ever_kept_secrets: bool,
+    /// Mail passwords were ever copied into the settings copies (likewise).
+    ever_copied_creds: bool,
+    /// Restored from a kit: accounts of the users before, by id, as they were set up.
+    heir_accounts: HashMap<String, AccModel>,
+    /// Restored accounts this user signed in again.
+    signed_in: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -873,6 +947,9 @@ struct World {
     /// Next to the data directory and the mount: every traversal attempt aims here, and nothing
     /// may ever appear in it.
     canary: PathBuf,
+    /// Deleted users whose slot went to a user restored from their kit: still checked for
+    /// dead tokens, zombie data and the mail they took with them.
+    graveyard: Vec<UserModel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1073,6 +1150,25 @@ impl World {
 
     /// A call that must never produce a 5xx. Returns the status (0 = transport error) and body.
     async fn call<B: Serialize>(
+        &mut self,
+        api: &Api,
+        m: Method,
+        path: &str,
+        body: Option<&B>,
+    ) -> Result<(u16, serde_json::Value), Violation> {
+        let r = self.call_inner(api, m.clone(), path, body).await;
+        // Changes are traced with their outcome, so a failure report shows what really happened.
+        if m != Method::GET {
+            let st = match &r {
+                Ok((st, _)) => st.to_string(),
+                Err(v) => v.kind.clone(),
+            };
+            self.trace.push(format!("      {m} {path} → {st}"));
+        }
+        r
+    }
+
+    async fn call_inner<B: Serialize>(
         &mut self,
         api: &Api,
         m: Method,
@@ -2035,10 +2131,14 @@ impl World {
             password: um.password.clone(),
         };
         let disabled = um.disabled;
-        match anon
+        let r = anon
             .call::<_, LoginResponse>(Method::POST, "/auth/login", Some(&req))
-            .await
-        {
+            .await;
+        self.trace.push(format!(
+            "      login user {u} → {}",
+            r.as_ref().map(|_| 200).unwrap_or_else(|e| e.0)
+        ));
+        match r {
             Ok(r) => {
                 if disabled {
                     return Err(violation("disabled_login", "a disabled user could log in"));
@@ -3110,6 +3210,14 @@ impl World {
                     self.read_only.retain(|d| d != &dir);
                 }
             }
+            Op::SaveKit { .. }
+            | Op::KeepSecrets { .. }
+            | Op::CopyMailCreds { .. }
+            | Op::RestoreFromKit { .. }
+            | Op::EnterCredentials { .. }
+            | Op::SignInAgain { .. }
+            | Op::VerifyPassword { .. }
+            | Op::ReadThread { .. } => Box::pin(self.exec_recovery(op)).await?,
             Op::Burst { .. } => unreachable!(),
         }
         Ok(())
@@ -3119,6 +3227,349 @@ impl World {
 // ───────────────────────────── more operations ─────────────────────────────
 
 impl World {
+    /// Recovery and newer client features, apart from `exec_one` so its future stays small.
+    async fn exec_recovery(&mut self, op: &Op) -> Check {
+        match *op {
+            Op::SaveKit { u } => {
+                let Some(api) = self.ensure_session(u).await? else {
+                    return Ok(());
+                };
+                let passphrase = format!("kit passphrase of {}", self.users[u].name);
+                let body = RecoveryKitRequest {
+                    password: self.users[u].password.clone(),
+                    passphrase: passphrase.clone(),
+                };
+                let (st, v) = self
+                    .call(&api, Method::POST, "/recovery-kit", Some(&body))
+                    .await?;
+                if st != 200 {
+                    return Ok(());
+                }
+                let kit: SealedRecoveryKit = serde_json::from_value(v)
+                    .map_err(|e| violation("bad_response", e.to_string()))?;
+                // The file shows nothing: not whose it is, nor any storage secret.
+                let text = serde_json::to_string(&kit).unwrap();
+                if text.contains(&self.users[u].name) || text.contains("malo-test-secret") {
+                    return Err(violation("kit_plaintext", "the kit file shows its content"));
+                }
+                let (st, _) = self
+                    .call(
+                        &api,
+                        Method::POST,
+                        "/recovery-kit/saved",
+                        Some(&serde_json::json!({})),
+                    )
+                    .await?;
+                if st != 200 {
+                    return Ok(());
+                }
+                let (_, v) = self
+                    .call(&api, Method::GET, "/destinations", None::<&()>)
+                    .await?;
+                let dests: Vec<DestinationView> = serde_json::from_value(v).unwrap_or_default();
+                self.users[u].kit_dests = dests
+                    .iter()
+                    .map(|d| (d.id.clone(), d.recovery_secrets.unwrap_or(false)))
+                    .collect();
+                self.users[u].kit = Some((kit, passphrase));
+                let (st, v) = self.call(&api, Method::GET, "/me", None::<&()>).await?;
+                if st == 200
+                    && v.get("recovery_kit_pending") == Some(&serde_json::Value::Bool(true))
+                {
+                    return Err(violation(
+                        "kit_still_pending",
+                        "a saved kit is still asked for",
+                    ));
+                }
+            }
+            Op::KeepSecrets { u, slot, keep } => {
+                let Some(api) = self.ensure_session(u).await? else {
+                    return Ok(());
+                };
+                let (_, v) = self
+                    .call(&api, Method::GET, "/destinations", None::<&()>)
+                    .await?;
+                let dests: Vec<DestinationView> = serde_json::from_value(v).unwrap_or_default();
+                let s3: Vec<&DestinationView> = dests
+                    .iter()
+                    .filter(|d| {
+                        d.scheme == "s3" && d.missing_secrets.as_deref().unwrap_or(&[]).is_empty()
+                    })
+                    .collect();
+                if s3.is_empty() {
+                    return Ok(());
+                }
+                let d = s3[slot % s3.len()];
+                // Conservative: a save that fails half-way may still have kept them.
+                if keep {
+                    self.users[u].ever_kept_secrets = true;
+                }
+                let input = DestinationInput {
+                    revision: Some(d.revision),
+                    name: d.name.clone(),
+                    scheme: d.scheme.clone(),
+                    options: d.options.clone(),
+                    root: d.root.clone(),
+                    encrypt: d.encrypt,
+                    required_for_purge: d.required_for_purge,
+                    deep_check: d.deep_check.clone(),
+                    recovery_secrets: keep,
+                };
+                let (st, _) = self
+                    .call(
+                        &api,
+                        Method::PUT,
+                        &format!("/destinations/{}", d.id),
+                        Some(&input),
+                    )
+                    .await?;
+                // A kit saved with the other setting no longer holds this destination as it is.
+                if st == 200
+                    && self.users[u].kit.is_some()
+                    && self.users[u].kit_dests.get(&d.id) == Some(&!keep)
+                {
+                    let (st, v) = self.call(&api, Method::GET, "/me", None::<&()>).await?;
+                    if st == 200
+                        && v.get("recovery_kit_outdated") != Some(&serde_json::Value::Bool(true))
+                    {
+                        return Err(violation(
+                            "kit_not_outdated",
+                            format!(
+                                "{} changed what the kit keeps, but the kit counts as current",
+                                d.id
+                            ),
+                        ));
+                    }
+                }
+            }
+            Op::CopyMailCreds { u, on } => {
+                let Some(api) = self.ensure_session(u).await? else {
+                    return Ok(());
+                };
+                let (st, v) = self
+                    .call(&api, Method::GET, "/settings", None::<&()>)
+                    .await?;
+                let Ok(mut settings) = serde_json::from_value::<UserSettings>(v) else {
+                    return Ok(());
+                };
+                if st != 200 {
+                    return Ok(());
+                }
+                if on {
+                    self.users[u].ever_copied_creds = true;
+                }
+                settings.copy_mail_credentials = on;
+                self.call(&api, Method::PUT, "/settings", Some(&settings))
+                    .await?;
+            }
+            Op::RestoreFromKit { u } => Box::pin(self.restore_from_kit(u)).await?,
+            Op::EnterCredentials { u } => {
+                let Some(api) = self.ensure_session(u).await? else {
+                    return Ok(());
+                };
+                let (_, v) = self
+                    .call(&api, Method::GET, "/destinations", None::<&()>)
+                    .await?;
+                let dests: Vec<DestinationView> = serde_json::from_value(v).unwrap_or_default();
+                for d in dests {
+                    let missing = d.missing_secrets.clone().unwrap_or_default();
+                    if missing.is_empty() {
+                        continue;
+                    }
+                    if d.scheme != "s3" || missing != ["secret_access_key"] {
+                        return Err(violation(
+                            "unexpected_missing_secret",
+                            format!("{} ({}) misses {missing:?}", d.id, d.scheme),
+                        ));
+                    }
+                    let mut options = d.options.clone();
+                    options.insert("secret_access_key".into(), "malo-test-secret".into());
+                    let input = DestinationInput {
+                        revision: Some(d.revision),
+                        name: d.name.clone(),
+                        scheme: d.scheme.clone(),
+                        options,
+                        root: d.root.clone(),
+                        encrypt: d.encrypt,
+                        required_for_purge: d.required_for_purge,
+                        deep_check: d.deep_check.clone(),
+                        recovery_secrets: d.recovery_secrets.unwrap_or(false),
+                    };
+                    let (st, v) = self
+                        .call(
+                            &api,
+                            Method::PUT,
+                            &format!("/destinations/{}", d.id),
+                            Some(&input),
+                        )
+                        .await?;
+                    if st == 200 {
+                        let after: DestinationView = serde_json::from_value(v)
+                            .map_err(|e| violation("bad_response", e.to_string()))?;
+                        if !after.missing_secrets.unwrap_or_default().is_empty() {
+                            return Err(violation(
+                                "credentials_not_taken",
+                                format!("{} still misses its credentials after saving them", d.id),
+                            ));
+                        }
+                    }
+                }
+                self.heir_accounts(u).await?;
+            }
+            Op::SignInAgain { u, slot } => {
+                let Some(api) = self.ensure_session(u).await? else {
+                    return Ok(());
+                };
+                let (st, v) = self
+                    .call(&api, Method::GET, "/accounts", None::<&()>)
+                    .await?;
+                if st != 200 {
+                    return Ok(());
+                }
+                let accounts: Vec<AccountView> = serde_json::from_value(v).unwrap_or_default();
+                let waiting: Vec<(AccountView, AccModel)> = accounts
+                    .into_iter()
+                    .filter(|a| a.imported)
+                    .filter_map(|a| {
+                        let m = self.users[u].heir_accounts.get(&a.id)?.clone();
+                        Some((a, m))
+                    })
+                    .collect();
+                if waiting.is_empty() {
+                    return Ok(());
+                }
+                let (a, m) = waiting[slot % waiting.len()].clone();
+                let mut input = imap_input(
+                    &a.name,
+                    &self.mail[m.mailbox].imap_user,
+                    if m.starttls { 10143 } else { IMAP_PORT },
+                );
+                if m.starttls {
+                    input.tls = TlsMode::Starttls;
+                }
+                input.idle = m.idle;
+                input.revision = Some(a.revision);
+                let (st, v) = self
+                    .call(
+                        &api,
+                        Method::PUT,
+                        &format!("/accounts/{}", a.id),
+                        Some(&input),
+                    )
+                    .await?;
+                if st == 200 {
+                    let after: AccountView = serde_json::from_value(v)
+                        .map_err(|e| violation("bad_response", e.to_string()))?;
+                    if after.imported {
+                        return Err(violation(
+                            "sign_in_ignored",
+                            format!("account {} is still imported after signing in", a.id),
+                        ));
+                    }
+                    let um = &mut self.users[u];
+                    um.signed_in.insert(a.id.clone());
+                    um.ever_mailboxes.insert(m.mailbox);
+                    if !um.accounts.iter().any(|x| x.id == a.id) {
+                        um.accounts.push(AccModel {
+                            name: after.name,
+                            ..m
+                        });
+                    }
+                }
+            }
+            Op::VerifyPassword { u, right } => {
+                let Some(api) = self.session(u) else {
+                    return Ok(());
+                };
+                let password = if right {
+                    self.users[u].password.clone()
+                } else {
+                    format!("{}-typo", self.users[u].password)
+                };
+                let (st, _) = self
+                    .call(
+                        &api,
+                        Method::POST,
+                        "/auth/verify-password",
+                        Some(&VerifyPasswordRequest { password }),
+                    )
+                    .await?;
+                // 401/423: the session ended (auto-lock) — the next check sorts that out.
+                let fine = match st {
+                    200 => right,
+                    403 => !right,
+                    401 | 423 | 429 | 500 => true,
+                    _ => false,
+                };
+                if !fine {
+                    return Err(violation(
+                        "verify_password",
+                        format!("{} password → {st}", if right { "right" } else { "wrong" }),
+                    ));
+                }
+                // A wrong password is not a lost session.
+                if !right && st == 403 && api.status_of(Method::GET, "/me").await == 401 {
+                    let age = self.users[u]
+                        .session
+                        .as_ref()
+                        .map(|(_, t)| t.elapsed().as_secs() as i64)
+                        .unwrap_or(0);
+                    if age + 2 < AUTO_LOCK_SECS {
+                        return Err(violation(
+                            "verify_password_logged_out",
+                            "a wrong password in the check ended the session",
+                        ));
+                    }
+                }
+            }
+            Op::ReadThread { u, pick } => {
+                let Some(api) = self.session(u) else {
+                    return Ok(());
+                };
+                let (st, v) = self
+                    .call(&api, Method::GET, "/messages?limit=50", None::<&()>)
+                    .await?;
+                let Ok(list) = serde_json::from_value::<MessageList>(v) else {
+                    return Ok(());
+                };
+                if st != 200 || list.messages.is_empty() {
+                    return Ok(());
+                }
+                let id = list.messages[pick as usize % list.messages.len()].id;
+                let (st, v) = self
+                    .call(
+                        &api,
+                        Method::GET,
+                        &format!("/messages/{id}/thread"),
+                        None::<&()>,
+                    )
+                    .await?;
+                if st != 200 {
+                    return Ok(()); // removed meanwhile, or the session ended
+                }
+                let thread: Vec<MessageSummary> = serde_json::from_value(v)
+                    .map_err(|e| violation("bad_response", e.to_string()))?;
+                if !thread.iter().any(|m| m.id == id) {
+                    return Err(violation(
+                        "thread_without_message",
+                        format!("the conversation of {id} doesn't contain it"),
+                    ));
+                }
+                for m in &thread {
+                    let len = m.preview.as_deref().map_or(0, |p| p.chars().count());
+                    if len > 201 {
+                        return Err(violation(
+                            "thread_preview",
+                            format!("preview of {} has {len} characters", m.id),
+                        ));
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+
     async fn pick_shared_object(&self, pick: u32) -> Option<String> {
         use futures::TryStreamExt;
         let op = s3_operator(S3_BUCKET);
@@ -3165,6 +3616,218 @@ impl World {
         if let Some(own) = self.users[u].owner_dir.clone() {
             let snap = snapshot(&self.mount.join(&own));
             self.deleted_snapshots.insert(own, snap);
+        }
+        Ok(())
+    }
+
+    /// A deleted user who saved a kit: a new user is created from the kit and takes over the slot.
+    /// Destinations come back (storage secrets only where kept), the restore runs from the ones
+    /// that are usable, and accounts come back asking to sign in again unless mail passwords were
+    /// copied.
+    async fn restore_from_kit(&mut self, u: usize) -> Check {
+        if !self.users[u].deleted {
+            return Ok(());
+        }
+        let Some((kit, passphrase)) = self.users[u].kit.clone() else {
+            return Ok(());
+        };
+        let name = format!("{}r{}", self.users[u].name, self.graveyard.len());
+        let password = format!("{name}-password");
+        let admin = self.admin().await;
+        let invite: Invite = admin
+            .post(
+                "/admin/invites",
+                &CreateInviteRequest {
+                    username: Some(name.clone()),
+                    role: Role::User,
+                    valid_hours: 1,
+                },
+            )
+            .await;
+        let anon = Api {
+            token: None,
+            ..self.api.clone()
+        };
+        let (st, v) = self
+            .call(
+                &anon,
+                Method::POST,
+                "/auth/register",
+                Some(&RegisterRequest {
+                    username: name.clone(),
+                    password: password.clone(),
+                    invite_code: Some(invite.code),
+                    recovery_kit: Some(RecoveryKitFile::Sealed(kit)),
+                    kit_passphrase: Some(passphrase),
+                }),
+            )
+            .await?;
+        if st == 429 || (st == 500 && self.disk_faults_tolerated()) {
+            return Ok(());
+        }
+        if st != 200 {
+            return Err(violation("kit_restore_failed", format!("{st}: {v}")));
+        }
+        let reg: RegisterResponse =
+            serde_json::from_value(v).map_err(|e| violation("bad_response", e.to_string()))?;
+        // The slot goes to the new user; the old one stays checked from the graveyard. Its purges
+        // are not the new user's: their mail is excused like any deleted user's.
+        let old = std::mem::take(&mut self.users[u]);
+        for holders in self.purge_log.values_mut() {
+            holders.retain(|h| *h != u);
+        }
+        let mut heir_accounts = old.heir_accounts.clone();
+        for a in &old.accounts {
+            heir_accounts.insert(a.id.clone(), a.clone());
+        }
+        let old_primary = old
+            .destinations
+            .iter()
+            .find(|d| d.primary)
+            .map(|d| d.id.clone());
+        // The new user has the same archive key, so the same folder in the shared mount: it is
+        // theirs again, and may change.
+        if let Some(own) = &old.owner_dir {
+            self.deleted_snapshots.remove(own);
+        }
+        self.users[u] = UserModel {
+            name: name.clone(),
+            password,
+            id: self
+                .state()
+                .db
+                .user_by_name(&name)
+                .ok()
+                .flatten()
+                .map(|r| r.id),
+            ever_accounts: old.ever_accounts.clone(),
+            ever_destinations: old.ever_destinations.clone(),
+            owner_dir: old.owner_dir.clone(),
+            ever_kept_secrets: old.ever_kept_secrets,
+            ever_copied_creds: old.ever_copied_creds,
+            heir_accounts,
+            ..Default::default()
+        };
+        self.graveyard.push(old);
+        self.trace.push(format!(
+            "  restored user {u} as {name}: {} destination(s) from the kit",
+            reg.restored_destinations
+        ));
+        self.login(u).await?;
+        let Some(api) = self.session(u) else {
+            return Ok(());
+        };
+        let (st, v) = self.call(&api, Method::GET, "/me", None::<&()>).await?;
+        if st == 200 && v.get("recovery_kit_pending") == Some(&serde_json::Value::Bool(true)) {
+            return Err(violation(
+                "kit_restore_pending",
+                "a user restored from a kit is asked to save one first",
+            ));
+        }
+        let (st, v) = self
+            .call(&api, Method::GET, "/destinations", None::<&()>)
+            .await?;
+        if st == 200 {
+            let dests: Vec<DestinationView> =
+                serde_json::from_value(v).map_err(|e| violation("bad_response", e.to_string()))?;
+            if dests.len() < reg.restored_destinations as usize {
+                return Err(violation(
+                    "kit_destinations_lost",
+                    format!(
+                        "{} destination(s) in the kit, {} after the restore",
+                        reg.restored_destinations,
+                        dests.len()
+                    ),
+                ));
+            }
+            self.secrets_left_out(u, &dests)?;
+            for d in dests {
+                self.users[u].ever_destinations.insert(d.id.clone());
+                self.users[u].destinations.push(DestModel {
+                    primary: Some(&d.id) == old_primary.as_ref(),
+                    id: d.id,
+                });
+            }
+        }
+        // Let the restore (started at login from the usable destinations) finish. Destinations it
+        // brings back from the settings copy follow the same rule about secrets.
+        if let Some(id) = self.users[u].id.clone() {
+            self.wait_jobs_quiet(&id, 120).await;
+        }
+        let (st, v) = self
+            .call(&api, Method::GET, "/destinations", None::<&()>)
+            .await?;
+        if st == 200 {
+            let dests: Vec<DestinationView> = serde_json::from_value(v).unwrap_or_default();
+            self.secrets_left_out(u, &dests)?;
+            for d in dests {
+                if !self.users[u].destinations.iter().any(|m| m.id == d.id) {
+                    self.users[u].ever_destinations.insert(d.id.clone());
+                    self.users[u].destinations.push(DestModel {
+                        id: d.id,
+                        primary: false,
+                    });
+                }
+            }
+        }
+        self.heir_accounts(u).await
+    }
+
+    /// Storage secrets never come back from a kit or settings copy that wasn't asked to keep them.
+    fn secrets_left_out(&self, u: usize, dests: &[DestinationView]) -> Check {
+        if self.users[u].ever_kept_secrets {
+            return Ok(());
+        }
+        for d in dests {
+            let missing = d.missing_secrets.as_deref().unwrap_or(&[]);
+            if d.scheme == "s3"
+                && missing.is_empty()
+                && !self.users[u].destinations.iter().any(|m| m.id == d.id)
+            {
+                return Err(violation(
+                    "kit_leaked_secret",
+                    format!("restored S3 destination {} came back with its secret", d.id),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Restored accounts only come back ready to run when mail passwords were copied; the ones
+    /// that did are taken into the model.
+    async fn heir_accounts(&mut self, u: usize) -> Check {
+        if self.users[u].heir_accounts.is_empty() {
+            return Ok(());
+        }
+        let Some(api) = self.session(u) else {
+            return Ok(());
+        };
+        let (st, v) = self
+            .call(&api, Method::GET, "/accounts", None::<&()>)
+            .await?;
+        if st != 200 {
+            return Ok(());
+        }
+        let accounts: Vec<AccountView> = serde_json::from_value(v).unwrap_or_default();
+        for a in accounts.into_iter().filter(|a| !a.imported) {
+            let Some(m) = self.users[u].heir_accounts.get(&a.id).cloned() else {
+                continue;
+            };
+            let um = &mut self.users[u];
+            if um.accounts.iter().any(|x| x.id == a.id) {
+                continue;
+            }
+            if !um.ever_copied_creds && !um.signed_in.contains(&a.id) {
+                return Err(violation(
+                    "restored_credentials",
+                    format!(
+                        "account {} came back with its sign-in, but mail passwords were never copied",
+                        a.id
+                    ),
+                ));
+            }
+            um.ever_mailboxes.insert(m.mailbox);
+            um.accounts.push(AccModel { name: a.name, ..m });
         }
         Ok(())
     }
@@ -3265,6 +3928,29 @@ impl World {
                         format!("user {u}: a logged-out/locked/deleted session still works"),
                     ));
                 }
+            }
+        }
+        // Users replaced by a restore from their kit stay deleted.
+        for old in &self.graveyard {
+            for api in &old.stale {
+                if api.status_of(Method::GET, "/me").await == 200 {
+                    return Err(violation(
+                        "stale_token_works",
+                        format!("a session of deleted user {} works again", old.name),
+                    ));
+                }
+            }
+            let Some(id) = &old.id else { continue };
+            if self.dir.path().join("users").join(id).exists()
+                || self.state().db.user(id).ok().flatten().is_some()
+            {
+                return Err(violation(
+                    "zombie_user",
+                    format!(
+                        "deleted user {} came back after a restore from their kit",
+                        old.name
+                    ),
+                ));
             }
         }
 
@@ -3614,6 +4300,7 @@ impl World {
         let owners: HashSet<String> = self
             .users
             .iter()
+            .chain(&self.graveyard)
             .filter_map(|u| u.owner_dir.clone())
             .collect();
         // A user never unlocked so far has no folder to account for yet, but if one shows up it
@@ -3833,7 +4520,23 @@ impl World {
                             break;
                         }
                     }
+                    // A user deleted since may have purged it, its record gone with it (and the
+                    // candidate may never have seen the message).
+                    let deleted_purger = self
+                        .users
+                        .iter()
+                        .chain(&self.graveyard)
+                        .any(|u| u.deleted && u.ever_mailboxes.contains(&m));
+                    if !found && deleted_purger {
+                        self.trace.push(format!(
+                            "  note: {token} is gone and not with users {candidates:?}; a deleted user who had mailbox {m} may have purged it"
+                        ));
+                        continue;
+                    }
                     if !found {
+                        for u in &candidates {
+                            self.diag_destinations(*u, &token).await;
+                        }
                         return Err(violation(
                             "mail_lost",
                             format!("{token} vanished from mailbox {m}, and none of users {candidates:?} (who lost their index) can give it back"),
@@ -3850,6 +4553,7 @@ impl World {
                     let excused = self
                         .users
                         .iter()
+                        .chain(&self.graveyard)
                         .any(|u| u.deleted && u.ever_mailboxes.contains(&m));
                     if !excused {
                         return Err(violation(
@@ -4001,6 +4705,80 @@ impl World {
     }
 }
 
+impl World {
+    /// For a failure report: what a user's destinations hold, and what Malo knows about `token`.
+    async fn diag_destinations(&mut self, u: usize, token: &str) {
+        let uid = self.users[u].id.clone().unwrap_or_default();
+        let Some(k) = self.state().keyring.get(&uid) else {
+            self.trace.push(format!("  diag: user {u} is not unlocked"));
+            return;
+        };
+        let cfg = k.config();
+        self.trace.push(format!(
+            "  diag: user {u} destinations {:?}; model {:?}",
+            cfg.destinations
+                .iter()
+                .map(|d| (
+                    &d.id,
+                    &d.name,
+                    &d.scheme,
+                    &d.root,
+                    d.options.get("root"),
+                    &d.missing_secrets
+                ))
+                .collect::<Vec<_>>(),
+            self.users[u]
+                .destinations
+                .iter()
+                .map(|d| (&d.id, d.primary))
+                .collect::<Vec<_>>()
+        ));
+        let ctx = malo_server::jobs::job_ctx(
+            self.state(),
+            &k,
+            "diag",
+            tokio_util::sync::CancellationToken::new(),
+        );
+        for d in &cfg.destinations {
+            match ctx.store(&d.id) {
+                Ok(store) => match store.scan().await {
+                    Ok(scan) => {
+                        let hits = scan
+                            .entries
+                            .iter()
+                            .filter(|(_, e)| e.envelope.subject.starts_with(token))
+                            .count();
+                        self.trace.push(format!(
+                            "  diag: {} ({}): {} markers, {} manifest lines, {hits} for {token}",
+                            d.name,
+                            d.id,
+                            scan.markers.len(),
+                            scan.entries.len()
+                        ));
+                    }
+                    Err(e) => self
+                        .trace
+                        .push(format!("  diag: {} unreadable: {e:#}", d.name)),
+                },
+                Err(e) => self
+                    .trace
+                    .push(format!("  diag: {} can't open: {e:#}", d.name)),
+            }
+        }
+        let audit = k.index.audit_entries(None, 500).unwrap_or_default();
+        self.trace.push(format!(
+            "  diag: user {u} audit since the index was lost: {:?}",
+            audit
+                .iter()
+                .map(|e| (
+                    &e.kind,
+                    e.detail.to_string().chars().take(120).collect::<String>()
+                ))
+                .collect::<Vec<_>>()
+        ));
+    }
+}
+
 async fn raw_bytes(api: &Api, id: i64) -> Option<Vec<u8>> {
     let tls = (*malo_core::tls::pinned_config(&api.fingerprint)).clone();
     let http = reqwest::Client::builder()
@@ -4087,6 +4865,7 @@ async fn run_inner(seed: u64, ops: &[Op], verbose: bool) -> (Option<Violation>, 
         read_only: vec![],
         indexes_lost: 0,
         purge_log: HashMap::new(),
+        graveyard: vec![],
         dir,
     };
     let mut result = None;
@@ -4163,7 +4942,7 @@ async fn run_inner(seed: u64, ops: &[Op], verbose: bool) -> (Option<Violation>, 
         }
     }
     world.trace.push(format!(
-        "summary: {} users registered ({} deleted), {} accounts, {} messages created, {} purged by Malo, {} jobs, {} I/O faults injected, {} indexes lost",
+        "summary: {} users registered ({} deleted), {} accounts, {} messages created, {} purged by Malo, {} jobs, {} I/O faults injected, {} indexes lost, {} kits saved, {} users restored from a kit",
         world.users.iter().filter(|u| u.id.is_some()).count(),
         world.users.iter().filter(|u| u.deleted).count(),
         world.users.iter().map(|u| u.ever_accounts.len()).sum::<usize>(),
@@ -4172,6 +4951,13 @@ async fn run_inner(seed: u64, ops: &[Op], verbose: bool) -> (Option<Violation>, 
         jobs,
         faults::injected(),
         world.indexes_lost,
+        world
+            .users
+            .iter()
+            .chain(&world.graveyard)
+            .filter(|u| u.kit.is_some())
+            .count(),
+        world.graveyard.len(),
     ));
     if let Some(server) = world.server.take() {
         server.shutdown(Duration::from_secs(20)).await;

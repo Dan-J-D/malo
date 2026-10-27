@@ -47,6 +47,11 @@ pub struct Me {
     pub server_max_auto_lock_hours: u32,
     /// True until the user has downloaded the recovery kit once.
     pub recovery_kit_pending: bool,
+    /// The saved kit doesn't hold the destinations as they are now (added or changed since, or
+    /// with new credentials where the kit keeps them), so a new kit should be saved.
+    /// Older servers don't send it.
+    #[serde(default)]
+    pub recovery_kit_outdated: bool,
     /// Jobs that came due while the user was locked and were skipped.
     pub skipped_while_locked: u32,
 }
@@ -86,12 +91,26 @@ pub struct DeleteAccountRequest {
     pub confirm: String,
 }
 
+/// Checks the caller's password without changing anything, e.g. before an app stores it.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct VerifyPasswordRequest {
+    pub password: String,
+}
+
 /// First-boot admin creation with the one-time token printed in the server log.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct SetupRequest {
     pub setup_token: String,
     pub username: String,
     pub password: String,
+    /// Optional recovery kit: the administrator is restored from it, like a registration with a
+    /// kit (a replacement for a lost server).
+    #[serde(default)]
+    #[ts(optional)]
+    pub recovery_kit: Option<RecoveryKitFile>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub kit_passphrase: Option<String>,
 }
 
 /// Self-registration or invite redemption.
@@ -106,6 +125,13 @@ pub struct RegisterRequest {
     #[serde(default)]
     #[ts(optional)]
     pub kit_passphrase: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct RegisterResponse {
+    /// Destinations set up from the recovery kit. When there are any, the first login restores
+    /// accounts, settings and mail from them.
+    pub restored_destinations: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -135,6 +161,10 @@ pub struct UserSettings {
     pub quick_check_hours: u32,
     pub deep_check_hours: u32,
     pub auto_repair: bool,
+    /// The settings copy on each destination also holds mail passwords and sign-in tokens, so a
+    /// restore brings accounts back ready to run. Off: restored accounts ask to sign in again.
+    #[serde(default)]
+    pub copy_mail_credentials: bool,
 }
 
 impl Default for UserSettings {
@@ -144,6 +174,7 @@ impl Default for UserSettings {
             quick_check_hours: 24,
             deep_check_hours: 24 * 7,
             auto_repair: false,
+            copy_mail_credentials: false,
         }
     }
 }
@@ -162,6 +193,13 @@ pub struct RecoveryKit {
     #[serde(default)]
     #[ts(optional)]
     pub check: Option<String>,
+    /// The user's destinations when the kit was saved, their credentials only where the user
+    /// asked for that ([`DestinationInput::recovery_secrets`]). Registering with
+    /// the kit sets them up again and the first login rebuilds everything from them, so nothing
+    /// has to be typed in. Only ever inside a sealed kit; absent in kits from older versions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(skip)]
+    pub destinations: Vec<serde_json::Value>,
 }
 
 pub const SEALED_KIT_FORMAT: &str = "malo-recovery-kit-v2";
@@ -453,6 +491,10 @@ pub struct DestinationInput {
     pub encrypt: bool,
     pub required_for_purge: bool,
     pub deep_check: DeepCheckMode,
+    /// Keep this destination's credentials in the recovery kit and the settings copies. Off, a
+    /// restore brings the destination back without them and asks for them again.
+    #[serde(default)]
+    pub recovery_secrets: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -468,6 +510,15 @@ pub struct DestinationView {
     pub encrypt: bool,
     pub required_for_purge: bool,
     pub deep_check: DeepCheckMode,
+    /// Older servers send neither of these.
+    #[serde(default)]
+    #[ts(optional)]
+    pub recovery_secrets: Option<bool>,
+    /// Credentials it came back without from a recovery kit or settings copy: until they are
+    /// entered again, nothing is written to or read from it.
+    #[serde(default)]
+    #[ts(optional)]
+    pub missing_secrets: Option<Vec<String>>,
     #[ts(type = "number")]
     pub object_count: u64,
     #[ts(type = "number")]
@@ -792,6 +843,10 @@ pub struct MessageSummary {
     /// Messages in its conversation, itself included.
     #[serde(default)]
     pub thread_size: u32,
+    /// In a conversation: the start of the text, without quoted replies.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub preview: Option<String>,
 }
 
 /// A value for a search operator (`from:`, `to:`, `file:`), most used first.
@@ -1192,6 +1247,7 @@ pub fn typescript_bindings() -> String {
         DeleteAccountRequest,
         SetupRequest,
         RegisterRequest,
+        RegisterResponse,
         RecoverRequest,
         RecoveryKitRequest,
         ServerStatus,

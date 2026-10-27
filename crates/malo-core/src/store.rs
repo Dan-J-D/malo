@@ -483,6 +483,8 @@ pub fn raw_operator(scheme: &str, options: &BTreeMap<String, String>) -> anyhow:
         required_for_purge: false,
         deep_check: malo_api::DeepCheckMode::Off,
         revision: 0,
+        recovery_secrets: false,
+        missing_secrets: vec![],
     };
     validate_destination(&dest)?;
     operator(s, forced_options(s, dest.options.clone()))
@@ -511,6 +513,13 @@ fn operator(scheme: Scheme, opts: HashMap<String, String>) -> anyhow::Result<Ope
 
 impl Store {
     pub fn open(dest: &Destination, archive_key: &Key, fs: &FsPolicy) -> anyhow::Result<Store> {
+        if !dest.complete() {
+            bail!(
+                "\"{}\" was restored without its credentials ({}): enter them again under Destinations",
+                dest.name,
+                dest.missing_secrets.join(", ")
+            );
+        }
         let scheme = Scheme::parse(&dest.scheme)?;
         validate_destination(dest)?;
         let mut opts = forced_options(scheme, dest.options.clone());
@@ -1078,6 +1087,8 @@ mod tests {
             encrypt,
             required_for_purge: true,
             deep_check: DeepCheckMode::Full,
+            recovery_secrets: false,
+            missing_secrets: vec![],
         }
     }
 

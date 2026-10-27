@@ -17,6 +17,11 @@
   const totalMessages = $derived(live.accounts.reduce((n, a) => n + Number(a.message_count), 0));
   const totalBytes = $derived(live.accounts.reduce((n, a) => n + Number(a.stored_bytes), 0));
   const running = $derived(live.jobs.filter((j) => j.state === 'running' || j.state === 'queued'));
+  /** A restore from the recovery kit (or any full rebuild) is bringing accounts and mail back. */
+  const restoring = $derived(running.some((j) => j.kind.type === 'rebuild_index_all'));
+  /** Restored without credentials: they wait for them, unused. */
+  const waitingDestinations = $derived(live.destinations.filter((d) => d.missing_secrets?.length));
+  const signInAgain = $derived(live.accounts.filter((a) => a.imported));
 
   const verify = verifyAll;
   commands(() => [
@@ -34,7 +39,30 @@
   <div class="panel"><div class="muted small">Keys unlocked until</div><div class="stat small">{when(session.me?.expires_at)}</div><div class="muted small">in {until(session.me?.expires_at)} — then backups pause</div></div>
 </div>
 
-{#if live.destinations.length === 0 || live.accounts.length === 0}
+{#if session.me?.recovery_kit_outdated}
+  <div class="callout">
+    Your recovery kit doesn't hold your destinations as they are now. <a href="#/settings">Save a new recovery kit</a> and replace the old file.
+  </div>
+{/if}
+
+{#if waitingDestinations.length}
+  <div class="callout">
+    {waitingDestinations.length === 1 ? `“${waitingDestinations[0].name}” came` : `${waitingDestinations.length} destinations came`} back without credentials and {waitingDestinations.length === 1 ? 'isn’t' : 'aren’t'} used until you enter them.
+    {#if session.me && live.accounts.length === 0}Your accounts, settings and mail come back once one of them has its credentials.{/if}
+    <a href="#/destinations">Enter credentials →</a>
+  </div>
+{/if}
+{#if signInAgain.length && !restoring}
+  <div class="callout">
+    {signInAgain.length === 1 ? `“${signInAgain[0].name}” needs` : `${signInAgain.length} accounts need`} you to sign in again before {signInAgain.length === 1 ? 'it backs' : 'they back'} up. Mail already backed up is safe on your destinations; only the sign-in wasn't restored. <a href="#/accounts">Set up sign-in →</a>
+  </div>
+{/if}
+
+{#if restoring}
+  <div class="callout ok">
+    Restoring: Malo is reading your destinations and bringing back accounts, settings and mail. <a href="#/activity">Follow it in Activity →</a>
+  </div>
+{:else if live.destinations.length === 0 || live.accounts.length === 0}
   <div class="callout">
     Get started: {#if live.destinations.length === 0}<a href="#/destinations">add a destination</a> where backups go{/if}
     {#if live.destinations.length === 0 && live.accounts.length === 0}, then {/if}

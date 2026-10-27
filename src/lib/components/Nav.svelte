@@ -183,7 +183,7 @@
       <Avatar name={session.me?.username ?? '?'} size={26} />
       <div class="min-w-0 text-[0.85rem] leading-tight">
         <div class="truncate font-medium">{session.me?.username}</div>
-        <div class="truncate text-muted">{session.local ? 'Local server' : session.url}</div>
+        <div class="truncate text-muted" title={session.profile?.path}>{session.profile ? `${session.profile.name} · ` : ''}{session.local ? 'Local server' : session.url}</div>
       </div>
     </div>
     <div class="text-[0.85rem] text-muted" title="Keys are wiped from server memory when this runs out">Keys unlocked for {lockIn}</div>

@@ -159,7 +159,7 @@ pub fn job_ctx(
     JobCtx {
         job_id: job_id.to_string(),
         user_id: user.user_id.clone(),
-        config: user.config(),
+        config: usable_config(user),
         archive_key: user.secrets.archive_key.clone(),
         index: user.index.clone(),
         spool_dir: paths.spool(),
@@ -175,6 +175,36 @@ pub fn job_ctx(
             last: Mutex::new(Instant::now()),
         }),
         cancel,
+    }
+}
+
+/// The config jobs work with: destinations still waiting for their credentials (restored without
+/// them) are left out, so backups and checks carry on with the others and a purge that requires
+/// one of them stays blocked.
+fn usable_config(user: &UnlockedUser) -> Arc<malo_core::config::UserConfig> {
+    let cfg = user.config();
+    if cfg.destinations.iter().all(|d| d.complete()) {
+        return cfg;
+    }
+    let mut usable = (*cfg).clone();
+    usable.destinations.retain(|d| d.complete());
+    Arc::new(usable)
+}
+
+/// A user restored from a kit rebuilds from its destinations at the first chance: when they log
+/// in, or when a destination that came back without its credentials gets them.
+pub fn start_restore_if_ready(state: &SharedState, user: &UnlockedUser) {
+    let cfg = user.config();
+    if !cfg.restore_pending || !cfg.destinations.iter().any(|d| d.complete()) {
+        return;
+    }
+    if let Err(e) = submit(
+        state,
+        &user.user_id,
+        JobKind::RebuildIndexAll,
+        JobTrigger::Manual,
+    ) {
+        tracing::warn!(user = %user.username, "could not start the restore: {e:#}");
     }
 }
 
@@ -385,13 +415,13 @@ async fn execute(
                 "imported accounts have no server to back up"
             );
             let r = serde_json::to_value(sync::run_backup(ctx, account_id).await?)?;
-            save_settings_copies(ctx).await;
+            save_settings_copies(ctx, &user.config()).await;
             r
         }
         JobKind::Check { scope, deep } => {
             let repair = ctx.config.settings.auto_repair;
             let r = serde_json::to_value(verify::run_check(ctx, scope, *deep, repair).await?)?;
-            save_settings_copies(ctx).await;
+            save_settings_copies(ctx, &user.config()).await;
             r
         }
         JobKind::Repair { scope } => {
@@ -422,8 +452,17 @@ async fn execute(
                 JobKind::RebuildIndex { destination_id } => vec![destination_id.clone()],
                 _ => ctx.destination_ids(),
             };
+            // The first rebuild of a user restored from a kit also takes the settings over.
+            let first_restore = user.config().restore_pending;
+            if first_restore {
+                user.update_config(|c| {
+                    c.restore_pending = false;
+                    Ok(())
+                })
+                .await?;
+            }
             let (restored_accounts, restored_destinations) =
-                restore_settings(state, user, ctx, &from).await?;
+                restore_settings(state, user, ctx, &from, first_restore).await?;
             // Destinations that came back with the settings are scanned too, in a second pass.
             if restored_destinations > 0 && matches!(kind, JobKind::RebuildIndex { .. }) {
                 submit(
@@ -515,9 +554,11 @@ pub(crate) fn index_if_pending(state: &SharedState, user: &UnlockedUser) {
 }
 
 /// Keeps the encrypted settings copy on every destination current (best effort, after backups
-/// and checks). A copy is only rewritten when the settings changed since it was written.
-async fn save_settings_copies(ctx: &JobCtx) {
-    let (json, hash) = match ctx.config.settings_backup() {
+/// and checks). A copy is only rewritten when the settings changed since it was written. It is
+/// made from the whole config, destinations waiting for credentials included, and written to the
+/// destinations the job can use.
+async fn save_settings_copies(ctx: &JobCtx, full: &malo_core::config::UserConfig) {
+    let (json, hash) = match full.settings_backup() {
         Ok(x) => x,
         Err(e) => return tracing::warn!("settings copy: {e:#}"),
     };
@@ -559,6 +600,7 @@ async fn restore_settings(
     user: &Arc<UnlockedUser>,
     ctx: &JobCtx,
     from: &[String],
+    adopt_settings: bool,
 ) -> anyhow::Result<(u64, u64)> {
     use malo_core::config::SettingsBackup;
     let mut newest: Option<SettingsBackup> = None;
@@ -585,9 +627,15 @@ async fn restore_settings(
     };
     backup.accounts.retain(|a| !removed(&a.id));
     backup.destinations.retain(|d| !removed(&d.id));
+    let max_lock = crate::auth::max_lock_hours(state);
     let (accounts, destinations) = user
         .update_config(move |cfg| {
             let (mut na, mut nd) = (0u64, 0u64);
+            if adopt_settings {
+                let mut s = backup.settings.clone();
+                s.auto_lock_hours = s.auto_lock_hours.clamp(1, max_lock);
+                cfg.settings = s;
+            }
             for d in backup.destinations {
                 if cfg.destination(&d.id).is_some()
                     || cfg.destinations.iter().any(|x| same_storage(x, &d))
@@ -616,6 +664,10 @@ async fn restore_settings(
             Ok((na, nd))
         })
         .await?;
+    if adopt_settings {
+        // Check intervals may have changed.
+        crate::scheduler::sync_schedules(state, user)?;
+    }
     if accounts + destinations > 0 {
         crate::scheduler::sync_schedules(state, user)?;
         state.events.emit(&user.user_id, SyncEvent::AccountsChanged);

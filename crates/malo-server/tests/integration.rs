@@ -1166,6 +1166,16 @@ async fn rebuild_index_and_recovery_kit() {
     let prefix = uniq("kit");
     let s3_input = s3_dest("rustfs", "malo-b", &prefix, true);
     let _: DestinationView = fran.post("/destinations", &s3_input).await;
+    // Settings travel in the settings copy too, and a restore from the kit takes them over.
+    let _: UserSettings = fran
+        .put(
+            "/settings",
+            &UserSettings {
+                quick_check_hours: 7,
+                ..Default::default()
+            },
+        )
+        .await;
     let imap_user = uniq("kit-");
     seed_standard(&imap_user).await;
     let acc: AccountView = fran
@@ -1180,6 +1190,23 @@ async fn rebuild_index_and_recovery_kit() {
     );
     let me: Me = fran.get("/me").await;
     assert!(me.recovery_kit_pending);
+    // The app checks a password before keeping it in a profile; a wrong one is not a lost session.
+    let ok = fran
+        .call::<_, serde_json::Value>(
+            Method::POST,
+            "/auth/verify-password",
+            Some(&serde_json::json!({ "password": fran_password })),
+        )
+        .await;
+    assert!(ok.is_ok(), "{ok:?}");
+    let wrong = fran
+        .call::<_, serde_json::Value>(
+            Method::POST,
+            "/auth/verify-password",
+            Some(&serde_json::json!({ "password": "not it" })),
+        )
+        .await;
+    assert_eq!(wrong.unwrap_err().0, 403);
     let kit: SealedRecoveryKit = fran
         .post(
             "/recovery-kit",
@@ -1198,9 +1225,18 @@ async fn rebuild_index_and_recovery_kit() {
         .await;
     let me: Me = fran.get("/me").await;
     assert!(!me.recovery_kit_pending);
-    // The kit file doesn't contain the key, the username or the user id in the clear.
+    assert!(
+        !me.recovery_kit_outdated,
+        "the kit holds the destinations as they are"
+    );
+    // The kit file doesn't contain the key, the username, the user id or the destination's
+    // credentials in the clear.
     let file = serde_json::to_string(&kit).unwrap();
     assert!(!file.contains(&name) && !file.contains(&me.id), "{file}");
+    assert!(
+        !file.contains("rustfs") && !file.contains(&prefix),
+        "{file}"
+    );
 
     // A forgotten password: the kit resets it in place, keeping accounts and backups.
     let anon = Api {
@@ -1269,7 +1305,9 @@ async fn rebuild_index_and_recovery_kit() {
     let list: MessageList = fran.get("/messages?limit=100").await;
     assert_eq!(list.total, 5);
 
-    // A brand-new user created from the kit can rebuild an index from the encrypted destination.
+    // Restore: a brand-new user created from the kit gets its destinations back. Their
+    // credentials weren't kept in the kit (the default), so the restore starts once the storage
+    // secret is entered again; then everything else comes back from the destination.
     let invite: Invite = admin
         .post(
             "/admin/invites",
@@ -1281,7 +1319,7 @@ async fn rebuild_index_and_recovery_kit() {
         )
         .await;
     let heir = uniq("heir");
-    let _: serde_json::Value = anon
+    let reg: RegisterResponse = anon
         .post(
             "/auth/register",
             &RegisterRequest {
@@ -1293,24 +1331,82 @@ async fn rebuild_index_and_recovery_kit() {
             },
         )
         .await;
+    assert_eq!(reg.restored_destinations, 1);
     let heir_api = anon.login(&heir, "heir-password-1").await;
-    let d: DestinationView = heir_api.post("/destinations", &s3_input).await;
-    job_result::<serde_json::Value>(
-        &heir_api
-            .run_job(JobKind::RebuildIndex {
-                destination_id: d.id.clone(),
-            })
-            .await,
+    let dests: Vec<DestinationView> = heir_api.get("/destinations").await;
+    assert_eq!(
+        dests[0].missing_secrets.as_deref(),
+        Some(&["secret_access_key".to_string()][..])
     );
-    // The encrypted settings copy on the destination brings the account back with its sign-in
-    // details (purge disarmed), and the destination isn't added twice.
+    assert!(!dests[0].options.contains_key("secret_access_key"));
+    let jobs: Vec<JobInfo> = heir_api.get("/jobs").await;
+    assert!(
+        !jobs
+            .iter()
+            .any(|j| matches!(j.kind, JobKind::RebuildIndexAll)),
+        "nothing to restore from until the destination has its credentials"
+    );
+    let _: DestinationView = heir_api
+        .put(&format!("/destinations/{}", dests[0].id), &s3_input)
+        .await;
+    let api = heir_api.clone();
+    let restored = wait_until(
+        move || {
+            let api = api.clone();
+            Box::pin(async move {
+                let jobs: Vec<JobInfo> = api.get("/jobs").await;
+                jobs.iter().any(|j| {
+                    matches!(j.kind, JobKind::RebuildIndexAll)
+                        && j.state != JobState::Queued
+                        && j.state != JobState::Running
+                })
+            })
+        },
+        120,
+    )
+    .await;
+    assert!(
+        restored,
+        "entering the credentials didn't start the restore"
+    );
+    let jobs: Vec<JobInfo> = heir_api.get("/jobs").await;
+    let rebuild = jobs
+        .iter()
+        .find(|j| matches!(j.kind, JobKind::RebuildIndexAll))
+        .unwrap();
+    job_result::<serde_json::Value>(rebuild);
+    let settings: UserSettings = heir_api.get("/settings").await;
+    assert_eq!(settings.quick_check_hours, 7, "settings come back too");
+    let me: Me = heir_api.get("/me").await;
+    assert!(!me.recovery_kit_pending && !me.recovery_kit_outdated);
+    // Logging in again doesn't restore twice.
+    let again = anon.login(&heir, "heir-password-1").await;
+    let jobs: Vec<JobInfo> = again.get("/jobs").await;
+    assert_eq!(
+        jobs.iter()
+            .filter(|j| matches!(j.kind, JobKind::RebuildIndexAll))
+            .count(),
+        1
+    );
+    // The encrypted settings copy on the destination brings the account back with its settings
+    // but, by default, without its password: it asks to sign in again (purge disarmed). The
+    // destination isn't added twice.
     let accounts: Vec<AccountView> = heir_api.get("/accounts").await;
     assert_eq!(accounts.len(), 1);
-    assert!(!accounts[0].imported);
+    assert!(accounts[0].imported);
     assert_eq!(accounts[0].name, "kit");
+    assert_eq!(accounts[0].host, acc.host);
     assert!(!accounts[0].policy.armed);
+    let resumed: AccountView = heir_api
+        .put(
+            &format!("/accounts/{}", accounts[0].id),
+            &imap_input("kit", &imap_user, IMAP_PORT),
+        )
+        .await;
+    assert!(!resumed.imported, "signing in again resumes the account");
     let dests: Vec<DestinationView> = heir_api.get("/destinations").await;
     assert_eq!(dests.len(), 1);
+    assert_eq!(dests[0].missing_secrets.as_deref(), Some(&[][..]));
     let list: MessageList = heir_api.get("/messages?limit=100").await;
     let subjects: Vec<_> = list
         .messages
@@ -2079,6 +2175,8 @@ async fn admin_invites_limits_and_deletion() {
                 setup_token: server.setup_token.clone().unwrap(),
                 username: "second-admin".into(),
                 password: "second-password-1".into(),
+                recovery_kit: None,
+                kit_passphrase: None,
             }),
         )
         .await;

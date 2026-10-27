@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ask } from '../confirm.svelte';
   import Select from '../components/Select.svelte';
   import { api } from '../api/client';
   import type * as T from '../api/types';
@@ -64,7 +65,7 @@
 
   async function save() {
     if (!policy || !account) return;
-    if (account.policy.armed && !confirm('Changing the policy disarms scheduled purges. Continue?')) return;
+    if (account.policy.armed && !(await ask({ title: 'Disarm scheduled purges?', body: 'Changing the policy disarms scheduled purges until you arm them again.', confirm: 'Save and disarm' }))) return;
     // The revision makes a save from a stale page fail instead of overwriting another device's change.
     await attempt(() => api.put(`/accounts/${account!.id}/policy?revision=${account!.revision}`, policy), 'Policy saved (disarmed)');
     await refreshAccounts();
@@ -98,7 +99,12 @@
 
   async function runNow() {
     if (!account || !preview) return;
-    if (!confirm(`Permanently delete about ${preview.total_count} messages (${bytes(preview.total_bytes)}) from ${account.name} now?`)) return;
+    if (!(await ask({
+      title: `Delete about ${preview.total_count} messages now?`,
+      body: `${bytes(preview.total_bytes)} are permanently deleted from ${account.name} on the mail server.`,
+      confirm: 'Purge now',
+      danger: true,
+    }))) return;
     await attempt(() => api.post('/jobs', { kind: { type: 'purge', account_id: account.id } }), 'Purge started');
   }
 

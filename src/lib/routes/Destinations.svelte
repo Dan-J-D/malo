@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ask } from '../confirm.svelte';
   import Select from '../components/Select.svelte';
   import { api } from '../api/client';
   import type * as T from '../api/types';
@@ -41,7 +42,7 @@
   let error = $state('');
 
   function blank(): T.DestinationInput {
-    return { revision: null, name: '', scheme: 'fs', options: {}, root: '', encrypt: true, required_for_purge: true, deep_check: { mode: 'full' } };
+    return { revision: null, name: '', scheme: 'fs', options: {}, root: '', encrypt: true, required_for_purge: true, deep_check: { mode: 'full' }, recovery_secrets: false };
   }
 
   function create() {
@@ -56,15 +57,21 @@
 
   function edit(d: T.DestinationView) {
     editing = d;
-    form = { revision: d.revision, name: d.name, scheme: d.scheme, options: { ...d.options }, root: d.root, encrypt: d.encrypt, required_for_purge: d.required_for_purge, deep_check: d.deep_check };
+    form = { revision: d.revision, name: d.name, scheme: d.scheme, options: { ...d.options }, root: d.root, encrypt: d.encrypt, required_for_purge: d.required_for_purge, deep_check: d.deep_check, recovery_secrets: d.recovery_secrets ?? false };
     kind = d.scheme in schemes ? d.scheme : 'other';
     customScheme = d.scheme;
     const known = new Set(schemes[kind].fields.map((f) => f.key));
     extra = Object.fromEntries(Object.entries(d.options).filter(([k]) => !known.has(k)).map(([k, v]) => [k, v ?? ""]));
+    // Credentials it was restored without that have no field of their own: listed to fill in.
+    for (const k of d.missing_secrets ?? []) if (!known.has(k)) extra[k] = '';
     test = null;
     error = '';
     open = true;
   }
+
+  /** What a missing credential is called in the form. */
+  const fieldName = (k: string) => schemes[kind].fields.find((f) => f.key === k)?.label ?? k;
+  const waiting = $derived(live.destinations.filter((d) => d.missing_secrets?.length));
 
   // Saved secrets are only reused while every other option stays the same, so a changed endpoint
   // or bucket can't be handed the old key. Lists the secret fields that need typing again.
@@ -111,18 +118,26 @@
   }
 
   async function remove(d: T.DestinationView) {
-    if (!confirm(`Remove "${d.name}" from Malo? Objects already stored there are NOT deleted. Purge policies requiring it are disarmed.`)) return;
+    if (!(await ask({ title: `Remove “${d.name}” from Malo?`, body: 'Objects already stored there are not deleted. Purge policies requiring it are disarmed.', confirm: 'Remove destination', danger: true }))) return;
     await attempt(() => api.del(`/destinations/${d.id}`), 'Destination removed');
     await refreshDestinations();
   }
 
-  function rebuild(d: T.DestinationView) {
-    if (!confirm(`Rebuild the index from the manifests on "${d.name}"? Existing entries are kept; missing ones are imported. Accounts and destinations saved in the encrypted settings copy there are restored too (without purge arming); ones you removed stay removed.`)) return;
+  async function rebuild(d: T.DestinationView) {
+    if (!(await ask({
+      title: `Rebuild the index from “${d.name}”?`,
+      body: 'Existing entries are kept; missing ones are imported. Accounts and destinations saved in the encrypted settings copy there are restored too (without purge arming); ones you removed stay removed.',
+      confirm: 'Rebuild',
+    }))) return;
     attempt(() => api.post('/jobs', { kind: { type: 'rebuild_index', destination_id: d.id } }), 'Index rebuild queued');
   }
 
-  function rebuildAll() {
-    if (!confirm('Rebuild the index from every destination? All mail found anywhere is imported; folders and flags come from the newest copy of each account. Existing entries are kept. Accounts and destinations from the newest encrypted settings copy are restored too (without purge arming); ones you removed stay removed.')) return;
+  async function rebuildAll() {
+    if (!(await ask({
+      title: 'Rebuild the index from every destination?',
+      body: 'All mail found anywhere is imported; folders and flags come from the newest copy of each account. Existing entries are kept. Accounts and destinations from the newest encrypted settings copy are restored too (without purge arming); ones you removed stay removed.',
+      confirm: 'Rebuild',
+    }))) return;
     attempt(() => api.post('/jobs', { kind: { type: 'rebuild_index_all' } }), 'Index rebuild queued');
   }
 
@@ -155,6 +170,9 @@
 
 <div class="row"><h1 class="grow">Destinations</h1>{#if live.destinations.length > 1}<button onclick={rebuildAll}>Rebuild index from all</button>{/if}<button class="primary" onclick={create}>Add destination</button></div>
 <p class="muted">Every message is written to every destination and read back to verify. Encrypted destinations only ever see random-looking names and ciphertext.</p>
+{#if waiting.length}
+  <p class="callout">{waiting.length === 1 ? `“${waiting[0].name}” was` : `${waiting.length} destinations were`} restored without credentials, which aren't kept in the recovery kit unless you ask for it. Nothing is backed up to or read from {waiting.length === 1 ? 'it' : 'them'} until you enter them: choose <strong>Enter credentials</strong>.</p>
+{/if}
 
 <div class="cards">
   {#each live.destinations as d}
@@ -163,13 +181,14 @@
     <div class="panel" tabindex="0" role="group" aria-label={d.name} {@attach contextMenu(() => destMenu(d))}>
       <div class="row"><strong class="grow">{d.name}</strong>
         {#if d.encrypt}<span class="pill ok">encrypted</span>{:else}<span class="pill warn">plain</span>{/if}
-        {#if d.health}{#if d.health.ok}<span class="pill ok">healthy</span>{:else}<span class="pill bad">problems</span>{/if}{/if}
+        {#if d.missing_secrets?.length}<span class="pill warn">needs credentials</span>
+        {:else if d.health}{#if d.health.ok}<span class="pill ok">healthy</span>{:else}<span class="pill bad">problems</span>{/if}{/if}
       </div>
       <div class="muted small">{d.scheme}{d.options.bucket ? ` · ${d.options.bucket}` : ''}{d.options.root ? ` · ${d.options.root}` : ''}{d.root ? ` · /${d.root}` : ''}</div>
       <div class="small" style="margin: 0.5rem 0">{Number(d.object_count).toLocaleString()} objects · {bytes(d.stored_bytes)}</div>
       <div class="small muted">Required for purge: {d.required_for_purge ? 'yes' : 'no'} · Deep check: {d.deep_check.mode === 'rotating' ? `rotating 1/${d.deep_check.slices}` : d.deep_check.mode}</div>
       <div class="row" style="margin-top: 0.75rem">
-        <button onclick={() => edit(d)}>Edit</button>
+        {#if d.missing_secrets?.length}<button class="primary" onclick={() => edit(d)}>Enter credentials</button>{:else}<button onclick={() => edit(d)}>Edit</button>{/if}
         <button onclick={() => verify(d, false)}>Verify</button>
         <button onclick={() => verify(d, true)}>Deep verify</button>
         <button onclick={() => rebuild(d)}>Rebuild index</button>
@@ -202,6 +221,12 @@
     <details open={kind === 'other'}><summary>Additional OpenDAL options</summary><KeyValue bind:values={extra} /></details>
     <label class="check"><input type="checkbox" class="switch" bind:checked={form.encrypt} disabled={!!editing} /> Encrypt backups (recommended; can't be changed later)</label>
     <label class="check"><input type="checkbox" class="switch" bind:checked={form.required_for_purge} /> Offer as a required destination for purges</label>
+    {#if kind !== 'fs'}
+      <label class="check"><input type="checkbox" class="switch" bind:checked={form.recovery_secrets} /> Keep its credentials in the recovery kit and the settings copies</label>
+      <p class="muted small">{form.recovery_secrets
+        ? 'A restore sets it up ready to use. Anyone with your kit and its passphrase can then also reach this storage, so keep both well apart.'
+        : 'A restore brings it back without them and asks you to enter them again: keep them in your password manager. Safer if the kit or a destination falls into the wrong hands.'}</p>
+    {/if}
     <div class="row">
       <label>Deep check
         <Select value={form.deep_check.mode}
@@ -218,6 +243,7 @@
         <label>Slices <input type="number" min="2" value={form.deep_check.slices} oninput={(e) => (form.deep_check = { mode: 'rotating', slices: Number((e.target as HTMLInputElement).value) || 7 })} /></label>
       {/if}
     </div>
+    {#if editing?.missing_secrets?.length}<p class="callout small">Restored without its credentials: enter {editing.missing_secrets.map(fieldName).join(', ')} to use it again. Saving brings back what is stored there.</p>{/if}
     {#if secretsToReenter.length}<p class="callout small">The storage settings changed: enter {secretsToReenter.join(', ')} again. Saved secrets are only reused for unchanged settings.</p>{/if}
     {#if !form.encrypt}<p class="callout">Plain destinations store readable .eml files with mailbox names visible. Anyone with access to the storage can read your mail.</p>{/if}
     {#if error}<p class="callout bad">{error}</p>{/if}

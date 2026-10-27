@@ -2,7 +2,8 @@
   import { api, app, qs } from '../api/client';
   import type * as T from '../api/types';
   import { attempt, errorText, notify } from '../state.svelte';
-  import { bytes, when, reveal, fileKind, personName } from '../format';
+  import { ask } from '../confirm.svelte';
+  import { bytes, when, reveal, fileKind, personName, addressOf } from '../format';
   import { slide } from 'svelte/transition';
   import { ms, ease } from '../motion';
   import { commands, type Command } from '../commands.svelte';
@@ -63,7 +64,21 @@
     if (focus && section) section.scrollIntoView({ block: 'nearest', behavior: 'instant' });
   });
 
-  type Link = { n: number; href: string; text: string };
+  /** `shown`: a different site the link's text names, e.g. text "paypal.com" on a link elsewhere. */
+  type Link = { n: number; href: string; text: string; shown?: string };
+
+  const hostOf = (s: string) => {
+    try { return new URL(s).hostname.toLowerCase().replace(/^www\./, ''); } catch { return ''; }
+  };
+  /** The site a link's text claims to go to, when that isn't where it goes. */
+  function deceptive(text: string, href: string): string | undefined {
+    const m = /^\s*(?:https?:\/\/)?((?:[a-z0-9-]+\.)+[a-z]{2,})(?:[\/:?#]\S*)?\s*$/i.exec(text);
+    if (!m) return undefined;
+    const claimed = m[1].toLowerCase().replace(/^www\./, '');
+    const real = hostOf(href);
+    if (!real || real === claimed || real.endsWith(`.${claimed}`)) return undefined;
+    return claimed;
+  }
   const prepared = $derived.by(() => {
     if (!view?.html) return { doc: '', links: [] as Link[] };
     // DOMParser documents are inert: no scripts run, no resources load.
@@ -72,7 +87,8 @@
     doc.querySelectorAll('a[href]').forEach((a) => {
       const href = a.getAttribute('href') ?? '';
       const n = links.length + 1;
-      links.push({ n, href, text: (a.textContent ?? '').trim().slice(0, 120) });
+      const text = (a.textContent ?? '').trim().slice(0, 120);
+      links.push({ n, href, text, shown: deceptive(text, href) });
       a.removeAttribute('href');
       a.setAttribute('title', href);
       a.setAttribute('style', 'color:#2563eb;text-decoration:underline');
@@ -84,28 +100,70 @@
     // Built as an element, not written as a literal tag: a style tag inside <script> text is picked up
     // as the component's stylesheet by the dev server (and then fails in Tailwind).
     const style = doc.createElement('style');
-    style.textContent = 'body{font-family:system-ui,sans-serif;font-size:14px;margin:12px;word-wrap:break-word}img{max-width:100%;height:auto}';
+    style.textContent = 'html{overflow-y:hidden}body{font-family:system-ui,sans-serif;font-size:14px;margin:12px;word-wrap:break-word}img{max-width:100%;height:auto}';
     const head = `<meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="referrer" content="no-referrer"><base target="_self">${style.outerHTML}`;
     return { doc: `<!doctype html><html><head>${head}</head><body>${doc.body.innerHTML}</body></html>`, links };
   });
+
+  /** The frame grows to its content, so a long message scrolls with the page, not inside a box.
+   *  Same-origin lets the app measure it; with no allow-scripts nothing in it can run. */
+  function fitContent(frame: HTMLIFrameElement) {
+    let observer: ResizeObserver | undefined;
+    const fit = () => {
+      const d = frame.contentDocument;
+      if (!d?.documentElement) return;
+      // The frame's own border is part of its height (border-box).
+      const border = frame.offsetHeight - frame.clientHeight;
+      frame.style.height = `${Math.max(80, Math.ceil(d.documentElement.scrollHeight)) + border}px`;
+    };
+    const loaded = () => {
+      observer?.disconnect();
+      fit();
+      const body = frame.contentDocument?.body;
+      if (body) {
+        observer = new ResizeObserver(fit);
+        observer.observe(body);
+      }
+    };
+    frame.addEventListener('load', loaded);
+    if (frame.contentDocument?.readyState === 'complete') loaded();
+    return () => {
+      frame.removeEventListener('load', loaded);
+      observer?.disconnect();
+    };
+  }
 
   const textLinks = $derived.by(() => {
     if (!view || view.html) return [] as Link[];
     const found = new Set<string>();
     for (const x of view.text.matchAll(/\bhttps?:\/\/[^\s<>"')\]]+/g)) found.add(x[0]);
-    return [...found].map((href, i) => ({ n: i + 1, href, text: '' }));
+    return [...found].map((href, i): Link => ({ n: i + 1, href, text: '' }));
   });
   const links = $derived([...prepared.links, ...textLinks]);
 
   async function openLink(l: Link) {
     let host = l.href;
     try { host = new URL(l.href).host; } catch { /* mailto etc. */ }
-    if (!confirm(`Open this link in your browser?\n\n${l.href}\n\nHost: ${host}`)) return;
-    await attempt(() => app.openExternal(l.href));
+    const ok = await ask({
+      title: 'Open this link in your browser?',
+      body: l.href,
+      mono: true,
+      detail: `Goes to ${host}`,
+      warning: l.shown ? `The link’s text says ${l.shown}, but it goes to ${host}. This is a common phishing trick.` : undefined,
+      confirm: 'Open in browser',
+      danger: !!l.shown,
+    });
+    if (ok) await attempt(() => app.openExternal(l.href));
   }
 
   async function save(a: T.AttachmentInfo) {
-    if (a.warnings.length && !confirm(`Warning:\n- ${a.warnings.join('\n- ')}\n\nSave "${a.filename}" anyway? Malo never opens attachments.`)) return;
+    if (a.warnings.length && !(await ask({
+      title: `Save “${a.filename}” anyway?`,
+      list: a.warnings,
+      detail: 'Malo never opens attachments. Be careful opening it yourself.',
+      confirm: 'Save anyway',
+      danger: true,
+    }))) return;
     const p = await attempt(() => app.saveAttachment(m.id, a.index, a.filename));
     if (p) notify(`Saved to ${p}`, 'success');
   }
@@ -117,6 +175,18 @@
   const saveRaw = () => attempt(() => app.saveRaw(m.id));
 
   const sender = $derived(reveal(m.envelope.from_name || m.envelope.from) || '(unknown sender)');
+  /** The real address, always shown next to a display name: the name alone can say anything. */
+  const address = $derived(m.envelope.from_name ? reveal(m.envelope.from) : '');
+  /** Replies go somewhere other than the sender (Reply-To). */
+  const replyElsewhere = $derived(
+    (view?.reply_to ?? []).map(addressOf).filter((a) => a && a !== addressOf(view?.from ?? m.envelope.from)),
+  );
+  const replyOtherDomain = $derived.by(() => {
+    const domain = (a: string) => a.split('@').pop() ?? '';
+    const own = domain(addressOf(view?.from ?? m.envelope.from));
+    return replyElsewhere.some((a) => domain(a) !== own);
+  });
+  const suspicious = $derived(links.filter((l) => l.shown).length);
   const recipients = $derived((view ? [...view.to, ...view.cc] : m.envelope.to).map((r) => reveal(personName(r))).join(', '));
   const many = $derived((view ? view.to.length + view.cc.length : m.envelope.to.length) > 1);
 
@@ -160,10 +230,17 @@
     <Avatar name={sender} seed={m.envelope.from} size={36} />
     <span class="min-w-0 flex-1">
       <span class="flex items-baseline gap-3">
-        <span class="untrusted min-w-0 flex-1 truncate font-medium {m.reviewed ? '' : 'text-fg'}">{sender}</span>
+        <span class="min-w-0 flex-1 truncate">
+          <span class="untrusted font-medium {m.reviewed ? '' : 'text-fg'}">{sender}</span>
+          {#if address}<span class="untrusted ml-1 text-[0.85rem] text-muted">&lt;{address}&gt;</span>{/if}
+        </span>
         <span class="flex-none text-[0.85rem] text-muted tabular-nums">{when(m.envelope.date ?? m.internal_date)}</span>
       </span>
-      <span class="untrusted block truncate text-[0.85rem] text-muted">To: {recipients || '—'}</span>
+      {#if !expanded && m.preview}
+        <span class="untrusted block truncate text-[0.85rem] text-muted">{reveal(m.preview)}</span>
+      {:else}
+        <span class="untrusted block truncate text-[0.85rem] text-muted">To: {recipients || '—'}</span>
+      {/if}
     </span>
   </button>
 
@@ -184,21 +261,29 @@
           </div>
         {/if}
 
+        {#if replyElsewhere.length}
+          <div class="mb-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-[0.9rem] {replyOtherDomain ? 'border-warn/40 bg-warn/8' : 'border-line'}">
+            <span class="mt-0.5 {replyOtherDomain ? 'text-warn' : 'text-muted'}"><Icon name="reply" size={15} /></span>
+            <span>Replies go to <span class="untrusted mono">{reveal(replyElsewhere.join(', '))}</span>{replyOtherDomain ? ', not to the sender’s domain.' : '.'}</span>
+          </div>
+        {/if}
+
         {#if mode === 'message'}
           {#if view.has_html}
             <div class="mb-3 flex flex-wrap items-center gap-x-5 gap-y-1 text-[0.85rem] text-muted">
               <label class="check"><input type="checkbox" class="switch" bind:checked={showHtml} /> Show HTML (sanitized)</label>
               {#if showHtml}<label class="check"><input type="checkbox" class="switch" bind:checked={remote} /> Load remote images</label>{/if}
               {#if showHtml && view.remote_blocked > 0 && !remote}<span class="text-faint">{view.remote_blocked} remote image{view.remote_blocked === 1 ? '' : 's'} blocked</span>{/if}
+              {#if showHtml && prepared.links.length}<span class="text-faint">Links are numbered [1], [2]…: open them from Links below the message</span>{/if}
             </div>
           {/if}
           {#if view.html !== null && view.html !== undefined}
-            <iframe class="h-[60vh] w-full rounded-lg border border-line bg-white" title="Message from {sender}" sandbox="" srcdoc={prepared.doc} referrerpolicy="no-referrer"></iframe>
+            <iframe class="block h-40 w-full rounded-lg border border-line bg-white" title="Message from {sender}" sandbox="allow-same-origin" srcdoc={prepared.doc} referrerpolicy="no-referrer" scrolling="no" {@attach fitContent}></iframe>
           {:else}
             <pre class="m-0 max-w-[72ch] font-sans text-[0.95rem] leading-relaxed whitespace-pre-wrap break-words">{view.text}</pre>
           {/if}
           {#if links.length}
-            <details class="mt-3 text-[0.85rem]"><summary>Links ({links.length})</summary>
+            <details class="mt-3 text-[0.85rem]" open={suspicious > 0}><summary>Links ({links.length}){#if suspicious}<span class="ml-2 text-bad">{suspicious} {suspicious === 1 ? 'goes' : 'go'} somewhere other than {suspicious === 1 ? 'its' : 'their'} text says</span>{/if}</summary>
               <div class="mt-2 flex flex-col gap-1">
                 {#each links as l}
                   <div class="flex items-start gap-2 rounded-lg px-2 py-1.5 hover:bg-raised" {@attach contextMenu(() => [
@@ -206,7 +291,8 @@
                     { label: 'Copy link', icon: 'copy', run: () => copy(l.href, 'Link copied') },
                   ])}>
                     <span class="text-faint tabular-nums">[{l.n}]</span>
-                    <span class="min-w-0 flex-1"><span class="mono">{l.href}</span>{#if l.text}<br /><span class="text-muted">“{l.text}”</span>{/if}</span>
+                    <span class="min-w-0 flex-1"><span class="mono">{l.href}</span>{#if l.text}<br /><span class="untrusted text-muted">“{reveal(l.text)}”</span>{/if}
+                      {#if l.shown}<br /><span class="pill bad mt-1"><Icon name="alert" size={12} /> Text says {l.shown}, link goes to {hostOf(l.href)}</span>{/if}</span>
                     <button class="flex-none px-2 py-0.5" onclick={() => openLink(l)}>Open…</button>
                   </div>
                 {/each}

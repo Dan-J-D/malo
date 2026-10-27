@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ask } from '../confirm.svelte';
   import Select from '../components/Select.svelte';
   import { onMount } from 'svelte';
   import { api, ApiError } from '../api/client';
@@ -44,13 +45,19 @@
   }
 
   async function remove(u: T.UserInfo) {
-    if (!confirm(`Delete ${u.username} and all of their server-side data (keys, index, config)? Backups on remote destinations stay, readable only with their recovery kit. A forgotten password can be reset with the recovery kit instead.`)) return;
+    if (!(await ask({
+      title: `Delete ${u.username}?`,
+      body: 'All of their server-side data goes: keys, index and settings. Backups on remote destinations stay, readable only with their recovery kit.',
+      detail: 'A forgotten password can be reset with the recovery kit instead.',
+      confirm: 'Delete user',
+      danger: true,
+    }))) return;
     try {
       await api.del(`/admin/users/${u.id}`);
     } catch (e) {
       if (!(e instanceof ApiError && e.code === 'local_backups')) return notify(errorText(e), 'error');
       // Their local folder backups would go too, and may be the only copy of mail already purged upstream.
-      if (!confirm(`${e.message}\n\nDelete ${u.username} AND their local folder backups?`)) return;
+      if (!(await ask({ title: `Also delete ${u.username}’s local folder backups?`, body: e.message, confirm: 'Delete user and backups', danger: true }))) return;
       if ((await attempt(() => api.del(`/admin/users/${u.id}?delete_local_backups=true`))) === undefined) return;
     }
     notify('User deleted', 'success');

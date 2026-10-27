@@ -16,6 +16,12 @@ auto_lock_hours: number, server_max_auto_lock_hours: number,
  */
 recovery_kit_pending: boolean, 
 /**
+ * The saved kit doesn't hold the destinations as they are now (added or changed since, or
+ * with new credentials where the kit keeps them), so a new kit should be saved.
+ * Older servers don't send it.
+ */
+recovery_kit_outdated: boolean, 
+/**
  * Jobs that came due while the user was locked and were skipped.
  */
 skipped_while_locked: number, };
@@ -24,7 +30,12 @@ export type ChangePasswordRequest = { old_password: string, new_password: string
 
 export type DeleteAccountRequest = { password: string, confirm: string, };
 
-export type SetupRequest = { setup_token: string, username: string, password: string, };
+export type SetupRequest = { setup_token: string, username: string, password: string, 
+/**
+ * Optional recovery kit: the administrator is restored from it, like a registration with a
+ * kit (a replacement for a lost server).
+ */
+recovery_kit?: RecoveryKitFile, kit_passphrase?: string, };
 
 export type RegisterRequest = { username: string, password: string, invite_code: string | null, 
 /**
@@ -35,6 +46,13 @@ recovery_kit: RecoveryKitFile | null,
  * Passphrase of an encrypted kit.
  */
 kit_passphrase?: string, };
+
+export type RegisterResponse = { 
+/**
+ * Destinations set up from the recovery kit. When there are any, the first login restores
+ * accounts, settings and mail from them.
+ */
+restored_destinations: number, };
 
 export type RecoverRequest = { username: string, recovery_kit: RecoveryKitFile, 
 /**
@@ -52,7 +70,12 @@ cert_fingerprint: string | null, };
 
 export type Health = { status: string, sealed_users?: number | null, unlocked_users?: number | null, };
 
-export type UserSettings = { auto_lock_hours: number, quick_check_hours: number, deep_check_hours: number, auto_repair: boolean, };
+export type UserSettings = { auto_lock_hours: number, quick_check_hours: number, deep_check_hours: number, auto_repair: boolean, 
+/**
+ * The settings copy on each destination also holds mail passwords and sign-in tokens, so a
+ * restore brings accounts back ready to run. Off: restored accounts ask to sign in again.
+ */
+copy_mail_credentials: boolean, };
 
 export type RecoveryKit = { format: string, user_id: string, username: string, created_at: string, 
 /**
@@ -211,13 +234,27 @@ options: { [key in string]?: string },
 /**
  * Prefix inside the service root.
  */
-root: string, encrypt: boolean, required_for_purge: boolean, deep_check: DeepCheckMode, };
+root: string, encrypt: boolean, required_for_purge: boolean, deep_check: DeepCheckMode, 
+/**
+ * Keep this destination's credentials in the recovery kit and the settings copies. Off, a
+ * restore brings the destination back without them and asks for them again.
+ */
+recovery_secrets: boolean, };
 
 export type DestinationView = { 
 /**
  * Increases with every change; send it back when saving.
  */
-revision: number, id: string, name: string, scheme: string, options: { [key in string]?: string }, root: string, encrypt: boolean, required_for_purge: boolean, deep_check: DeepCheckMode, object_count: number, stored_bytes: number, health: DestinationHealth | null, };
+revision: number, id: string, name: string, scheme: string, options: { [key in string]?: string }, root: string, encrypt: boolean, required_for_purge: boolean, deep_check: DeepCheckMode, 
+/**
+ * Older servers send neither of these.
+ */
+recovery_secrets?: boolean, 
+/**
+ * Credentials it came back without from a recovery kit or settings copy: until they are
+ * entered again, nothing is written to or read from it.
+ */
+missing_secrets?: Array<string>, object_count: number, stored_bytes: number, health: DestinationHealth | null, };
 
 export type DestinationTest = { ok: boolean, error: string | null, write_ms: number, read_ms: number, };
 
@@ -291,7 +328,11 @@ category: string | null,
 /**
  * Messages in its conversation, itself included.
  */
-thread_size: number, };
+thread_size: number, 
+/**
+ * In a conversation: the start of the text, without quoted replies.
+ */
+preview?: string | null, };
 
 export type MessageList = { total: number, messages: Array<MessageSummary>, 
 /**

@@ -4,6 +4,7 @@
 use base64::Engine;
 use chrono::Utc;
 use malo_api::{KitKdf, RecoveryKit, RecoveryKitFile, SealedRecoveryKit, SEALED_KIT_FORMAT};
+use malo_core::config::Destination;
 use malo_core::crypto::{self, KdfParams, Key};
 use zeroize::Zeroizing;
 
@@ -12,6 +13,8 @@ use crate::error::{ApiErr, ApiResult};
 const PLAIN_FORMAT: &str = "malo-recovery-kit-v1";
 const AAD: &[u8] = b"malo/v1/recovery-kit";
 pub const MIN_PASSPHRASE: usize = 12;
+/// More destinations than anyone sets up: a kit with more is not one Malo wrote.
+const MAX_DESTINATIONS: usize = 64;
 
 pub fn check_passphrase(passphrase: &str) -> ApiResult<()> {
     if passphrase.chars().count() < MIN_PASSPHRASE {
@@ -23,10 +26,13 @@ pub fn check_passphrase(passphrase: &str) -> ApiResult<()> {
 }
 
 /// Builds the kit of a user and seals it with `passphrase` (Argon2id; call from a blocking thread).
+/// The destinations go in as [`Destination::for_recovery`] has them: credentials only for those
+/// the user chose, the others come back asking for theirs.
 pub fn seal(
     user_id: &str,
     username: &str,
     archive_key: &Key,
+    destinations: &[Destination],
     passphrase: &str,
 ) -> anyhow::Result<SealedRecoveryKit> {
     let kit = RecoveryKit {
@@ -36,6 +42,10 @@ pub fn seal(
         created_at: Utc::now(),
         archive_key: hex::encode(archive_key.as_ref()),
         check: Some(crypto::kit_check(archive_key)),
+        destinations: destinations
+            .iter()
+            .map(|d| serde_json::to_value(d.for_recovery()))
+            .collect::<Result<_, _>>()?,
     };
     let json = Zeroizing::new(serde_json::to_vec(&kit)?);
     let params = KdfParams::from_env();
@@ -53,9 +63,18 @@ pub fn seal(
     })
 }
 
+/// What a kit file holds.
+pub struct Opened {
+    pub archive_key: Key,
+    /// The destinations saved with the kit (none in kits from older versions). They are checked
+    /// like any destination when they're used: confined `fs` roots, allowed options, private
+    /// networks.
+    pub destinations: Vec<Destination>,
+}
+
 /// The archive key in a kit file, checked against the kit's check value. A sealed kit needs its
 /// passphrase (Argon2id; call from a blocking thread). Errors are user-facing.
-pub fn open(file: &RecoveryKitFile, passphrase: Option<&str>) -> ApiResult<Key> {
+pub fn open(file: &RecoveryKitFile, passphrase: Option<&str>) -> ApiResult<Opened> {
     let bad = || ApiErr::bad_request("this isn't a valid Malo recovery kit");
     let kit: RecoveryKit = match file {
         RecoveryKitFile::Plain(k) => {
@@ -108,7 +127,18 @@ pub fn open(file: &RecoveryKitFile, passphrase: Option<&str>) -> ApiResult<Key> 
             "the recovery kit is damaged (its check value doesn't match)",
         ));
     }
-    Ok(key)
+    if kit.destinations.len() > MAX_DESTINATIONS {
+        return Err(bad());
+    }
+    let destinations = kit
+        .destinations
+        .iter()
+        .map(|d| serde_json::from_value::<Destination>(d.clone()).map_err(|_| bad()))
+        .collect::<ApiResult<Vec<_>>>()?;
+    Ok(Opened {
+        archive_key: key,
+        destinations,
+    })
 }
 
 #[cfg(test)]
@@ -119,15 +149,37 @@ mod tests {
     fn sealed_kit_round_trip() {
         std::env::set_var("MALO_INSECURE_FAST_KDF", "1");
         let key = crypto::random_key();
-        let sealed = seal("u1", "dan", &key, "long passphrase").unwrap();
+        let dest: Destination = serde_json::from_value(serde_json::json!({
+            "id": "d1", "name": "nas", "scheme": "s3", "root": "/malo", "encrypt": true,
+            "required_for_purge": true, "deep_check": { "mode": "full" },
+            "options": { "bucket": "b", "secret_access_key": "storage-secret" },
+        }))
+        .unwrap();
+        let mut kept = dest.clone();
+        kept.recovery_secrets = true;
+        let sealed = seal("u1", "dan", &key, &[dest, kept], "long passphrase").unwrap();
         // The file shows nothing but the format and KDF settings.
         let text = serde_json::to_string(&sealed).unwrap();
         assert!(!text.contains("dan") && !text.contains(&hex::encode(key.as_ref())));
+        assert!(!text.contains("storage-secret") && !text.contains("nas"));
         let file = RecoveryKitFile::Sealed(sealed);
+        let opened = open(&file, Some("long passphrase")).unwrap();
+        assert_eq!(opened.archive_key.as_ref(), key.as_ref());
+        assert_eq!(opened.destinations.len(), 2);
+        // By default the kit leaves the storage secret out and says it's missing…
+        assert!(!opened.destinations[0]
+            .options
+            .contains_key("secret_access_key"));
         assert_eq!(
-            open(&file, Some("long passphrase")).unwrap().as_ref(),
-            key.as_ref()
+            opened.destinations[0].missing_secrets,
+            ["secret_access_key"]
         );
+        // …unless the destination is set to keep it there.
+        assert_eq!(
+            opened.destinations[1].options["secret_access_key"],
+            "storage-secret"
+        );
+        assert!(opened.destinations[1].complete());
         assert!(open(&file, Some("wrong passphrase")).is_err());
         assert!(open(&file, None).is_err());
     }
@@ -142,6 +194,7 @@ mod tests {
             created_at: Utc::now(),
             archive_key: hex::encode(key.as_ref()),
             check: None,
+            destinations: vec![],
         };
         // Kits from older versions have no check value and still open.
         assert!(open(&RecoveryKitFile::Plain(kit.clone()), None).is_ok());

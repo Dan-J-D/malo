@@ -700,7 +700,7 @@
 </div>
 
 {#snippet row(m: T.MessageSummary, i: number)}
-  {@const sender = reveal(m.envelope.from_name ?? m.envelope.from) || '(unknown sender)'}
+  {@const sender = reveal(m.envelope.from_name || m.envelope.from) || '(unknown sender)'}
   {@const st = stateIcon[m.state]}
   {@const cat = tabs && !categoryParam && m.category && m.category in CATEGORIES ? CATEGORIES[m.category as Category] : null}
   {@const meta = [!account ? accountName(m.account_id) : '', reveal(m.labels.join(', '))].filter(Boolean).join(' · ')}

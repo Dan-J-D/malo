@@ -141,6 +141,15 @@ def titled(d, prefix):
     return Clickable(wait(lambda: xp(d, f"//button[starts-with(@title, '{prefix}')][not(@disabled)]"), what=f"button titled {prefix}"))
 
 
+def answer(d, choice):
+    """Answers the app's confirmation dialog with the button `choice`; returns the dialog's text."""
+    box = wait(lambda: xp(d, "//div[@role='alertdialog']"), what="confirmation dialog")
+    said = box.get_attribute("textContent") or ""
+    Clickable(xp(box, f".//button[normalize-space()='{choice}']")).click()
+    wait(lambda: not d.find_elements(By.XPATH, "//div[@role='alertdialog']"), what="dialog closed")
+    return said
+
+
 def field(d, label, exact=False):
     cond = f"normalize-space(text()[1])='{label}'" if exact else f"contains(normalize-space(), '{label}')"
     return Clickable(wait(lambda: xp(d, f"//label[{cond}]//*[self::input or self::select or self::textarea]"), what=f"field {label}"))
@@ -158,6 +167,28 @@ def fill(d, label, value, exact=False):
 
 
 KIT_PASSPHRASE = "correct horse battery kit"
+PROFILE_PASSWORD = "profile password 1"
+
+
+def save_profile(d, name, keep_login=True):
+    """The profile step after logging in: save the connection as an encrypted profile file."""
+    wait(lambda: "Save this connection as a profile" in text(d), timeout=90, what="profile step")
+    fill(d, "Profile password", PROFILE_PASSWORD, exact=True)
+    fill(d, "Repeat profile password", PROFILE_PASSWORD)
+    if not keep_login:
+        field(d, "Keep my Malo password in the profile").click()
+    button(d, "Save profile").click()
+    path = f"{SHOTS}/{name}.malo"
+    wait(lambda: os.path.exists(path), timeout=60, what=f"profile {name}")
+    data = open(path).read()
+    assert "malo-profile-v1" in data and "127.0.0.1" not in data and "password" not in data, "profile must be encrypted"
+    assert os.stat(path).st_mode & 0o077 == 0, "profile file must be private"
+
+
+def unlock_profile(d, password=PROFILE_PASSWORD):
+    wait(lambda: "Open a profile" in text(d), what="profile screen")
+    fill(d, "Profile password", password, exact=True)
+    button(d, "Unlock").click()
 
 
 def save_kit(d, user):
@@ -213,8 +244,10 @@ def main():
         shot(d, "02-setup")
         button(d, "Create").click()
 
-        # The recovery kit must be exported before continuing.
+        # The recovery kit must be exported before continuing, then the connection is saved as a
+        # profile that keeps the password.
         save_kit(d, "owner")
+        save_profile(d, "owner on this-computer")
         wait(lambda: "Overview" in text(d) and "Keys unlocked" in text(d), what="dashboard")
         shot(d, "03-dashboard")
 
@@ -257,8 +290,8 @@ def main():
         assert "invoice⟨U+202E⟩fdp.exe" in body, "attachment name not revealed"
         assert "imitate other domains" in body, "punycode sender not flagged"
         assert "Über 日本 😀" in body, "normal Unicode must render unchanged"
-        d.execute_script("window.confirm = () => true")
         titled(d, "Save as").click()
+        answer(d, "Save anyway")
         wait(lambda: os.path.exists(f"{SHOTS}/invoicefdp.exe"), what="saved without the RLO")
         shot(d, "06a-unicode")
         d.execute_script("history.back()")
@@ -271,7 +304,8 @@ def main():
         assert xp(d, "//button[contains(., 'invoice.pdf.exe')][contains(@class, 'border-bad')]"), "attachment not flagged"
         field(d, "Show HTML").click()
         frame = wait(lambda: xp(d, "//iframe[starts-with(@title, 'Message')]"), what="iframe")
-        assert frame.get_attribute("sandbox") == "", f"iframe sandbox is {frame.get_attribute('sandbox')!r}"
+        # Same-origin only so the app can size it to its content; scripts stay off.
+        assert frame.get_attribute("sandbox") == "allow-same-origin", f"iframe sandbox is {frame.get_attribute('sandbox')!r}"
         srcdoc = frame.get_attribute("srcdoc") or ""
         assert "<script" not in srcdoc.lower() and "onclick" not in srcdoc.lower(), "unsanitized HTML reached the viewer"
         assert "tracker.example" not in srcdoc, "remote image URL inside the iframe"
@@ -282,11 +316,15 @@ def main():
         d.execute_script("arguments[0].parentElement.open = true", links[0])
         assert "https://evil.example/login" in text(d), "real link target not shown"
         shot(d, "06-viewer")
-        # Saving asks first, with the warnings.
-        d.execute_script("window.confirm = (m) => { window.lastConfirm = m; return true }")
+        # The frame is as tall as the message: no scrolling inside it.
+        wait(lambda: d.execute_script(
+            "const f = arguments[0]; const h = f.contentDocument.documentElement.scrollHeight;"
+            "return h > 0 && Math.abs(f.getBoundingClientRect().height - h) <= 4", frame), what="iframe sized to its content")
+        # Saving asks first, in the app's dialog, with the warnings.
         titled(d, "Save as").click()
+        asked = answer(d, "Save anyway")
+        assert "Executable" in asked, f"no warning before saving: {asked!r}"
         wait(lambda: os.path.exists(f"{SHOTS}/invoice.pdf.exe"), what="attachment saved")
-        assert "Executable" in (d.execute_script("return window.lastConfirm") or ""), "no warning before saving"
         with open(f"{SHOTS}/invoice.pdf.exe", "rb") as f:
             assert f.read(2) == b"MZ"
 
@@ -319,11 +357,19 @@ def main():
         d.execute_script("location.hash = '#/browse'")
         wait(lambda: "Plain hello" in text(d), what="browse list")
 
-        # Lock now: keys wiped, back to the login screen.
+        # Lock now: keys wiped and the profile closed with them, back to the profile's password.
         button(d, "Lock now").click()
-        wait(lambda: "Log in to unlock" in text(d) and "Locked" in text(d), what="locked login screen")
+        wait(lambda: "Open a profile" in text(d) and "Locked" in text(d), what="locked profile screen")
         shot(d, "07-locked")
-        # Forgotten password: the recovery kit resets it, keeping everything else.
+        unlock_profile(d, "not the profile password")
+        wait(lambda: "wrong password" in text(d), timeout=60, what="wrong profile password refused")
+        unlock_profile(d)
+        wait(lambda: "Overview" in text(d), timeout=90, what="dashboard from the profile (logged in by it)")
+        # Forgotten password: connect without the profile; the recovery kit resets it.
+        button(d, "Lock now").click()
+        button(d, "Connect without a profile").click()
+        button(d, "Use local server").click()
+        wait(lambda: "Log in to unlock" in text(d), what="login screen")
         button(d, "Forgot password?").click()
         wait(lambda: "Reset password with recovery kit" in text(d), what="recover screen")
         fill(d, "Username", "owner")
@@ -331,6 +377,7 @@ def main():
         fill(d, "Kit passphrase", "not the passphrase", exact=True)
         fill(d, "New password", "owner-password-2")
         fill(d, "Repeat password", "owner-password-2")
+        field(d, "Then save this connection as a profile file").click()  # declined from now on
         button(d, "Reset password").click()
         wait(lambda: xp(d, "//p[contains(@class,'bad')]"), timeout=60, what="wrong kit passphrase refused")
         fill(d, "Kit passphrase", KIT_PASSPHRASE, exact=True)
@@ -364,6 +411,8 @@ def main():
         # Remote mode: switch to the Docker server, confirm its fingerprint (TOFU), set it up.
         settings(d)
         button(d, "Switch server").click()
+        # With a profile saved, the first screen offers it; this server is new, so connect by hand.
+        button(d, "Connect without a profile").click()
         wait(lambda: "Connect to a Malo server" in text(d), what="connect screen again")
         fill(d, "Server URL", os.environ["MALO_REMOTE_URL"])
         button(d, "Check server").click()
@@ -376,8 +425,11 @@ def main():
         fill(d, "Username", "remote-admin")
         fill(d, "Password", "remote-password-1", exact=True)
         fill(d, "Repeat password", "remote-password-1")
+        field(d, "Then save this connection as a profile file").click()
         button(d, "Create").click()
         save_kit(d, "remote-admin")
+        # This profile pins the server's certificate and keeps only the username.
+        save_profile(d, "remote-admin on 127.0.0.1", keep_login=False)
         wait(lambda: "Overview" in text(d) and "127.0.0.1:18443" in text(d), what="remote dashboard")
         shot(d, "09-remote-dashboard")
 
@@ -386,7 +438,9 @@ def main():
         button(d, "Create invite code").click()
         code = wait(lambda: xp(d, "//p[contains(., 'Invite code')]/span[contains(@class,'mono')]").text, what="invite code")
         button(d, "Log out").click()
-        wait(lambda: "Log in to unlock" in text(d), what="login after logout")
+        unlock_profile(d)
+        wait(lambda: "Log in to unlock" in text(d), what="login after unlocking the profile")
+        assert field(d, "Username").get_attribute("value") == "remote-admin", "profile fills in the username"
         button(d, "Create account").click()
         fill(d, "Username", "leaver")
         fill(d, "Password", "leaver-password-1", exact=True)
@@ -402,29 +456,28 @@ def main():
         fill(d, "Your password", "leaver-password-1")
         fill(d, "to confirm", "delete leaver")
         xp(d, "//button[normalize-space()='Delete my account' and @type='submit']").click()
-        wait(lambda: 'The account "leaver" was deleted' in text(d), what="deleted notice on login screen")
+        wait(lambda: 'The account "leaver" was deleted' in text(d), what="deleted notice on the profile screen")
+        unlock_profile(d)
+        wait(lambda: "Log in to unlock" in text(d), what="login screen")
         fill(d, "Username", "leaver")
         fill(d, "Password", "leaver-password-1", exact=True)
         button(d, "Unlock").click()
         wait(lambda: "invalid username or password" in text(d), what="deleted user can't log in")
         shot(d, "10-account-deleted")
 
-        # The remote server gets a new certificate (run.sh replaces it): the app warns instead of
-        # offering a "first connection", and keeps the old pin until it is deliberately forgotten.
+        # The remote server gets a new certificate (run.sh replaces it): unlocking its profile warns
+        # instead of connecting, and the profile keeps the old pin until it is deliberately forgotten.
         open("/tmp/saved/rotate-remote", "w").close()
         wait(lambda: os.path.exists("/tmp/saved/remote-rotated"), timeout=60, what="new remote certificate")
-        button(d, "Change server").click()
-        wait(lambda: "Connect to a Malo server" in text(d), what="connect screen")
-        fill(d, "Server URL", os.environ["MALO_REMOTE_URL"])
-        button(d, "Check server").click()
+        button(d, "Close profile").click()
+        unlock_profile(d)
         wait(lambda: "certificate changed" in text(d), what="certificate warning")
         assert "First connection" not in text(d), "a changed certificate must not look like a first connection"
         assert os.environ["MALO_REMOTE_FP"] in text(d), "the trusted fingerprint is shown"
         shot(d, "11-certificate-changed")
         button(d, "Keep the trusted certificate").click()
-        wait(lambda: "Connect to a Malo server" in text(d), what="connect screen after keeping the pin")
-        # The pin wasn't replaced: checking again warns again.
-        button(d, "Check server").click()
+        # The pin wasn't replaced: unlocking again warns again.
+        unlock_profile(d)
         wait(lambda: "certificate changed" in text(d), what="certificate warning again")
         xp(d, "//summary[contains(., 'I replaced the certificate')]").click()
         forget = xp(d, "//button[normalize-space()='Forget the old certificate and connect']")
@@ -433,8 +486,15 @@ def main():
         forget.click()
         wait(lambda: "Create the administrator" in text(d), what="new remote server's setup")
 
+        # The profile now pins the new certificate: unlocking it connects without a warning.
+        button(d, "Close profile").click()
+        unlock_profile(d)
+        wait(lambda: "Create the administrator" in text(d), what="new pin kept in the profile")
+        assert "certificate changed" not in text(d)
+
         # Reset the local server (two steps), then the bundled server starts from scratch.
-        button(d, "Change server").click()
+        button(d, "Close profile").click()
+        button(d, "Connect without a profile").click()
         wait(lambda: "Reset local server" in text(d), what="local data panel")
         button(d, "Reset local server").click()
         field(d, "I understand this cannot be undone").click()

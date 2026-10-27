@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ask } from '../confirm.svelte';
   import Select from './Select.svelte';
   import { onMount } from 'svelte';
   import { api, ApiError } from '../api/client';
@@ -81,7 +82,7 @@
   }
 
   async function remove() {
-    if (!confirm(`Remove the mail login “${login?.username}”? Mail apps using it are signed out.`)) return;
+    if (!(await ask({ title: `Remove the mail login “${login?.username}”?`, body: 'Mail apps using it are signed out.', confirm: 'Remove login', danger: true }))) return;
     busy = true;
     try {
       await api.del(`/accounts/${account.id}/mail-login`);
@@ -116,7 +117,11 @@
   }
 
   async function resetView() {
-    if (!confirm('Show every backed-up message in mail apps again? Messages deleted or moved to other folders in a mail app go back where they were, flags set there are cleared, and mail apps download the folders again.')) return;
+    if (!(await ask({
+      title: 'Show every backed-up message in mail apps again?',
+      body: 'Messages deleted or moved to other folders in a mail app go back where they were, flags set there are cleared, and mail apps download the folders again.',
+      confirm: 'Reset mail view',
+    }))) return;
     try {
       await api.post(`/accounts/${account.id}/mail-view/reset`);
       notify('Mail apps will show every message again', 'success');

@@ -969,6 +969,15 @@ impl Index {
         })
     }
 
+    /// The start of a message's indexed text, quoted lines and reply headers left out.
+    fn preview(&self, id: i64) -> anyhow::Result<Option<String>> {
+        let body: Option<String> = self.with(|c| {
+            c.query_row("SELECT body FROM search WHERE rowid=?1", [id], |r| r.get(0))
+                .optional()
+        })?;
+        Ok(body.and_then(|b| preview_text(&b)))
+    }
+
     /// The messages of `id`'s conversation (itself when it has none), oldest first, each copy of
     /// a message (same Message-ID in several folders) once.
     pub fn thread(&self, id: i64, destinations: u32) -> anyhow::Result<Vec<MessageSummary>> {
@@ -993,7 +1002,8 @@ impl Index {
                     continue;
                 }
             }
-            if let Some(s) = self.summary(tid, destinations)? {
+            if let Some(mut s) = self.summary(tid, destinations)? {
+                s.preview = self.preview(tid)?;
                 out.push(s);
             }
         }
@@ -1712,11 +1722,51 @@ fn query_messages_on(
                     snippet: r.get(14)?,
                     category: r.get(15)?,
                     thread_size: r.get::<_, i64>(16)? as u32,
+                    preview: None,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok((total as u64, rows))
     }
+}
+
+/// About two lines of text: quoted replies (`>`) and the "On … wrote:" line before them are
+/// skipped, whitespace collapsed.
+fn preview_text(body: &str) -> Option<String> {
+    const MAX: usize = 200;
+    let lines: Vec<&str> = body.lines().map(str::trim).collect();
+    let mut out = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if line.is_empty() || line.starts_with('>') {
+            continue;
+        }
+        let quotes_next = lines[i + 1..]
+            .iter()
+            .find(|l| !l.is_empty())
+            .is_some_and(|l| l.starts_with('>'));
+        if quotes_next && line.ends_with(':') {
+            continue;
+        }
+        for word in line.split_whitespace() {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(word);
+        }
+        if out.chars().count() >= MAX {
+            break;
+        }
+    }
+    if out.chars().count() > MAX {
+        out = out
+            .chars()
+            .take(MAX)
+            .collect::<String>()
+            .trim_end()
+            .to_string();
+        out.push('…');
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 const MEMBERSHIP_SELECT: &str =
@@ -1755,6 +1805,19 @@ fn replica_row(r: &rusqlite::Row) -> rusqlite::Result<ReplicaRow> {
 mod tests {
     use super::*;
     use crate::crypto::random_key;
+
+    #[test]
+    fn preview_skips_quotes() {
+        let body = "Sounds good,\n\nsee you   then.\n\nOn Mon, Ann wrote:\n> earlier\n> text\n";
+        assert_eq!(
+            preview_text(body).as_deref(),
+            Some("Sounds good, see you then.")
+        );
+        assert_eq!(preview_text("> only quoted\n"), None);
+        let long = "word ".repeat(100);
+        let p = preview_text(&long).unwrap();
+        assert!(p.ends_with('…') && p.chars().count() <= 201);
+    }
 
     #[test]
     fn sqlcipher_key_required() {

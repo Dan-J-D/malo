@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ask } from '../confirm.svelte';
   import { api, app, qs } from '../api/client';
   import type * as T from '../api/types';
   import { attempt, errorText, notify, live } from '../state.svelte';
@@ -94,7 +95,13 @@
   }
 
   async function save(mid: number, a: T.AttachmentInfo) {
-    if (a.warnings.length && !confirm(`Warning:\n- ${a.warnings.join('\n- ')}\n\nSave "${a.filename}" anyway? Malo never opens attachments.`)) return;
+    if (a.warnings.length && !(await ask({
+      title: `Save “${a.filename}” anyway?`,
+      list: a.warnings,
+      detail: 'Malo never opens attachments. Be careful opening it yourself.',
+      confirm: 'Save anyway',
+      danger: true,
+    }))) return;
     const p = await attempt(() => app.saveAttachment(mid, a.index, a.filename));
     if (p) notify(`Saved to ${p}`, 'success');
   }

@@ -366,6 +366,8 @@ mod tests {
             encrypt: false,
             required_for_purge: true,
             deep_check: DeepCheckMode::Full,
+            recovery_secrets: false,
+            missing_secrets: vec![],
         };
         let mut cfg = UserConfig::new(&archive);
         cfg.destinations.push(dest.clone());

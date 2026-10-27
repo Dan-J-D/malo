@@ -639,6 +639,29 @@ pub async fn update_destination(
         })
         .await
         .map_err(edit_error)?;
+    if !prev.complete() && next.complete() {
+        // Restored without its credentials and now usable: a pending restore can start, or its
+        // backups are read in, and mail it lacks is copied to it by the next backups.
+        u.user.index.with(|c| {
+            c.execute(
+                "UPDATE messages SET state='stored' WHERE state='verified'",
+                [],
+            )
+        })?;
+        if u.user.config().restore_pending {
+            jobs::start_restore_if_ready(&state, &u.user);
+        } else if let Err(e) = jobs::submit(
+            &state,
+            &u.user.user_id,
+            JobKind::RebuildIndex {
+                destination_id: next.id.clone(),
+            },
+            JobTrigger::Manual,
+        ) {
+            tracing::warn!("could not read in the destination: {e:#}");
+        }
+        scheduler::sync_schedules(&state, &u.user)?;
+    }
     Ok(Json(destination_view(&u.user, &next)?))
 }
 

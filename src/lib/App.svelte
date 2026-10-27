@@ -2,14 +2,15 @@
   import { onMount } from 'svelte';
   import { fade } from 'svelte/transition';
   import { ms } from './motion';
-  import { app, certChange } from './api/client';
-  import { session, route } from './state.svelte';
+  import { session, route, toStart } from './state.svelte';
   import Notices from './components/Notices.svelte';
   import ContextMenu from './components/ContextMenu.svelte';
+  import ConfirmDialog from './components/ConfirmDialog.svelte';
   import Commands from './components/Commands.svelte';
   import Nav from './components/Nav.svelte';
   import Resizer from './components/Resizer.svelte';
   import { panes, savePanes, navWidth, NAV_DEFAULT, NAV_RAIL, NAV_MAX } from './layout.svelte';
+  import Unlock from './routes/Unlock.svelte';
   import Connect from './routes/Connect.svelte';
   import Login from './routes/Login.svelte';
   import Dashboard from './routes/Dashboard.svelte';
@@ -22,31 +23,9 @@
   import Settings from './routes/Settings.svelte';
   import Admin from './routes/Admin.svelte';
 
-  // Reconnect to the last server automatically; a pinned remote is re-verified by fingerprint.
-  onMount(async () => {
-    try {
-      const prefs = await app.prefs();
-      if (prefs.mode === 'local') {
-        const info = await app.startLocal();
-        session.local = true;
-        session.url = info.url;
-        session.status = info.status;
-        session.setupToken = info.setup_token;
-        session.phase = 'login';
-        return;
-      }
-      if (prefs.mode === 'remote' && prefs.url) {
-        session.status = await app.connectRemote(prefs.url, prefs.fingerprint);
-        session.url = prefs.url;
-        session.phase = 'login';
-        return;
-      }
-    } catch (e) {
-      // Fall through to the connect screen, which warns about a changed certificate.
-      session.certChanged = certChange(e);
-    }
-    session.phase = 'connect';
-  });
+  // Nothing connects on its own: the app keeps no server, only the profile files opened recently
+  // (KeePassXC-style). The first screen asks for one of them, or for a server.
+  onMount(toStart);
 
   // The page, without its sub-path or query (`/browse?account=…` is still Mail).
   const top = $derived('/' + (route.path.split(/[/?]/)[1] ?? ''));
@@ -54,9 +33,12 @@
 
 <Notices />
 <ContextMenu />
+<ConfirmDialog />
 
 {#if session.phase === 'boot'}
   <div class="grid h-screen place-items-center text-muted">Starting…</div>
+{:else if session.phase === 'unlock'}
+  <Unlock />
 {:else if session.phase === 'connect'}
   <Connect />
 {:else if session.phase === 'login'}

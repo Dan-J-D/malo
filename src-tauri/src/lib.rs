@@ -4,6 +4,7 @@
 mod held;
 mod net;
 mod oauth;
+mod profile;
 mod sidecar;
 
 use std::path::PathBuf;
@@ -56,18 +57,57 @@ pub struct AppState {
     sidecar: Mutex<Option<sidecar::Sidecar>>,
     tray_mode: AtomicBool,
     held: held::Held,
+    /// The profile file unlocked for this session, with its key. Dropped (and wiped) on lock,
+    /// log out and disconnect.
+    profile: Mutex<Option<OpenProfile>>,
+    /// Who logged in on the current connection, for saving it as a profile.
+    username: Mutex<Option<String>>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Default)]
+struct OpenProfile {
+    path: PathBuf,
+    data: profile::Data,
+    sealer: profile::Sealer,
+}
+
+/// App preferences. Which server to use isn't one of them: that is in profile files, and only
+/// their paths are remembered here (KeePassXC-style), unless the user turns that off.
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Prefs {
-    /// "local" or "remote"
-    pub mode: Option<String>,
-    pub url: Option<String>,
-    pub fingerprint: Option<String>,
     #[serde(default)]
     pub tray_mode: bool,
-    pub last_username: Option<String>,
+    /// Profile files opened recently, the latest first.
+    #[serde(default)]
+    pub recent_profiles: Vec<String>,
+    #[serde(default = "yes")]
+    pub remember_recent: bool,
+    /// Left by versions before profiles: the server connected to last and its pin. Only read, so
+    /// connecting there again still warns about a changed certificate; never written again, and
+    /// removed once a profile holds that server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
 }
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Prefs {
+            tray_mode: false,
+            recent_profiles: Vec::new(),
+            remember_recent: true,
+            url: None,
+            fingerprint: None,
+        }
+    }
+}
+
+/// Most profile paths kept in the recent list.
+const RECENT_KEPT: usize = 8;
 
 fn prefs_path(app: &AppHandle) -> CmdResult<PathBuf> {
     let dir = app.path().app_config_dir().map_err(err)?;
@@ -194,8 +234,8 @@ async fn probe_server(url: String) -> CmdResult<Probe> {
 }
 
 /// The error for a server whose certificate isn't the pinned one any more: `409|cert_changed|`
-/// and the details as JSON (`url`, `old`, `new`; `new` is null for a publicly trusted one).
-fn cert_changed(url: &str, old: &str, new: Option<&str>) -> String {
+/// and the details as JSON (`url`, `old`, `new`; null stands for a publicly trusted certificate).
+fn cert_changed(url: &str, old: Option<&str>, new: Option<&str>) -> String {
     let details = serde_json::json!({ "url": url, "old": old, "new": new });
     format!("409|cert_changed|{details}")
 }
@@ -211,17 +251,22 @@ async fn connect_remote(
     fingerprint: Option<String>,
     replace_pin: Option<bool>,
 ) -> CmdResult<ServerStatus> {
+    remote(&app, &state, url, fingerprint, replace_pin.unwrap_or(false)).await
+}
+
+async fn remote(
+    app: &AppHandle,
+    state: &AppState,
+    url: String,
+    fingerprint: Option<String>,
+    replace_pin: bool,
+) -> CmdResult<ServerStatus> {
     let url = normalize_url(&url)?;
     let fingerprint = fingerprint.map(|f| net::normalize(&f));
-    let prefs = load_prefs(&app);
-    let pinned = prefs
-        .fingerprint
-        .as_deref()
-        .filter(|_| prefs.url.as_deref() == Some(&url))
-        .map(net::normalize);
+    let pinned = pinned_for(app, state, &url);
     if let Some(old) = &pinned {
-        if fingerprint.as_ref() != Some(old) && !replace_pin.unwrap_or(false) {
-            return Err(cert_changed(&url, old, fingerprint.as_deref()));
+        if fingerprint != *old && !replace_pin {
+            return Err(cert_changed(&url, old.as_deref(), fingerprint.as_deref()));
         }
     }
     let http = net::http_client(net::tls_config(fingerprint.as_deref()));
@@ -232,7 +277,7 @@ async fn connect_remote(
             if let Some(pin) = &fingerprint {
                 if let Ok(p) = probe_server(url.clone()).await {
                     if p.fingerprint.as_ref() != Some(pin) {
-                        return Err(cert_changed(&url, pin, p.fingerprint.as_deref()));
+                        return Err(cert_changed(&url, Some(pin), p.fingerprint.as_deref()));
                     }
                 }
             }
@@ -240,7 +285,7 @@ async fn connect_remote(
         }
     };
     let status: ServerStatus = check(sent).await?.json().await.map_err(err)?;
-    stop_events(&state);
+    stop_events(state);
     *state.conn.lock().unwrap() = Some(Conn {
         base: url.clone(),
         fingerprint: fingerprint.clone(),
@@ -248,12 +293,44 @@ async fn connect_remote(
         sidecar_secret: None,
         token: None,
     });
-    let mut p = load_prefs(&app);
-    p.mode = Some("remote".into());
-    p.url = Some(url);
-    p.fingerprint = fingerprint;
-    save_prefs(&app, &p)?;
+    *state.username.lock().unwrap() = None;
+    // A certificate the user deliberately trusted in place of the old one becomes the pin.
+    let mut open = state.profile.lock().unwrap();
+    if let Some(p) = open.as_mut() {
+        if let profile::Server::Remote {
+            url: purl,
+            fingerprint: pfp,
+        } = &mut p.data.server
+        {
+            if *purl == url && *pfp != fingerprint {
+                *pfp = fingerprint;
+                save_open(p)?;
+            }
+        }
+    }
     Ok(status)
+}
+
+/// What is pinned for `url`, if anything: the open profile's certificate, `Some(None)` when the
+/// profile expects a publicly trusted one (a switch to a private certificate is a change too), or
+/// the pin older versions kept.
+fn pinned_for(app: &AppHandle, state: &AppState, url: &str) -> Option<Option<String>> {
+    if let Some(p) = state.profile.lock().unwrap().as_ref() {
+        if let profile::Server::Remote {
+            url: purl,
+            fingerprint,
+        } = &p.data.server
+        {
+            if purl == url {
+                return Some(fingerprint.as_deref().map(net::normalize));
+            }
+        }
+    }
+    let prefs = load_prefs(app);
+    prefs
+        .fingerprint
+        .filter(|_| prefs.url.as_deref() == Some(url))
+        .map(|f| Some(net::normalize(&f)))
 }
 
 #[derive(Serialize)]
@@ -267,6 +344,10 @@ pub struct LocalInfo {
 /// Starts (or reuses) the bundled server on 127.0.0.1 with a per-launch secret.
 #[tauri::command]
 async fn start_local(app: AppHandle, state: State<'_, AppState>) -> CmdResult<LocalInfo> {
+    local(&app, &state).await
+}
+
+async fn local(app: &AppHandle, state: &AppState) -> CmdResult<LocalInfo> {
     let existing = state
         .sidecar
         .lock()
@@ -276,8 +357,8 @@ async fn start_local(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Lo
     let info = match existing {
         Some(i) => i,
         None => {
-            let data = local_data_dir(&app)?;
-            let sc = sidecar::spawn(&app, &data).await.map_err(err)?;
+            let data = local_data_dir(app)?;
+            let sc = sidecar::spawn(app, &data).await.map_err(err)?;
             let info = sc.info.clone();
             *state.sidecar.lock().unwrap() = Some(sc);
             info
@@ -301,11 +382,9 @@ async fn start_local(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Lo
     .json()
     .await
     .map_err(err)?;
-    stop_events(&state);
+    stop_events(state);
     *state.conn.lock().unwrap() = Some(c);
-    let mut p = load_prefs(&app);
-    p.mode = Some("local".into());
-    save_prefs(&app, &p)?;
+    *state.username.lock().unwrap() = None;
     Ok(LocalInfo {
         url: info.url,
         fingerprint: info.fingerprint,
@@ -328,13 +407,358 @@ fn set_tray_mode(app: AppHandle, state: State<'_, AppState>, enabled: bool) -> C
 }
 
 #[tauri::command]
-fn disconnect(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+fn disconnect(state: State<'_, AppState>) {
     stop_events(&state);
     state.held.clear();
     *state.conn.lock().unwrap() = None;
-    let mut p = load_prefs(&app);
-    p.mode = None;
-    save_prefs(&app, &p)
+    *state.username.lock().unwrap() = None;
+    *state.profile.lock().unwrap() = None;
+}
+
+// ───────────────────────────── profiles ─────────────────────────────
+
+/// What the UI may know about a profile: never its password, or the pinned fingerprint.
+#[derive(Serialize)]
+pub struct ProfileInfo {
+    path: String,
+    /// The file name without its extension.
+    name: String,
+    local: bool,
+    url: Option<String>,
+    username: Option<String>,
+    /// The Malo password is kept in the profile (unlocking it logs in).
+    has_password: bool,
+}
+
+fn profile_name(path: &std::path::Path) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "profile".into())
+}
+
+fn info_of(p: &OpenProfile) -> ProfileInfo {
+    let (local, url) = match &p.data.server {
+        profile::Server::Local => (true, None),
+        profile::Server::Remote { url, .. } => (false, Some(url.clone())),
+    };
+    ProfileInfo {
+        path: p.path.display().to_string(),
+        name: profile_name(&p.path),
+        local,
+        url,
+        username: p.data.username.clone(),
+        has_password: p.data.password.is_some(),
+    }
+}
+
+/// Writes the open profile: to a new file next to it first, then renamed over it, so a crash
+/// halfway never leaves a damaged profile behind.
+fn save_open(p: &OpenProfile) -> CmdResult<()> {
+    use rand::RngCore;
+    let bytes = p.sealer.seal(&p.data).map_err(err)?;
+    let dir = p.path.parent().ok_or("no folder to save the profile in")?;
+    let mut rnd = [0u8; 8];
+    rand::rngs::OsRng.fill_bytes(&mut rnd);
+    let tmp = dir.join(format!(".malo-profile-{}.tmp", hex::encode(rnd)));
+    let written = write_private(&tmp, &bytes).and_then(|()| std::fs::rename(&tmp, &p.path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written.map_err(|e| format!("could not save the profile {}: {e}", p.path.display()))
+}
+
+/// Puts `path` first in the recent list, unless the user turned the list off.
+fn remember(app: &AppHandle, path: &std::path::Path) -> CmdResult<()> {
+    let mut prefs = load_prefs(app);
+    if !prefs.remember_recent {
+        return Ok(());
+    }
+    let path = path.display().to_string();
+    prefs.recent_profiles.retain(|p| *p != path);
+    prefs.recent_profiles.insert(0, path);
+    prefs.recent_profiles.truncate(RECENT_KEPT);
+    save_prefs(app, &prefs)
+}
+
+#[derive(Serialize)]
+pub struct RecentProfile {
+    path: String,
+    name: String,
+    exists: bool,
+}
+
+#[derive(Serialize)]
+pub struct Profiles {
+    recent: Vec<RecentProfile>,
+    remember_recent: bool,
+    open: Option<ProfileInfo>,
+}
+
+#[tauri::command]
+fn profiles(app: AppHandle, state: State<'_, AppState>) -> Profiles {
+    let prefs = load_prefs(&app);
+    Profiles {
+        recent: prefs
+            .recent_profiles
+            .iter()
+            .map(|p| {
+                let path = PathBuf::from(p);
+                RecentProfile {
+                    name: profile_name(&path),
+                    exists: path.is_file(),
+                    path: p.clone(),
+                }
+            })
+            .collect(),
+        remember_recent: prefs.remember_recent,
+        open: state.profile.lock().unwrap().as_ref().map(info_of),
+    }
+}
+
+/// Takes a profile off the recent list (the file stays).
+#[tauri::command]
+fn forget_profile(app: AppHandle, path: String) -> CmdResult<()> {
+    let mut prefs = load_prefs(&app);
+    prefs.recent_profiles.retain(|p| *p != path);
+    save_prefs(&app, &prefs)
+}
+
+/// Turning the recent list off also empties it: then the app keeps no trace of any server.
+#[tauri::command]
+fn set_remember_recent(app: AppHandle, enabled: bool) -> CmdResult<()> {
+    let mut prefs = load_prefs(&app);
+    prefs.remember_recent = enabled;
+    if !enabled {
+        prefs.recent_profiles.clear();
+    }
+    save_prefs(&app, &prefs)
+}
+
+/// Native "Open" dialog for a profile file (`MALO_AUTOPICK_PROFILE` in headless tests).
+#[tauri::command]
+fn pick_profile(app: AppHandle) -> Option<String> {
+    if let Some(p) = test_hook("MALO_AUTOPICK_PROFILE") {
+        return Some(p.display().to_string());
+    }
+    let mut dialog = app
+        .dialog()
+        .file()
+        .add_filter("Malo profile", &[profile::EXTENSION]);
+    if let Some(dir) = dialog_dir(&app) {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog
+        .blocking_pick_file()
+        .and_then(|p| p.into_path().ok())
+        .map(|p| p.display().to_string())
+}
+
+#[derive(Serialize)]
+pub struct Unlocked {
+    profile: ProfileInfo,
+    url: String,
+    local: bool,
+    status: ServerStatus,
+    setup_token: Option<String>,
+    /// Logged in with the password kept in the profile.
+    me: Option<Me>,
+    /// Why logging in with the kept password failed (it was probably changed since).
+    login_error: Option<String>,
+}
+
+/// The message of a `"<status>|<code>|<message>"` error.
+fn message_of(e: &str) -> String {
+    let mut parts = e.splitn(3, '|');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(s), Some(_), Some(m)) if s.parse::<u16>().is_ok() => m.to_string(),
+        _ => e.to_string(),
+    }
+}
+
+/// Opens a profile with its password, connects to its server and, when it keeps the Malo
+/// password, logs in. A changed certificate leaves the profile open, so trusting the new one can
+/// update its pin; any other failure closes it again.
+#[tauri::command]
+async fn unlock_profile(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+    password: String,
+) -> CmdResult<Unlocked> {
+    let path = PathBuf::from(path);
+    let meta =
+        std::fs::metadata(&path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    // A profile is a few hundred bytes; anything big is not one.
+    if meta.len() > 64 * 1024 {
+        return Err(profile::Error::NotAProfile.to_string());
+    }
+    let bytes = std::fs::read(&path).map_err(err)?;
+    let (data, sealer) = tokio::task::spawn_blocking(move || profile::open(&bytes, &password))
+        .await
+        .map_err(err)?
+        .map_err(err)?;
+    remember(&app, &path)?;
+    // Leave whatever was connected before.
+    stop_events(&state);
+    state.held.clear();
+    *state.conn.lock().unwrap() = None;
+    *state.username.lock().unwrap() = None;
+    let server = data.server.clone();
+    let creds = data.username.clone().zip(data.password.clone());
+    let p = OpenProfile { path, data, sealer };
+    let info = info_of(&p);
+    *state.profile.lock().unwrap() = Some(p);
+    let connected = match server {
+        profile::Server::Local => local(&app, &state)
+            .await
+            .map(|i| (i.url, true, i.status, i.setup_token)),
+        profile::Server::Remote { url, fingerprint } => {
+            remote(&app, &state, url.clone(), fingerprint, false)
+                .await
+                .map(|s| (url, false, s, None))
+        }
+    };
+    let (url, local, status, setup_token) = match connected {
+        Ok(c) => c,
+        Err(e) => {
+            if !e.starts_with("409|cert_changed|") {
+                *state.profile.lock().unwrap() = None;
+            }
+            return Err(e);
+        }
+    };
+    let (mut me, mut login_error) = (None, None);
+    if let (Some((user, pw)), false) = (creds, status.needs_setup) {
+        match login_as(&state, &user, &pw).await {
+            Ok(m) => me = Some(m),
+            Err(e) => login_error = Some(message_of(&e)),
+        }
+    }
+    Ok(Unlocked {
+        profile: info,
+        url,
+        local,
+        status,
+        setup_token,
+        me,
+        login_error,
+    })
+}
+
+#[tauri::command]
+fn close_profile(state: State<'_, AppState>) {
+    *state.profile.lock().unwrap() = None;
+}
+
+/// Saves the current connection as a new profile file the user picks, encrypted with `password`.
+/// `login_password` is the Malo password to keep in it, if wanted. The new profile is then open.
+#[tauri::command]
+async fn save_profile(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    password: String,
+    login_password: Option<String>,
+) -> CmdResult<Option<ProfileInfo>> {
+    if password.chars().count() < 8 {
+        return Err("use a profile password of at least 8 characters".into());
+    }
+    let c = conn(&state)?;
+    let server = match c.sidecar_secret {
+        Some(_) => profile::Server::Local,
+        None => profile::Server::Remote {
+            url: c.base.clone(),
+            fingerprint: c.fingerprint.clone(),
+        },
+    };
+    let username = state.username.lock().unwrap().clone();
+    if login_password.is_some() && username.is_none() {
+        return Err("log in first, so the profile knows whose password it keeps".into());
+    }
+    let host = match &server {
+        profile::Server::Local => "this-computer".to_string(),
+        profile::Server::Remote { url, .. } => url::Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_else(|| "server".into()),
+    };
+    let suggested = match &username {
+        Some(u) => format!("{u} on {host}.{}", profile::EXTENSION),
+        None => format!("{host}.{}", profile::EXTENSION),
+    };
+    if let Some(pw) = &login_password {
+        verify_login(&state, pw).await?;
+    }
+    let Some(mut target) = save_target(&app, &suggested) else {
+        return Ok(None);
+    };
+    if target.extension().is_none() {
+        target.set_extension(profile::EXTENSION);
+    }
+    let sealer = tokio::task::spawn_blocking(move || profile::Sealer::new(&password))
+        .await
+        .map_err(err)?
+        .map_err(err)?;
+    let p = OpenProfile {
+        path: target,
+        data: profile::Data {
+            server: server.clone(),
+            username,
+            password: login_password.map(zeroize::Zeroizing::new),
+        },
+        sealer,
+    };
+    save_open(&p)?;
+    remember(&app, &p.path)?;
+    // The pin older versions kept for this server now lives in the profile.
+    let mut prefs = load_prefs(&app);
+    if let profile::Server::Remote { url, .. } = &server {
+        if prefs.url.as_deref() == Some(url) {
+            prefs.url = None;
+            prefs.fingerprint = None;
+            save_prefs(&app, &prefs)?;
+        }
+    }
+    let info = info_of(&p);
+    *state.profile.lock().unwrap() = Some(p);
+    Ok(Some(info))
+}
+
+/// Keeps the Malo password in the open profile (with the username logged in now), or forgets it.
+#[tauri::command]
+async fn set_profile_login(
+    state: State<'_, AppState>,
+    password: Option<String>,
+) -> CmdResult<ProfileInfo> {
+    if let Some(pw) = &password {
+        verify_login(&state, pw).await?;
+    }
+    let username = state.username.lock().unwrap().clone();
+    let mut open = state.profile.lock().unwrap();
+    let p = open.as_mut().ok_or("no profile is open")?;
+    if password.is_some() {
+        p.data.username = Some(username.ok_or("log in first")?);
+    }
+    p.data.password = password.map(zeroize::Zeroizing::new);
+    save_open(p)?;
+    Ok(info_of(p))
+}
+
+#[tauri::command]
+async fn change_profile_password(state: State<'_, AppState>, password: String) -> CmdResult<()> {
+    if password.chars().count() < 8 {
+        return Err("use a profile password of at least 8 characters".into());
+    }
+    if state.profile.lock().unwrap().is_none() {
+        return Err("no profile is open".into());
+    }
+    let sealer = tokio::task::spawn_blocking(move || profile::Sealer::new(&password))
+        .await
+        .map_err(err)?
+        .map_err(err)?;
+    let mut open = state.profile.lock().unwrap();
+    let p = open.as_mut().ok_or("no profile is open")?;
+    p.sealer = sealer;
+    save_open(p)
 }
 
 // ───────────────────────────── local server data ─────────────────────────────
@@ -448,12 +872,11 @@ async fn reset_local_data(
     if let Some(e) = last {
         return Err(format!("could not delete {}: {e}", dir.display()));
     }
+    if was_local {
+        *state.profile.lock().unwrap() = None;
+    }
     if reset_preferences {
         let _ = std::fs::remove_file(prefs_path(&app)?);
-    } else if was_local {
-        let mut p = load_prefs(&app);
-        p.mode = None;
-        save_prefs(&app, &p)?;
     }
     tracing::info!("local server data reset: {}", dir.display());
     Ok(())
@@ -462,18 +885,47 @@ async fn reset_local_data(
 // ───────────────────────────── session ─────────────────────────────
 
 #[tauri::command]
-async fn login(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    username: String,
-    password: String,
-) -> CmdResult<Me> {
-    let mut c = conn(&state)?;
+async fn login(state: State<'_, AppState>, username: String, password: String) -> CmdResult<Me> {
+    let me = login_as(&state, &username, &password).await?;
+    // A profile without a username learns it; one made for someone else stays as it is.
+    let mut open = state.profile.lock().unwrap();
+    if let Some(p) = open.as_mut().filter(|p| p.data.username.is_none()) {
+        p.data.username = Some(username);
+        if let Err(e) = save_open(p) {
+            tracing::warn!("could not update the profile: {e}");
+        }
+    }
+    Ok(me)
+}
+
+/// Checks with the server that `password` is the logged-in user's, before a profile keeps it: a
+/// typo would otherwise only show up at the next unlock. Servers without the check are trusted.
+async fn verify_login(state: &AppState, password: &str) -> CmdResult<()> {
+    let c = conn(state)?;
+    if c.token.is_none() {
+        return Err("log in first, so the profile knows whose password it keeps".into());
+    }
+    let resp = request(&c, reqwest::Method::POST, "/auth/verify-password")
+        .json(&malo_api::VerifyPasswordRequest {
+            password: password.to_string(),
+        })
+        .send()
+        .await
+        .map_err(err)?;
+    match resp.status().as_u16() {
+        404 => Ok(()),
+        403 => Err("403|wrong_password|That isn't your Malo password. Nothing was saved.".into()),
+        _ => check(resp).await.map(drop),
+    }
+}
+
+async fn login_as(state: &AppState, username: &str, password: &str) -> CmdResult<Me> {
+    let mut c = conn(state)?;
     c.token = None;
     let resp = request(&c, reqwest::Method::POST, "/auth/login")
         .json(&LoginRequest {
-            username: username.clone(),
-            password,
+            username: username.to_string(),
+            password: password.to_string(),
         })
         .send()
         .await
@@ -482,9 +934,7 @@ async fn login(
     if let Some(cur) = state.conn.lock().unwrap().as_mut() {
         cur.token = Some(r.token);
     }
-    let mut p = load_prefs(&app);
-    p.last_username = Some(username);
-    save_prefs(&app, &p)?;
+    *state.username.lock().unwrap() = Some(r.me.username.clone());
     Ok(r.me)
 }
 
@@ -498,6 +948,9 @@ async fn logout(state: State<'_, AppState>, lock: bool) -> CmdResult<()> {
     if let Some(cur) = state.conn.lock().unwrap().as_mut() {
         cur.token = None;
     }
+    // Like a password manager: locking or logging out closes the profile, whose password is
+    // needed again to get back in.
+    *state.profile.lock().unwrap() = None;
     Ok(())
 }
 
@@ -990,6 +1443,10 @@ pub fn run() {
         .manage(AppState::default())
         .setup(|app| {
             let prefs = load_prefs(app.handle());
+            // Rewritten once, so what older versions kept (the last mode and username) is gone.
+            if prefs_path(app.handle()).is_ok_and(|p| p.exists()) {
+                let _ = save_prefs(app.handle(), &prefs);
+            }
             app.state::<AppState>()
                 .tray_mode
                 .store(prefs.tray_mode, Ordering::Relaxed);
@@ -1014,6 +1471,15 @@ pub fn run() {
             start_local,
             get_prefs,
             set_tray_mode,
+            profiles,
+            pick_profile,
+            unlock_profile,
+            close_profile,
+            forget_profile,
+            set_remember_recent,
+            save_profile,
+            set_profile_login,
+            change_profile_password,
             disconnect,
             login,
             logout,

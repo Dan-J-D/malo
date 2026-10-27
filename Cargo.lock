@@ -2901,7 +2901,9 @@ dependencies = [
 name = "malo-gui"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
+ "argon2",
  "futures",
  "hex",
  "malo-api",
@@ -2916,10 +2918,12 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite 0.24.0",
  "tracing",
  "tracing-subscriber",
+ "unicode-normalization",
  "url",
  "webpki-roots 0.26.11",
  "zeroize",
@@ -7545,6 +7549,7 @@ version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 dependencies = [
+ "serde",
  "zeroize_derive",
 ]
 

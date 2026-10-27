@@ -30,8 +30,8 @@ export const api = {
   del: <R>(path: string) => call<R>('api', { method: 'DELETE', path, body: null }),
 };
 
-/** A pinned server whose certificate changed: `new` is null when it is now publicly trusted. */
-export interface CertChange { url: string; old: string; new: string | null }
+/** A pinned server whose certificate changed; null stands for a publicly trusted certificate. */
+export interface CertChange { url: string; old: string | null; new: string | null }
 
 /** The certificate change behind an error from `connectRemote`, if that's what it is. */
 export function certChange(e: unknown): CertChange | null {
@@ -45,7 +45,19 @@ export function certChange(e: unknown): CertChange | null {
 
 export interface Probe { url: string; fingerprint: string | null; publicly_trusted: boolean; status: T.ServerStatus }
 export interface LocalInfo { url: string; fingerprint: string | null; status: T.ServerStatus; setup_token: string | null }
-export interface Prefs { mode: 'local' | 'remote' | null; url: string | null; fingerprint: string | null; tray_mode: boolean; last_username: string | null }
+/** `url` and `fingerprint`: the server older versions remembered, until a profile holds it. */
+export interface Prefs { tray_mode: boolean; recent_profiles: string[]; remember_recent: boolean; url: string | null; fingerprint: string | null }
+/** An encrypted connection profile file. The pinned certificate and any password stay in Rust. */
+export interface ProfileInfo { path: string; name: string; local: boolean; url: string | null; username: string | null; has_password: boolean }
+export interface RecentProfile { path: string; name: string; exists: boolean }
+export interface Profiles { recent: RecentProfile[]; remember_recent: boolean; open: ProfileInfo | null }
+export interface Unlocked {
+  profile: ProfileInfo; url: string; local: boolean; status: T.ServerStatus; setup_token: string | null;
+  /** Logged in with the password kept in the profile. */
+  me: T.Me | null;
+  /** Why logging in with the kept password failed. */
+  login_error: string | null;
+}
 export interface LocalDataInfo { path: string; exists: boolean; bytes: number; files: number; users: number; running: boolean }
 export interface OAuthRequest {
   provider: T.OAuthProvider; auth_url: string; token_url: string; client_id: string;
@@ -60,6 +72,17 @@ export const app = {
   prefs: () => call<Prefs>('get_prefs'),
   setTrayMode: (enabled: boolean) => call<void>('set_tray_mode', { enabled }),
   disconnect: () => call<void>('disconnect'),
+  profiles: () => call<Profiles>('profiles'),
+  pickProfile: () => call<string | null>('pick_profile'),
+  unlockProfile: (path: string, password: string) => call<Unlocked>('unlock_profile', { path, password }),
+  closeProfile: () => call<void>('close_profile'),
+  forgetProfile: (path: string) => call<void>('forget_profile', { path }),
+  setRememberRecent: (enabled: boolean) => call<void>('set_remember_recent', { enabled }),
+  /** Saves the current connection as a profile file the user picks; null when cancelled. */
+  saveProfile: (password: string, loginPassword: string | null) =>
+    call<ProfileInfo | null>('save_profile', { password, loginPassword }),
+  setProfileLogin: (password: string | null) => call<ProfileInfo>('set_profile_login', { password }),
+  changeProfilePassword: (password: string) => call<void>('change_profile_password', { password }),
   login: (username: string, password: string) => call<T.Me>('login', { username, password }),
   logout: (lock: boolean) => call<void>('logout', { lock }),
   subscribe(onBatch: (b: T.EventBatch) => void) {

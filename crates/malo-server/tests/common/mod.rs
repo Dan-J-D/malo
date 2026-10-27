@@ -226,6 +226,8 @@ pub async fn bootstrap(r: &Running) -> Api {
                 setup_token: token,
                 username: "admin".into(),
                 password: "admin-password-1".into(),
+                recovery_kit: None,
+                kit_passphrase: None,
             },
         )
         .await;
@@ -360,6 +362,7 @@ pub fn s3_dest(name: &str, bucket: &str, root: &str, encrypt: bool) -> Destinati
         encrypt,
         required_for_purge: true,
         deep_check: DeepCheckMode::Full,
+        recovery_secrets: false,
     }
 }
 
@@ -391,6 +394,7 @@ pub fn gcs_dest(name: &str, root: &str, encrypt: bool) -> DestinationInput {
         encrypt,
         required_for_purge: true,
         deep_check: DeepCheckMode::Full,
+        recovery_secrets: false,
     }
 }
 
@@ -404,6 +408,7 @@ pub fn fs_dest(name: &str, root: &str) -> DestinationInput {
         encrypt: false,
         required_for_purge: true,
         deep_check: DeepCheckMode::Full,
+        recovery_secrets: false,
     }
 }
 

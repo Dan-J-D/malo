@@ -98,6 +98,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/auth/register", post(auth::register))
         .route("/auth/recover", post(auth::recover))
         .route("/recovery-kit", post(auth::recovery_kit))
+        .route("/auth/verify-password", post(auth::verify_password))
         .route("/setup", post(auth::setup))
         .layer(GovernorLayer { config: governor });
     Router::new()

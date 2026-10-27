@@ -49,6 +49,13 @@ pub struct Destination {
     pub deep_check: DeepCheckMode,
     #[serde(default)]
     pub revision: u64,
+    /// Its credentials go into the recovery kit and the settings copies too.
+    #[serde(default)]
+    pub recovery_secrets: bool,
+    /// Secret options it was restored without (from a kit or settings copy that left them out).
+    /// Until they are entered again it is not used: [`crate::store::Store::open`] refuses it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_secrets: Vec<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -63,6 +70,17 @@ pub struct UserConfig {
     pub destinations: Vec<Destination>,
     #[serde(default)]
     pub settings: UserSettings,
+    /// Set up from a recovery kit that carried destinations: the first login rebuilds from them,
+    /// which also restores accounts and settings.
+    #[serde(default)]
+    pub restore_pending: bool,
+    /// [`UserConfig::destinations_hash`] when the recovery kit was last saved, to tell when the
+    /// kit no longer holds the destinations as they are.
+    #[serde(default)]
+    pub kit_destinations: Option<String>,
+    /// The same for the kit fetched last, until the app confirms it saved it.
+    #[serde(default)]
+    pub kit_fetched: Option<String>,
 }
 
 impl Drop for UserConfig {
@@ -99,7 +117,39 @@ impl UserConfig {
             accounts: vec![],
             destinations: vec![],
             settings: UserSettings::default(),
+            restore_pending: false,
+            kit_destinations: None,
+            kit_fetched: None,
         }
+    }
+
+    /// Identifies the destinations as a recovery kit holds them (credentials only where kept).
+    pub fn destinations_hash(&self) -> String {
+        let kept: Vec<Destination> = self
+            .destinations
+            .iter()
+            .map(|d| Destination {
+                revision: 0,
+                ..d.for_recovery()
+            })
+            .collect();
+        let json = Zeroizing::new(serde_json::to_vec(&kept).unwrap_or_default());
+        crypto::sha256_hex(&json)
+    }
+
+    /// The destinations as a recovery kit holds them.
+    pub fn recovery_destinations(&self) -> Vec<Destination> {
+        self.destinations
+            .iter()
+            .map(Destination::for_recovery)
+            .collect()
+    }
+
+    /// The saved recovery kit doesn't hold the current destinations.
+    pub fn kit_outdated(&self) -> bool {
+        self.recovery_kit_exported
+            && !self.destinations.is_empty()
+            && self.kit_destinations.as_deref() != Some(self.destinations_hash().as_str())
     }
 
     pub fn archive_key(&self) -> anyhow::Result<Key> {
@@ -140,8 +190,10 @@ fn aad(user_id: &str) -> String {
 pub const SETTINGS_BACKUP_FORMAT: &str = "malo-settings-v1";
 
 /// The copy of a user's settings kept on every destination, encrypted with the archive key. With
-/// the recovery kit and the credentials of one destination, the accounts and destinations (and
-/// their credentials) come back on a new server, under their old ids.
+/// the recovery kit and the credentials of one destination, the accounts and destinations come
+/// back on a new server, under their old ids. Credentials are only in it where the user chose so
+/// ([`UserSettings::copy_mail_credentials`], [`Destination::recovery_secrets`]); accounts without
+/// them come back as imported, asking to sign in again.
 #[derive(Serialize, Deserialize)]
 pub struct SettingsBackup {
     pub format: String,
@@ -158,8 +210,18 @@ impl UserConfig {
         let mut b = SettingsBackup {
             format: SETTINGS_BACKUP_FORMAT.into(),
             saved_at: chrono::DateTime::UNIX_EPOCH,
-            accounts: self.accounts.clone(),
-            destinations: self.destinations.clone(),
+            accounts: self
+                .accounts
+                .iter()
+                .map(|a| {
+                    if self.settings.copy_mail_credentials {
+                        a.clone()
+                    } else {
+                        a.without_credentials()
+                    }
+                })
+                .collect(),
+            destinations: self.recovery_destinations(),
             settings: self.settings.clone(),
         };
         let hash = crypto::sha256_hex(&Zeroizing::new(serde_json::to_vec(&b)?));
@@ -362,6 +424,26 @@ impl Account {
         })
     }
 
+    /// The account without its password, refresh token or client secret: imported, so it asks to
+    /// sign in again before it is used.
+    pub fn without_credentials(&self) -> Account {
+        let mut a = self.clone();
+        match &mut a.auth {
+            AccountAuth::Password { password } => *password = String::new(),
+            AccountAuth::OAuth2 {
+                client_secret,
+                refresh_token,
+                ..
+            } => {
+                *refresh_token = String::new();
+                *client_secret = None;
+            }
+        }
+        // Imported accounts never run, so nothing tries the empty credentials.
+        a.imported = true;
+        a
+    }
+
     pub fn redacted_auth(&self) -> AccountAuth {
         match &self.auth {
             AccountAuth::Password { .. } => AccountAuth::Password {
@@ -469,9 +551,39 @@ impl Destination {
             required_for_purge: input.required_for_purge,
             deep_check: input.deep_check,
             revision: previous.map(|p| p.revision + 1).unwrap_or(1),
+            recovery_secrets: input.recovery_secrets,
+            // Saving the form with the storage's credentials makes it whole again.
+            missing_secrets: vec![],
         };
         crate::store::validate_destination(&dest)?;
         Ok(dest)
+    }
+
+    /// The destination as a recovery kit or settings copy holds it: its secret options only when
+    /// [`Destination::recovery_secrets`] is set, otherwise their names in `missing_secrets`.
+    pub fn for_recovery(&self) -> Destination {
+        let mut d = self.clone();
+        if !d.recovery_secrets {
+            let secret: Vec<String> = d
+                .options
+                .keys()
+                .filter(|k| is_secret_option(k))
+                .cloned()
+                .collect();
+            for k in secret {
+                d.options.remove(&k);
+                if !d.missing_secrets.contains(&k) {
+                    d.missing_secrets.push(k);
+                }
+            }
+            d.missing_secrets.sort();
+        }
+        d
+    }
+
+    /// It has all its credentials and can be used.
+    pub fn complete(&self) -> bool {
+        self.missing_secrets.is_empty()
     }
 
     pub fn view(&self) -> DestinationView {
@@ -498,6 +610,8 @@ impl Destination {
             encrypt: self.encrypt,
             required_for_purge: self.required_for_purge,
             deep_check: self.deep_check.clone(),
+            recovery_secrets: Some(self.recovery_secrets),
+            missing_secrets: Some(self.missing_secrets.clone()),
             object_count: 0,
             stored_bytes: 0,
             health: None,
@@ -603,6 +717,7 @@ mod tests {
                 encrypt: true,
                 required_for_purge: true,
                 deep_check: DeepCheckMode::Full,
+                recovery_secrets: false,
             },
             None,
         )
@@ -611,5 +726,61 @@ mod tests {
         let v = d.view();
         assert_eq!(v.options["secret_access_key"], REDACTED);
         assert_eq!(v.options["bucket"], "b");
+    }
+
+    #[test]
+    fn recovery_copies_leave_secrets_out_unless_asked() {
+        let mut opts = BTreeMap::new();
+        opts.insert("bucket".into(), "b".into());
+        opts.insert("access_key_id".into(), "abc".into());
+        opts.insert("secret_access_key".into(), "xyz".into());
+        let mut d = Destination {
+            id: "d".into(),
+            name: "S3".into(),
+            scheme: "s3".into(),
+            options: opts,
+            root: "malo".into(),
+            encrypt: true,
+            required_for_purge: false,
+            deep_check: DeepCheckMode::Off,
+            revision: 1,
+            recovery_secrets: false,
+            missing_secrets: vec![],
+        };
+        let r = d.for_recovery();
+        assert_eq!(r.missing_secrets, ["secret_access_key"]);
+        assert!(!r.options.contains_key("secret_access_key") && r.options["bucket"] == "b");
+        assert!(!r.complete() && d.complete());
+        d.recovery_secrets = true;
+        assert!(d.for_recovery().complete());
+
+        let mut cfg = UserConfig::new(&crate::crypto::random_key());
+        d.recovery_secrets = false;
+        cfg.destinations.push(d.clone());
+        cfg.accounts
+            .push(Account::from_input("a".into(), input("pw"), None).unwrap());
+        let (json, _) = cfg.settings_backup().unwrap();
+        let b = SettingsBackup::parse(&json).unwrap();
+        assert!(
+            matches!(&b.accounts[0].auth, AccountAuth::Password { password } if password.is_empty())
+        );
+        assert!(b.accounts[0].imported);
+        assert!(!b.destinations[0].complete());
+        let text = String::from_utf8_lossy(&json);
+        assert!(!text.contains("xyz") && !text.contains("\"pw\""));
+        cfg.settings.copy_mail_credentials = true;
+        let (json, _) = cfg.settings_backup().unwrap();
+        let b = SettingsBackup::parse(&json).unwrap();
+        assert!(!b.accounts[0].imported);
+
+        // A new secret doesn't outdate a kit that doesn't hold it; a new name does.
+        let before = cfg.destinations_hash();
+        cfg.destinations[0]
+            .options
+            .insert("secret_access_key".into(), "new".into());
+        cfg.destinations[0].revision += 1;
+        assert_eq!(cfg.destinations_hash(), before);
+        cfg.destinations[0].name = "Other".into();
+        assert_ne!(cfg.destinations_hash(), before);
     }
 }

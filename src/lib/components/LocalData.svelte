@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { app, type LocalDataInfo } from '../api/client';
-  import { session, errorText, notify } from '../state.svelte';
+  import { session, errorText, notify, toStart } from '../state.svelte';
   import { bytes } from '../format';
   import DangerConfirm from './DangerConfirm.svelte';
 
@@ -30,13 +30,7 @@
     open = false;
     notify('Local server data deleted', 'success');
     // Whatever screen we were on belonged to the deleted server.
-    if (session.local) {
-      session.local = false;
-      session.me = null;
-      session.status = null;
-      session.setupToken = null;
-      session.phase = 'connect';
-    }
+    if (session.local) await toStart();
     await load();
   }
 </script>

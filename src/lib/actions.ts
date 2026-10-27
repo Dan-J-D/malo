@@ -1,4 +1,5 @@
 // Actions offered in more than one place (sidebar, pages, context menus, the command palette).
+import { ask } from './confirm.svelte';
 import { api } from './api/client';
 import type * as T from './api/types';
 import { live, scope, go, attempt, refreshAccounts } from './state.svelte';
@@ -27,7 +28,7 @@ export function verifyAccount(a: T.AccountView, deep: boolean) {
 }
 
 export async function removeAccount(a: T.AccountView) {
-  if (!confirm(`Remove "${a.name}"? Backups already written stay on your destinations; only the local index rows are deleted.`)) return;
+  if (!(await ask({ title: `Remove “${a.name}”?`, body: 'Backups already written stay on your destinations; only the local index rows are deleted.', confirm: 'Remove account', danger: true }))) return;
   await attempt(() => api.del(`/accounts/${a.id}`), 'Account removed');
   if (scope.account === a.id) scope.account = '';
   await refreshAccounts();

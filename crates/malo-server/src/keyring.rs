@@ -212,6 +212,7 @@ pub fn provision_user(
     user_id: &str,
     password: &str,
     archive_key: Option<Key>,
+    destinations: Vec<malo_core::config::Destination>,
 ) -> anyhow::Result<()> {
     let paths = UserPaths::try_new(data_dir, user_id)?;
     std::fs::create_dir_all(&paths.dir)?;
@@ -222,8 +223,14 @@ pub fn provision_user(
     let imported = archive_key.is_some();
     let archive = archive_key.unwrap_or_else(crypto::random_key);
     let mut cfg = UserConfig::new(&archive);
-    // A user created from a recovery kit already holds it.
+    // A user created from a recovery kit already holds it. Destinations saved with the kit come
+    // back as they were, and the first login rebuilds from them.
     cfg.recovery_kit_exported = imported;
+    cfg.restore_pending = !destinations.is_empty();
+    cfg.destinations = destinations;
+    if imported {
+        cfg.kit_destinations = Some(cfg.destinations_hash());
+    }
     write_atomic(&paths.config(), &cfg.seal(&keys.config, user_id)?)?;
     Index::open(&paths.index(), &keys.sqlcipher)?;
     write_recovery_slot(&paths, user_id, &mdk, &archive)?;

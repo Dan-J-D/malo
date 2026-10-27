@@ -1,6 +1,7 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { app, certChange, type Probe } from '../api/client';
-  import { session, errorText } from '../state.svelte';
+  import { session, errorText, toStart } from '../state.svelte';
   import LocalData from '../components/LocalData.svelte';
   import Icon from '../components/Icon.svelte';
 
@@ -10,11 +11,27 @@
   let error = $state('');
   /** Ticked after comparing the new fingerprint with the server log. */
   let verified = $state(false);
+  let hasProfiles = $state(false);
+
+  onMount(async () => {
+    const [prefs, profiles] = await Promise.all([app.prefs().catch(() => null), app.profiles().catch(() => null)]);
+    // The server an older version remembered, until a profile holds it.
+    if (prefs?.url) url = prefs.url;
+    hasProfiles = !!profiles?.recent.length;
+  });
+
+  /** Connecting by hand leaves any profile. */
+  async function leaveProfile() {
+    if (!session.profile) return;
+    session.profile = null;
+    await app.closeProfile().catch(() => undefined);
+  }
 
   async function local() {
     busy = true;
     error = '';
     try {
+      await leaveProfile();
       const info = await app.startLocal();
       session.local = true;
       session.url = info.url;
@@ -53,6 +70,7 @@
     if (!probe) return;
     busy = true;
     try {
+      await leaveProfile();
       session.status = await app.connectRemote(probe.url, probe.publicly_trusted ? null : probe.fingerprint);
       session.local = false;
       session.url = probe.url;
@@ -67,9 +85,13 @@
   }
 
   /** Keeps the old pin: nothing connects to the server until its certificate matches again. */
-  function keepOld() {
+  async function keepOld() {
     session.certChanged = null;
     verified = false;
+    if (session.profile) {
+      await leaveProfile();
+      await toStart();
+    }
   }
 
   /** Deliberately trusts the new certificate in place of the old one. */
@@ -79,6 +101,7 @@
     busy = true;
     error = '';
     try {
+      // With a profile open, the new certificate becomes its pin.
       session.status = await app.connectRemote(c.url, c.new, true);
       session.certChanged = null;
       session.local = false;
@@ -106,19 +129,23 @@
   <section class="panel bg-panel! px-6! py-5!" role="alert">
     <p class="callout bad"><strong>Malo didn't connect to {c.url}.</strong> It presents a different certificate than the one you trusted. If you didn't replace the server's certificate yourself, something between you and the server may be intercepting the connection: don't log in.</p>
     <p class="mb-1">Trusted certificate</p>
-    <p class="mono">{c.old}</p>
+    <p class="mono">{c.old ?? 'A publicly trusted certificate (no fingerprint pinned)'}</p>
     <p class="mb-1">Certificate presented now</p>
     <p class="mono">{c.new ?? 'A publicly trusted certificate (no fingerprint pinned)'}</p>
     <button class="primary" disabled={busy} onclick={keepOld}>Keep the trusted certificate</button>
     <details class="mt-6">
       <summary>I replaced the certificate on the server</summary>
-      <p class="muted">Compare the new fingerprint with the one in the server log (<span class="mono">docker logs</span>) before you trust it. The old certificate is forgotten.</p>
+      <p class="muted">Compare the new fingerprint with the one in the server log (<span class="mono">docker logs</span>) before you trust it. The old certificate is forgotten{session.profile ? `, and the profile ${session.profile.name} pins the new one` : ''}.</p>
       <label class="check"><input type="checkbox" bind:checked={verified} /> The new fingerprint matches the server log</label>
       <button class="danger" disabled={busy || !verified} onclick={forgetOld}>Forget the old certificate and connect</button>
     </details>
   </section>
   {:else}
-  <h1>Connect to a Malo server</h1>
+  <div class="flex items-baseline gap-3">
+    <h1 class="flex-1">Connect to a Malo server</h1>
+    {#if hasProfiles}<button class="link" onclick={() => (session.phase = 'unlock')}><Icon name="key" size={14} /> Use a saved profile</button>{/if}
+  </div>
+  <p class="muted -mt-2 mb-4">After you log in you can save this connection as a profile file, so next time you only need its password.{#if !hasProfiles} Have one already? <button class="link" onclick={() => (session.phase = 'unlock')}>Use a profile file</button>{/if}</p>
   <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
     <section class="panel mb-0! bg-panel! px-6! py-5!">
       <h2 class="mt-0 flex items-center gap-2"><Icon name="server" /> On this computer</h2>

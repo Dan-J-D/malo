@@ -12,7 +12,8 @@ use axum::Json;
 use chrono::Utc;
 use malo_api::{
     ChangePasswordRequest, DeleteAccountRequest, LoginRequest, LoginResponse, Me, RecoverRequest,
-    RecoveryKitRequest, RegisterRequest, Role, SealedRecoveryKit, SetupRequest,
+    RecoveryKitRequest, RegisterRequest, RegisterResponse, Role, SealedRecoveryKit, SetupRequest,
+    VerifyPasswordRequest,
 };
 use malo_core::crypto;
 use rand::RngCore;
@@ -220,6 +221,7 @@ pub fn me(state: &AppState, user: &UserRow) -> Me {
         recovery_kit_pending: unlocked
             .as_ref()
             .is_some_and(|u| !u.config().recovery_kit_exported),
+        recovery_kit_outdated: unlocked.as_ref().is_some_and(|u| u.config().kit_outdated()),
         skipped_while_locked: unlocked
             .as_ref()
             .map(|u| u.skipped_while_locked.load(Ordering::Relaxed))
@@ -369,6 +371,10 @@ pub async fn login(
         .store(skipped, Ordering::Relaxed);
     state.db.touch_login(&user.id)?;
     scheduler::sync_schedules(&state, &unlocked)?;
+    // A user restored from a kit: rebuild from its destinations, bringing back accounts,
+    // settings and mail. The job clears the flag when it starts. Destinations that came back
+    // without credentials wait for them (see `update_destination`).
+    crate::jobs::start_restore_if_ready(&state, &unlocked);
     let token = random_token();
     state
         .db
@@ -417,6 +423,36 @@ fn validate_credentials(username: &str, password: &str) -> ApiResult<()> {
 /// The exact text a user must type to delete their own account.
 pub fn delete_confirmation(username: &str) -> String {
     format!("delete {username}")
+}
+
+/// 204 when `password` is the caller's password: the desktop app checks it before keeping it in a
+/// profile. Wrong guesses count toward the same lockout as logins.
+pub async fn verify_password(
+    State(state): State<SharedState>,
+    ClientIp(ip): ClientIp,
+    auth: AuthUser,
+    Json(req): Json<VerifyPasswordRequest>,
+) -> ApiResult<StatusCode> {
+    let key = auth.user.username.to_lowercase();
+    check_failures(&state, &key, ip)?;
+    let data_dir = state.cfg.data_dir.clone();
+    let uid = auth.user.id.clone();
+    let pw = Zeroizing::new(req.password);
+    let ok = run_kdf(&state, KdfKind::Session, move || {
+        keyring::open_vault(&data_dir, &uid, &pw).is_ok()
+    })
+    .await?;
+    if !ok {
+        record_failure(&state, &key, ip);
+        // Not 401: the session is fine, only the password given is wrong.
+        return Err(ApiErr::new(
+            StatusCode::FORBIDDEN,
+            "wrong_password",
+            "password is wrong",
+        ));
+    }
+    clear_failures(&state, &key, ip);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Self-service account deletion. The GUI asks twice (warning, then typed confirmation + password);
@@ -530,6 +566,7 @@ async fn provision(
     password: String,
     role: Role,
     archive_key: Option<crypto::Key>,
+    destinations: Vec<malo_core::config::Destination>,
 ) -> ApiResult<String> {
     if state.db.user_by_name(username)?.is_some() {
         return Err(ApiErr::conflict("username taken"));
@@ -540,7 +577,7 @@ async fn provision(
     let pw = Zeroizing::new(password);
     let dir = keyring::UserPaths::try_new(&state.cfg.data_dir, &id)?.dir;
     let created = run_kdf(state, KdfKind::Public, move || {
-        keyring::provision_user(&data_dir, &id2, &pw, archive_key)
+        keyring::provision_user(&data_dir, &id2, &pw, archive_key, destinations)
     })
     .await?
     .map_err(ApiErr::from)
@@ -557,7 +594,7 @@ async fn provision(
 pub async fn setup(
     State(state): State<SharedState>,
     Json(req): Json<SetupRequest>,
-) -> ApiResult<StatusCode> {
+) -> ApiResult<(StatusCode, Json<RegisterResponse>)> {
     if state.db.user_count()? > 0 {
         return Err(ApiErr::conflict("already set up"));
     }
@@ -573,7 +610,40 @@ pub async fn setup(
     if !state.db.take_setting("setup_token_hash", &expected)? {
         return Err(ApiErr::conflict("already set up"));
     }
-    if let Err(e) = provision(&state, &req.username, req.password, Role::Admin, None).await {
+    // A replacement for a lost server: the administrator is restored from their kit.
+    let kit = match req.recovery_kit {
+        Some(file) => {
+            let pass = req.kit_passphrase.map(Zeroizing::new);
+            let opened = run_kdf(&state, KdfKind::Kit, move || {
+                kit::open(&file, pass.as_deref().map(String::as_str))
+            })
+            .await
+            .and_then(|r| r);
+            match opened {
+                Ok(k) => Some(k),
+                Err(e) => {
+                    state.db.set_setting("setup_token_hash", &expected)?;
+                    return Err(e);
+                }
+            }
+        }
+        None => None,
+    };
+    let (archive, destinations) = match kit {
+        Some(k) => (Some(k.archive_key), k.destinations),
+        None => (None, vec![]),
+    };
+    let restored = destinations.len() as u32;
+    if let Err(e) = provision(
+        &state,
+        &req.username,
+        req.password,
+        Role::Admin,
+        archive,
+        destinations,
+    )
+    .await
+    {
         state.db.set_setting("setup_token_hash", &expected)?;
         return Err(e);
     }
@@ -582,17 +652,22 @@ pub async fn setup(
         &req.username,
         "setup",
         Some(&req.username),
-        serde_json::json!({}),
+        serde_json::json!({ "restored_destinations": restored }),
     );
     tracing::info!("first admin {} created", req.username);
-    Ok(StatusCode::CREATED)
+    Ok((
+        StatusCode::CREATED,
+        Json(RegisterResponse {
+            restored_destinations: restored,
+        }),
+    ))
 }
 
 pub async fn register(
     State(state): State<SharedState>,
     ClientIp(ip): ClientIp,
     Json(req): Json<RegisterRequest>,
-) -> ApiResult<StatusCode> {
+) -> ApiResult<(StatusCode, Json<RegisterResponse>)> {
     validate_credentials(&req.username, &req.password)?;
     // Whether this client may register at all comes first: before anything about the name is
     // told, and before any key derivation runs.
@@ -639,7 +714,21 @@ pub async fn register(
             .ok_or_else(invalid_invite)?,
         None => Role::User,
     };
-    if let Err(e) = provision(&state, &req.username, req.password, role, archive).await {
+    let (archive, destinations) = match archive {
+        Some(k) => (Some(k.archive_key), k.destinations),
+        None => (None, vec![]),
+    };
+    let restored = destinations.len() as u32;
+    if let Err(e) = provision(
+        &state,
+        &req.username,
+        req.password,
+        role,
+        archive,
+        destinations,
+    )
+    .await
+    {
         if let Some(hash) = &invite {
             state.db.release_invite(hash)?;
         }
@@ -652,9 +741,15 @@ pub async fn register(
         Some(&req.username),
         serde_json::json!({
             "role": role, "invite": invite.as_deref().map(|h| &h[..12]),
+            "restored_destinations": restored,
         }),
     );
-    Ok(StatusCode::CREATED)
+    Ok((
+        StatusCode::CREATED,
+        Json(RegisterResponse {
+            restored_destinations: restored,
+        }),
+    ))
 }
 
 /// Forgotten password: the recovery kit sets a new one. The user keeps their id, accounts,
@@ -677,7 +772,7 @@ pub async fn recover(
     let (file, pass) = (req.recovery_kit, req.kit_passphrase.map(Zeroizing::new));
     let pw = Zeroizing::new(req.new_password);
     let res = run_kdf(&state, KdfKind::Kit, move || -> ApiResult<()> {
-        let key = kit::open(&file, pass.as_deref().map(String::as_str))?;
+        let key = kit::open(&file, pass.as_deref().map(String::as_str))?.archive_key;
         let Some(uid) = uid else { return Err(wrong()) };
         keyring::reset_password_with_kit(&data_dir, &uid, &key, &pw).map_err(|e| match e {
             RecoverError::WrongKit => wrong(),
@@ -728,25 +823,35 @@ pub async fn recovery_kit(
     let sealed = run_kdf(
         &state,
         KdfKind::Session,
-        move || -> ApiResult<Option<SealedRecoveryKit>> {
+        move || -> ApiResult<Option<(SealedRecoveryKit, String)>> {
             if keyring::open_vault(&data_dir, &user.user_id, &pw).is_err() {
                 return Ok(None);
             }
-            let archive = user.config().archive_key()?;
-            Ok(Some(kit::seal(
+            let cfg = user.config();
+            let sealed = kit::seal(
                 &user.user_id,
                 &user.username,
-                &archive,
+                &cfg.archive_key()?,
+                &cfg.destinations,
                 &pass,
-            )?))
+            )?;
+            Ok(Some((sealed, cfg.destinations_hash())))
         },
     )
     .await??;
-    let Some(sealed) = sealed else {
+    let Some((sealed, holds)) = sealed else {
         record_failure(&state, &name, ip);
         return Err(ApiErr::unauthorized("password is wrong"));
     };
     clear_failures(&state, &name, ip);
+    // What this kit holds, for when the app confirms it was saved: destinations changed in
+    // between must still count as missing from it.
+    u.user
+        .update_config(move |c| {
+            c.kit_fetched = Some(holds);
+            Ok(())
+        })
+        .await?;
     if let Err(e) = u
         .user
         .index
@@ -762,6 +867,12 @@ pub async fn recovery_kit_saved(u: Unlocked) -> ApiResult<StatusCode> {
     u.user
         .update_config(|c| {
             c.recovery_kit_exported = true;
+            // What the kit just saved holds: as it was sealed, not as the destinations are now.
+            c.kit_destinations = Some(
+                c.kit_fetched
+                    .take()
+                    .unwrap_or_else(|| c.destinations_hash()),
+            );
             Ok(())
         })
         .await?;

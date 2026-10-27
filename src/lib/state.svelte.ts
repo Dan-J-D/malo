@@ -1,8 +1,9 @@
 // Global UI state (Svelte 5 runes) fed by REST calls and the live event stream.
-import { api, app, ApiError, type CertChange } from './api/client';
+import { api, app, ApiError, type CertChange, type ProfileInfo, type Unlocked } from './api/client';
 import type * as T from './api/types';
 
-export type Phase = 'boot' | 'connect' | 'login' | 'app';
+/** `unlock`: open a profile file. `connect`: choose a server by hand. */
+export type Phase = 'boot' | 'unlock' | 'connect' | 'login' | 'app';
 
 export const session = $state({
   phase: 'boot' as Phase,
@@ -14,6 +15,12 @@ export const session = $state({
   lockedReason: null as string | null,
   /** The pinned server presented another certificate: Connect warns before anything else. */
   certChanged: null as CertChange | null,
+  /** The profile file this session was opened from. */
+  profile: null as ProfileInfo | null,
+  /** Logged in from a profile while the recovery kit still has to be saved: Login asks for it. */
+  kitPending: null as T.Me | null,
+  /** Who logged in last on this connection, to fill in after a lock. Never written to disk. */
+  lastUsername: null as string | null,
 });
 
 export const live = $state({
@@ -107,6 +114,8 @@ export async function refreshAccounts() {
 
 export async function refreshDestinations() {
   live.destinations = await api.get<T.DestinationView[]>('/destinations');
+  // Whether the recovery kit still holds the destinations as they are.
+  void refreshMe().catch(() => undefined);
 }
 
 export async function refreshJobs() {
@@ -224,6 +233,7 @@ export function clearFound() {
 
 export async function enterApp(me: T.Me) {
   session.me = me;
+  session.lastUsername = me.username;
   session.lockedReason = null;
   // Route first, so a page left open by a previous user (e.g. Admin) never mounts for this one.
   route.path = '/dashboard';
@@ -239,13 +249,59 @@ export async function enterApp(me: T.Me) {
   }
 }
 
+/** Back to logging in. A session opened from a profile goes back to the profile's password
+ *  instead (the Rust side forgets the open profile on lock and log out). */
 export function toLogin(reason: string | null) {
   session.lockedReason = reason;
   session.me = null;
-  session.phase = 'login';
+  if (session.profile) {
+    void app.closeProfile();
+    session.phase = 'unlock';
+  } else {
+    session.phase = 'login';
+  }
 }
 
 export async function logout(lock: boolean) {
   await app.logout(lock).catch(() => undefined);
   toLogin(lock ? 'Locked — keys were wiped from the server.' : null);
+}
+
+/** The first screen: profiles when there are any to open, otherwise connecting by hand. */
+export async function toStart() {
+  session.me = null;
+  session.lastUsername = null;
+  session.profile = null;
+  session.local = false;
+  session.status = null;
+  session.setupToken = null;
+  const p = await app.profiles().catch(() => null);
+  session.phase = p?.recent.length ? 'unlock' : 'connect';
+}
+
+/** Leaves the server (and the profile) for the first screen. */
+export async function leaveServer() {
+  await app.logout(false).catch(() => undefined);
+  await app.disconnect().catch((e) => notify(errorText(e), 'error'));
+  session.lockedReason = null;
+  await toStart();
+}
+
+/** Continues after a profile was unlocked: into the app when its password logged in. */
+export async function fromProfile(u: Unlocked) {
+  session.profile = u.profile;
+  session.local = u.local;
+  session.url = u.url;
+  session.status = u.status;
+  session.setupToken = u.setup_token;
+  session.certChanged = null;
+  if (u.me && u.me.recovery_kit_pending) {
+    session.kitPending = u.me;
+    session.phase = 'login';
+  } else if (u.me) {
+    await enterApp(u.me);
+  } else {
+    session.lockedReason = u.login_error ? `The password kept in the profile didn't work: ${u.login_error}` : null;
+    session.phase = 'login';
+  }
 }
