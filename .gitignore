@@ -24,3 +24,4 @@ e2e/out/
 
 # recovery kits hold archive keys; never commit one saved by accident
 malo-recovery-kit-*.json
+__pycache__/
