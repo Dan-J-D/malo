@@ -870,3 +870,197 @@ async fn hostile_imap_clients() {
     c.log_in(&pass).await;
     r.shutdown(std::time::Duration::from_secs(5)).await;
 }
+
+/// Collections: grouped in the app, searched with `tag:`, and filed from mail apps through their
+/// `Collections/` folders.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn collections() {
+    setup_env();
+    let dir = tempfile::tempdir().unwrap();
+    let r = start_server(dir.path(), |c| {
+        c.imap_listen = Some("127.0.0.1:0".parse().unwrap());
+    })
+    .await;
+    let imap = r.imap_addr.unwrap();
+    let admin = bootstrap(&r).await;
+    let mut input = imap_input("Work", "me@example.com", 1);
+    input.enabled = false;
+    let acc: AccountView = admin.post("/accounts", &input).await;
+    let me: Me = admin.get("/me").await;
+    let mut ids = vec![];
+    {
+        let user = r.state.keyring.get(&me.id).unwrap();
+        let ctx = malo_server::jobs::job_ctx(&r.state, &user, "t", Default::default());
+        let inbox = user
+            .index
+            .upsert_mailbox(&acc.id, "INBOX", "INBOX", "INBOX", Some("/"), None, 7)
+            .unwrap();
+        for uid in 1..=3u32 {
+            let raw = format!(
+                "From: a@example.com\r\nSubject: number {uid}\r\nMessage-ID: <{uid}@x>\r\n\r\nbody {uid}\r\n"
+            );
+            let id = user
+                .index
+                .insert_message(&NewMessage {
+                    account: &acc.id,
+                    run: None,
+                    size: raw.len() as u64,
+                    internaldate: Some(chrono::Utc::now()),
+                    message_id_hdr: None,
+                    gm_msgid: None,
+                    envelope: &malo_core::index::empty_envelope(),
+                    state: MessageState::Stored,
+                    sha256: Some(&sha256_hex(raw.as_bytes())),
+                })
+                .unwrap();
+            user.index
+                .add_membership(id, inbox.id, uid, &[], &[])
+                .unwrap();
+            ctx.spool_put(id, raw.as_bytes()).unwrap();
+            ids.push(id);
+        }
+    }
+
+    let receipts: Collection = admin
+        .post(
+            "/collections",
+            &CollectionInput {
+                name: " Receipts ".into(),
+                mail_folder: true,
+            },
+        )
+        .await;
+    assert_eq!((receipts.name.as_str(), receipts.count), ("Receipts", 0));
+    let dup = admin
+        .call::<_, Collection>(
+            reqwest::Method::POST,
+            "/collections",
+            Some(&CollectionInput {
+                name: "receipts".into(),
+                mail_folder: false,
+            }),
+        )
+        .await;
+    assert_eq!(dup.unwrap_err().0, 409);
+    let bad = admin
+        .call::<_, Collection>(
+            reqwest::Method::POST,
+            "/collections",
+            Some(&CollectionInput {
+                name: "a/b".into(),
+                mail_folder: false,
+            }),
+        )
+        .await;
+    assert_eq!(bad.unwrap_err().0, 400);
+    let members = format!("/collections/{}/messages", receipts.id);
+    let res: CollectionMembersResult = admin
+        .post(
+            &members,
+            &CollectionMembersRequest {
+                ids: vec![ids[0], ids[0]],
+                add: true,
+            },
+        )
+        .await;
+    assert_eq!((res.changed, res.collection.count), (1, 1));
+    let found: MessageList = admin.get("/messages?q=tag%3AReceipts").await;
+    assert_eq!(found.total, 1);
+    assert_eq!(found.messages[0].collections, vec!["Receipts".to_string()]);
+
+    let login: MailLoginCreated = admin
+        .put(
+            &format!("/accounts/{}/mail-login", acc.id),
+            &MailLoginRequest {
+                username: "collector".into(),
+                password_length: None,
+            },
+        )
+        .await;
+    let mut s = imap_login(imap, "collector", &login.password)
+        .await
+        .unwrap();
+    let names: Vec<String> = s
+        .list(Some(""), Some("*"))
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap()
+        .iter()
+        .map(|n| n.name().to_string())
+        .collect();
+    assert_eq!(names, vec!["Collections", "Collections/Receipts", "INBOX"]);
+    assert_eq!(s.select("Collections/Receipts").await.unwrap().exists, 1);
+
+    // Copying into the folder adds to the collection; moving takes it out of INBOX's view too.
+    assert_eq!(s.select("INBOX").await.unwrap().exists, 3);
+    s.uid_copy("2", "Collections/Receipts").await.unwrap();
+    s.uid_mv("3", "Collections/Receipts").await.unwrap();
+    let list: Vec<Collection> = admin.get("/collections").await;
+    assert_eq!(list[0].count, 3);
+    assert_eq!(s.select("INBOX").await.unwrap().exists, 2);
+    assert!(s
+        .append(
+            "Collections/Receipts",
+            None,
+            None,
+            b"Subject: x\r\n\r\ny\r\n"
+        )
+        .await
+        .is_err());
+
+    // Deleting there takes it out of the collection, never out of the backup.
+    assert_eq!(s.select("Collections/Receipts").await.unwrap().exists, 3);
+    let _: Vec<_> = s
+        .uid_store("1", "+FLAGS (\\Deleted)")
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    let _: Vec<_> = s.expunge().await.unwrap().try_collect().await.unwrap();
+    let list: Vec<Collection> = admin.get("/collections").await;
+    assert_eq!(list[0].count, 2);
+    let all: MessageList = admin.get("/messages").await;
+    assert_eq!(all.total, 3);
+    // Added again from the app, it shows again (under a new UID).
+    let _: CollectionMembersResult = admin
+        .post(
+            &members,
+            &CollectionMembersRequest {
+                ids: vec![ids[0]],
+                add: true,
+            },
+        )
+        .await;
+    assert_eq!(s.select("Collections/Receipts").await.unwrap().exists, 3);
+
+    // Renamed, the folder follows; deleted, it's gone and the messages stay.
+    let renamed: Collection = admin
+        .put(
+            &format!("/collections/{}", receipts.id),
+            &CollectionInput {
+                name: "Bills".into(),
+                mail_folder: true,
+            },
+        )
+        .await;
+    assert_eq!(renamed.count, 3);
+    assert_eq!(s.select("Collections/Bills").await.unwrap().exists, 3);
+    assert!(s.select("Collections/Receipts").await.is_err());
+    assert_eq!(
+        admin
+            .status_of(
+                reqwest::Method::DELETE,
+                &format!("/collections/{}", receipts.id)
+            )
+            .await,
+        204
+    );
+    assert!(s.select("Collections/Bills").await.is_err());
+    let all: MessageList = admin.get("/messages").await;
+    assert_eq!(all.total, 3);
+    s.logout().await.unwrap();
+    r.shutdown(std::time::Duration::from_secs(5)).await;
+}

@@ -2,11 +2,12 @@
   import { onDestroy, tick } from 'svelte';
   import { fly, slide } from 'svelte/transition';
   import { ms, ease } from '../motion';
-  import { session, route, live, scope, go, logout, attempt, refreshSavedSearches } from '../state.svelte';
+  import { session, route, live, scope, go, logout, attempt, refreshSavedSearches, refreshCollections } from '../state.svelte';
   import { api } from '../api/client';
   import type * as T from '../api/types';
   import { ask } from '../confirm.svelte';
   import SavedSearchDialog from './SavedSearchDialog.svelte';
+  import CollectionDialog from './CollectionDialog.svelte';
   import { until } from '../format';
   import Icon from './Icon.svelte';
   import Avatar from './Avatar.svelte';
@@ -52,6 +53,24 @@
     { label: s.mail_folder ? 'Hide from mail apps' : 'Show in mail apps', icon: 'inbox', run: () => saveSearch(s, { mail_folder: !s.mail_folder }) },
     '-',
     { label: 'Delete…', icon: 'x', danger: true, run: () => deleteSearch(s) },
+  ];
+  // Collections, listed under the saved searches.
+  let editingCollection = $state<T.Collection | null>(null);
+  async function showCollection(c: T.Collection, mail_folder: boolean) {
+    await attempt(() => api.put(`/collections/${c.id}`, { name: c.name, mail_folder }));
+    await refreshCollections().catch(() => undefined);
+  }
+  async function deleteCollection(c: T.Collection) {
+    if (!(await ask({ title: `Delete the collection “${c.name}”?`, body: `Its ${Number(c.count).toLocaleString()} message${c.count === 1 ? '' : 's'} stay where they are in your backup${c.mail_folder ? ', and its folder disappears from mail apps' : ''}. No mail is deleted.`, confirm: 'Delete', danger: true }))) return;
+    await attempt(() => api.del(`/collections/${c.id}`), 'Collection deleted');
+    await refreshCollections().catch(() => undefined);
+    if (route.path.startsWith(`/browse?collection=${c.id}`)) go('/browse');
+  }
+  const collectionMenu = (c: T.Collection): Entry[] => [
+    { label: 'Rename…', icon: 'pencil', run: () => (editingCollection = c) },
+    { label: c.mail_folder ? 'Hide from mail apps' : 'Show in mail apps', icon: 'inbox', run: () => showCollection(c, !c.mail_folder) },
+    '-',
+    { label: 'Delete…', icon: 'x', danger: true, run: () => deleteCollection(c) },
   ];
   let now = $state(Date.now());
   const timer = setInterval(() => (now = Date.now()), 30_000);
@@ -196,6 +215,17 @@
             {#if s.mail_folder}<span class="text-faint" title="Shown in mail apps"><Icon name="inbox" size={12} /></span>{/if}
           </a>
         {/each}
+        {#each live.collections as c (c.id)}
+          {@const active = route.path.startsWith(`/browse?collection=${c.id}`)}
+          <a href="#/browse?collection={c.id}" aria-current={active ? 'page' : undefined} {@attach contextMenu(() => collectionMenu(c))}
+            title={`Collection: ${Number(c.count).toLocaleString()} message${c.count === 1 ? '' : 's'}` + (c.mail_folder ? '\nShown in mail apps' : '')}
+            class="group flex items-center gap-2 rounded-lg py-1 pr-2.5 pl-8 text-[0.9rem] no-underline! {active ? 'font-medium text-fg' : 'text-muted hover:bg-hover/60 hover:text-fg'}">
+            <span class="text-faint"><Icon name="folder" size={13} /></span>
+            <span class="min-w-0 flex-1 truncate">{c.name}</span>
+            {#if c.mail_folder}<span class="text-faint" title="Shown in mail apps"><Icon name="inbox" size={12} /></span>{/if}
+            <span class="text-[0.75rem] text-faint tabular-nums">{Number(c.count).toLocaleString()}</span>
+          </a>
+        {/each}
       {/if}
     {/each}
   </div>
@@ -257,6 +287,9 @@
 
 {#if editingSearch}
   <SavedSearchDialog search={editingSearch} onclose={() => (editingSearch = null)} />
+{/if}
+{#if editingCollection}
+  <CollectionDialog collection={editingCollection} onclose={() => (editingCollection = null)} />
 {/if}
 
 <svelte:window

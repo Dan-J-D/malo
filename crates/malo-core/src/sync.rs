@@ -684,6 +684,7 @@ pub async fn write_manifests(
         if msg.account != account.id {
             continue;
         }
+        let collections = ctx.index.collections_of(msg.id)?;
         for ms in ctx.index.memberships(msg.id)? {
             let (Some(entries), Some(mb)) =
                 (by_mailbox.get_mut(&ms.mailbox), boxes.get(&ms.mailbox))
@@ -708,6 +709,7 @@ pub async fn write_manifests(
                 object_path: rep.object_path.clone(),
                 envelope: msg.envelope.clone(),
                 stored_size: (rep.stored_size > 0).then_some(rep.stored_size),
+                collections: collections.clone(),
             });
         }
     }
@@ -748,6 +750,21 @@ pub fn mark_manifests_dirty(
 ) -> anyhow::Result<()> {
     ctx.index
         .kv_set(&manifest_dirty_key(account_id, destination_id), "1")
+}
+
+/// Changes kept in the manifests but made outside a job (collections): every manifest of these
+/// accounts on these destinations is rewritten by the next backup.
+pub fn manifests_changed(
+    index: &crate::index::Index,
+    accounts: &[String],
+    destinations: &[String],
+) -> anyhow::Result<()> {
+    for a in accounts {
+        for d in destinations {
+            index.kv_set(&manifest_dirty_key(a, d), "1")?;
+        }
+    }
+    Ok(())
 }
 
 fn object_deletes_key(destination_id: &str) -> String {

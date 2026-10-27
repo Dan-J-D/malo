@@ -182,6 +182,15 @@ pub fn router(state: SharedState) -> Router {
             "/saved-searches/{id}",
             put(update_saved_search).delete(delete_saved_search),
         )
+        .route(
+            "/collections",
+            get(list_collections).post(create_collection),
+        )
+        .route(
+            "/collections/{id}",
+            put(update_collection).delete(delete_collection),
+        )
+        .route("/collections/{id}/messages", post(collection_members))
         .route("/checks", get(list_checks))
         .route("/checks/latest", get(latest_check))
         .route("/audit", get(audit))

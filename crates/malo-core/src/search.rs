@@ -181,6 +181,8 @@ pub struct Search {
     /// Gmail category (`primary`, `social`, `promotions`, `updates`, `forums`), and whether the
     /// message must be in it (false: `-category:`).
     pub category: Option<(String, bool)>,
+    /// Collections (`tag:name`), and whether the message must be in it (false: `-tag:`).
+    pub tags: Vec<(String, bool)>,
 }
 
 /// Gmail's inbox categories, Primary first.
@@ -256,9 +258,13 @@ fn terms(input: &str) -> Vec<Term> {
                         column = Some(c);
                     } else if matches!(
                         name.as_str(),
-                        "has" | "is" | "before" | "after" | "category"
+                        "has" | "is" | "before" | "after" | "category" | "tag" | "collection"
                     ) {
-                        operator = Some(name);
+                        operator = Some(if name == "collection" {
+                            "tag".into()
+                        } else {
+                            name
+                        });
                     } else {
                         word.push(':');
                         continue;
@@ -291,7 +297,8 @@ fn terms(input: &str) -> Vec<Term> {
 /// - `OR` between two words or phrases, `-word` leaves out messages with it;
 /// - `after:2024-03-01` and `before:2024` (received; a day, month or year), `has:attachment`,
 ///   `is:purged` (deleted on the mail server), `is:unread`, `is:read`, `category:social` (Gmail:
-///   primary, social, promotions, updates, forums); `-` negates them too.
+///   primary, social, promotions, updates, forums), `tag:name` or `tag:"two words"` (in that
+///   collection); `-` negates them too.
 pub fn parse(input: &str, column: Option<&str>) -> Search {
     let column = column.and_then(|c| COLUMNS.iter().copied().find(|x| *x == c));
     let mut s = Search::default();
@@ -315,6 +322,9 @@ pub fn parse(input: &str, column: Option<&str>) -> Search {
                 }
                 ("after", d) if !t.negate => s.after = date_prefix(d).or(s.after),
                 ("before", d) if !t.negate => s.before = date_prefix(d).or(s.before),
+                ("tag", _) if !t.text.trim().is_empty() => {
+                    s.tags.push((t.text.trim().to_string(), !t.negate))
+                }
                 _ => {}
             }
             or_next = false;
@@ -904,6 +914,60 @@ JVBERg==\r\n\
             hits("body:alice").is_empty(),
             "not indexed: no body to search"
         );
+
+        let taxes = idx.create_collection("Taxes 2025", true).unwrap().unwrap();
+        let keep = idx.create_collection("keep", false).unwrap().unwrap();
+        assert_eq!(
+            idx.create_collection("KEEP", false).unwrap(),
+            Err(crate::collections::CollectionError::NameTaken)
+        );
+        let (n, accounts) = idx
+            .collection_members(&taxes.id, &[ids[0], ids[2], ids[0], 9999], true)
+            .unwrap()
+            .unwrap();
+        assert_eq!((n, accounts), (2, vec!["a".to_string()]));
+        idx.collection_members(&keep.id, &[ids[2]], true).unwrap();
+        assert_eq!(hits("tag:\"taxes 2025\""), vec![ids[0], ids[2]]);
+        assert_eq!(hits("collection:Keep"), vec![ids[2]]);
+        assert_eq!(hits("tag:\"Taxes 2025\" -tag:keep"), vec![ids[0]]);
+        assert_eq!(hits("tag:keep tag:\"Taxes 2025\""), vec![ids[2]]);
+        assert_eq!(hits("-tag:keep"), vec![ids[0], ids[1]]);
+        assert!(hits("tag:nothing").is_empty());
+        assert_eq!(
+            idx.collections_of(ids[2]).unwrap(),
+            vec!["keep".to_string(), "Taxes 2025".to_string()]
+        );
+        let shown = idx
+            .list_messages(
+                &MessageQuery {
+                    text: Some("tag:keep".into()),
+                    ..Default::default()
+                },
+                1,
+            )
+            .unwrap()
+            .1;
+        assert_eq!(shown[0].collections.len(), 2);
+        idx.collection_members(&taxes.id, &[ids[0]], false).unwrap();
+        assert_eq!(hits("tag:\"taxes 2025\""), vec![ids[2]]);
+        let (renamed, _) = idx
+            .update_collection(&keep.id, "Kept", false)
+            .unwrap()
+            .unwrap();
+        assert_eq!((renamed.name.as_str(), renamed.count), ("Kept", 1));
+        assert!(hits("tag:keep").is_empty());
+        assert_eq!(
+            idx.delete_collection(&keep.id).unwrap(),
+            Some(vec!["a".to_string()])
+        );
+        assert!(hits("tag:kept").is_empty());
+        assert_eq!(hits("alice"), vec![ids[0], ids[1]], "messages stay");
+        assert_eq!(
+            idx.restore_collections(ids[1], &["New one".into(), "bad/name".into()])
+                .unwrap(),
+            1
+        );
+        assert_eq!(hits("tag:\"new one\""), vec![ids[1]]);
 
         let from = idx.search_suggest("from", "AL", Some("a"), 8).unwrap();
         assert_eq!(from[0].value, "alice@example.com");

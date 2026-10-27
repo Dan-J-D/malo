@@ -1281,6 +1281,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
         let smart =
             malo_core::mailview::smart_folders(&user.config().saved_searches, &account, &folders);
         folders.extend(smart);
+        let collections =
+            malo_core::mailview::collection_folders(&user.index.collections()?, &folders);
+        folders.extend(collections);
         Ok(folders)
     }
 
@@ -1965,7 +1968,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
         if uids.is_empty() {
             return Ok(());
         }
-        user.index.imap_hide(account, &sel.folder.name, &uids)?;
+        if let FolderSource::Collection(id) = &sel.folder.source {
+            // Out of the collection, not out of the backup.
+            let messages: Vec<i64> = indices.iter().map(|i| sel.msgs[*i].message).collect();
+            if let Some((_, accounts)) = user.index.collection_members(id, &messages, false)? {
+                crate::routes::collections_changed(user, &accounts);
+            }
+        } else {
+            user.index.imap_hide(account, &sel.folder.name, &uids)?;
+        }
         let mut out = String::new();
         for i in indices.iter().rev() {
             out.push_str(&format!("* {} EXPUNGE\r\n", i + 1));
@@ -2013,9 +2024,25 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
             return self.ok(tag, what).await;
         }
         let uids: Vec<u32> = targets.iter().map(|i| sel.msgs[*i].uid).collect();
-        user.index
-            .imap_place(&account, &sel.folder.name, &uids, &folder.name, !mv)?;
-        if mv {
+        let from_collection = matches!(sel.folder.source, FolderSource::Collection(_));
+        if let FolderSource::Collection(id) = &folder.source {
+            // Into the collection: it shows here once the mail app looks again.
+            let messages: Vec<i64> = targets.iter().map(|i| sel.msgs[*i].message).collect();
+            if let Some((_, accounts)) = user.index.collection_members(id, &messages, true)? {
+                crate::routes::collections_changed(user, &accounts);
+            }
+        } else {
+            user.index.imap_place(
+                &account,
+                &sel.folder.name,
+                &uids,
+                &folder.name,
+                !mv || from_collection,
+            )?;
+        }
+        if mv && (from_collection || matches!(folder.source, FolderSource::Collection(_))) {
+            self.hide(user, &account, &targets, false).await?;
+        } else if mv {
             let mut out = String::new();
             for i in targets.iter().rev() {
                 out.push_str(&format!("* {} EXPUNGE\r\n", i + 1));
@@ -2091,13 +2118,22 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
             .await?;
             return Ok(Flow::Continue);
         }
+        if let FolderSource::Collection(_) = &folder.source {
+            self.line(&format!(
+                "{tag} NO [CANNOT] Collections hold backed-up mail; copy a message here from another folder"
+            ))
+            .await?;
+            return Ok(Flow::Continue);
+        }
         let upstream = match &folder.source {
             FolderSource::Label(l) if l == "\\Inbox" => "INBOX".to_string(),
             FolderSource::Primary | FolderSource::AllMail | FolderSource::Category(_) => {
                 "INBOX".to_string()
             }
             FolderSource::Label(l) => l.clone(),
-            FolderSource::Mailbox | FolderSource::Search(_) => folder.name.clone(),
+            FolderSource::Mailbox | FolderSource::Search(_) | FolderSource::Collection(_) => {
+                folder.name.clone()
+            }
         };
         let date = date.map(|d| format!("\"{d}\""));
         if let Err(e) = crate::net::check_account(&self.state, &account).await {

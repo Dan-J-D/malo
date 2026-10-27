@@ -11,6 +11,8 @@
   const COLUMNS = ['from', 'to', 'cc', 'bcc', 'subject', 'body', 'file', 'attachment', 'filename'];
   const FLAGS: Record<string, string[]> = { has: ['attachment'], is: ['unread', 'read', 'purged'] };
   const DATES = ['before', 'after'];
+  /** Collections (`collection:` is the same). */
+  const TAGS = ['tag', 'collection'];
   const DATE = /^\d{4}(-\d{2}(-\d{2})?)?$/;
 
   interface Tok {
@@ -34,8 +36,8 @@
       if (negate) i++;
       let field = '';
       const m = /^([a-zA-Z]+):/.exec(s.slice(i));
-      if (m && (COLUMNS.includes(m[1].toLowerCase()) || m[1].toLowerCase() in FLAGS || DATES.includes(m[1].toLowerCase()))) {
-        field = m[1].toLowerCase();
+      if (m && (COLUMNS.includes(m[1].toLowerCase()) || m[1].toLowerCase() in FLAGS || DATES.includes(m[1].toLowerCase()) || TAGS.includes(m[1].toLowerCase()))) {
+        field = m[1].toLowerCase() === 'collection' ? 'tag' : m[1].toLowerCase();
         i += m[0].length;
       }
       let value: string;
@@ -98,6 +100,7 @@
   import { api, qs } from '../api/client';
   import type * as T from '../api/types';
   import Icon from './Icon.svelte';
+  import { live } from '../state.svelte';
 
   let {
     value = $bindable(''),
@@ -200,6 +203,7 @@
     { op: 'file:', hint: 'Attachment name' },
     { op: 'after:', hint: 'Received on or after a date' },
     { op: 'before:', hint: 'Received before a date' },
+    { op: 'tag:', hint: 'In a collection' },
     { op: 'has:attachment', hint: 'With attachments', chip: { field: 'has', value: 'attachment', negate: false } },
     { op: 'is:unread', hint: 'Not read yet', chip: { field: 'is', value: 'unread', negate: false } },
     { op: 'is:read', hint: 'Already read', chip: { field: 'is', value: 'read', negate: false } },
@@ -246,6 +250,13 @@
       return FLAGS[t.field]
         .filter((v) => v.startsWith(t.value.toLowerCase()))
         .map((v) => ({ key: v, label: `${neg ? '-' : ''}${t.field}:${v}`, hint: OPS.find((o) => o.op === `${t.field}:${v}`)?.hint, chip: { field: t.field, value: v, negate: neg } }));
+    }
+    if (t.field === 'tag') {
+      const w = t.value.toLowerCase();
+      return live.collections
+        .filter((c) => c.name.toLowerCase().includes(w))
+        .slice(0, 8)
+        .map((c) => ({ key: c.id, label: c.name, hint: `${Number(c.count).toLocaleString()} message${c.count === 1 ? '' : 's'}`, chip: { field: 'tag', value: c.name, negate: neg } }));
     }
     const kind = t.field === 'from' ? 'from' : ['to', 'cc', 'bcc'].includes(t.field) ? 'to' : ['file', 'attachment', 'filename'].includes(t.field) ? 'file' : null;
     if (!kind || !remote || remote.field !== kind || remote.prefix !== t.value) return [];
@@ -337,7 +348,7 @@
   function chipText(c: Chip): [string, string] {
     if (c.field === 'has') return ['', c.negate ? 'No attachment' : 'Has attachment'];
     if (c.field === 'is') return ['', { unread: 'Unread', read: 'Read', purged: 'Deleted on server' }[c.value] ?? c.value];
-    const names: Record<string, string> = { from: 'From', to: 'To', cc: 'Cc', bcc: 'Bcc', subject: 'Subject', body: 'Body', file: 'File', attachment: 'File', filename: 'File', before: 'Before', after: 'After' };
+    const names: Record<string, string> = { from: 'From', to: 'To', cc: 'Cc', bcc: 'Bcc', subject: 'Subject', body: 'Body', file: 'File', attachment: 'File', filename: 'File', before: 'Before', after: 'After', tag: 'Collection' };
     return [c.field ? names[c.field] ?? c.field : '', c.label ?? c.value];
   }
 
@@ -392,6 +403,7 @@
     ['file:', 'Attachment name: file:pdf'],
     ['after:', 'Received on or after: after:2024-03-01, after:2024-03, after:2024'],
     ['before:', 'Received before: before:2025'],
+    ['tag:', 'In a collection: tag:"Taxes 2025" (-tag: for the others)'],
     ['has:attachment', 'Messages with attachments'],
     ['is:unread', 'Not read yet (is:read for the others)'],
     ['is:purged', 'Deleted on the mail server, only in the backup'],

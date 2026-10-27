@@ -313,6 +313,9 @@ fn import_entry(
         ctx.index
             .add_membership(msg_id, mb_id, e.uid, &e.flags, &e.labels)?;
     }
+    if !e.collections.is_empty() {
+        ctx.index.restore_collections(msg_id, &e.collections)?;
+    }
     let have = ctx
         .index
         .replicas_of(msg_id)?
@@ -418,9 +421,13 @@ mod tests {
             object_path: path.into(),
             envelope: crate::index::empty_envelope(),
             stored_size: None,
+            collections: vec![],
         };
+        // Collections come back by name; a name no collection could have is skipped.
+        let mut tagged = entry(good_path, "aaaaaaaa-1111");
+        tagged.collections = vec!["Taxes".into(), "../bad/name".into()];
         let entries = vec![
-            entry(good_path, "aaaaaaaa-1111"),
+            tagged,
             entry("malo/../../../../etc/passwd", "aaaaaaaa-1111"),
             entry("other-root/x.eml", "aaaaaaaa-1111"),
             entry("malo/./x.eml", "aaaaaaaa-1111"),
@@ -442,5 +449,12 @@ mod tests {
         let reps = ctx.index.replicas_in("d1").unwrap();
         assert_eq!(reps.len(), 1);
         assert_eq!(reps[0].object_path, good_path);
+        let cols = ctx.index.collections().unwrap();
+        assert_eq!(cols.len(), 1);
+        assert_eq!((cols[0].name.as_str(), cols[0].count), ("Taxes", 1));
+        assert_eq!(
+            ctx.index.collections_of(reps[0].message).unwrap(),
+            vec!["Taxes".to_string()]
+        );
     }
 }

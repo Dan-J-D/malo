@@ -165,6 +165,19 @@ CREATE TABLE IF NOT EXISTS drafts (
     message TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS collections (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    mail_folder INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS collection_members (
+    collection TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+    message INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    added_at TEXT NOT NULL,
+    PRIMARY KEY(collection, message)
+);
+CREATE INDEX IF NOT EXISTS collection_members_message ON collection_members(message);
 CREATE TABLE IF NOT EXISTS tombstones (
     account TEXT NOT NULL,
     mailbox TEXT NOT NULL,
@@ -1889,8 +1902,24 @@ fn query_messages_on(
           AND (?5 IS NULL OR instr(',' || ?5 || ',', ',' || g.state || ',') > 0)
           AND (?7 IS NULL OR g.id<=?7)
           AND (?20 IS NULL OR (?20='spam' AND {is_spam}) OR (?20='trash' AND {is_trash})
-            OR (?20='mail' AND NOT {is_spam} AND NOT {is_trash}))"
+            OR (?20='mail' AND NOT {is_spam} AND NOT {is_trash}))
+          AND (?23 IS NULL OR NOT EXISTS(SELECT 1 FROM json_each(?23) t WHERE NOT EXISTS(
+            SELECT 1 FROM collection_members cm JOIN collections co ON co.id=cm.collection
+            WHERE cm.message=g.id AND co.name=t.value COLLATE NOCASE)))
+          AND (?24 IS NULL OR NOT EXISTS(SELECT 1 FROM collection_members cm JOIN collections co ON co.id=cm.collection
+            WHERE cm.message=g.id AND co.name COLLATE NOCASE IN (SELECT value FROM json_each(?24))))"
     );
+    // `tag:` names the message must (or, with `-tag:`, must not) be in, as JSON lists.
+    let tag_list = |want: bool| {
+        let names: Vec<&str> = search
+            .tags
+            .iter()
+            .filter(|(_, w)| *w == want)
+            .map(|(n, _)| n.as_str())
+            .collect();
+        (!names.is_empty()).then(|| serde_json::to_string(&names).unwrap_or_default())
+    };
+    let (tags_in, tags_out) = (tag_list(true), tag_list(false));
     {
         let limit = if q.limit == 0 { 100 } else { q.limit.min(1000) };
         let p = params![
@@ -1917,7 +1946,9 @@ fn query_messages_on(
             search.category.as_ref().map(|c| c.1),
             folder,
             junk,
-            trash
+            trash,
+            tags_in,
+            tags_out
         ];
         // The total only matters for paging a list; counting is a full scan.
         let total: i64 = match id {
@@ -1939,7 +1970,8 @@ fn query_messages_on(
                 g.category,
                 CASE WHEN g.thread IS NULL THEN 1 ELSE
                   (SELECT COUNT(DISTINCT coalesce(t.message_id_hdr, t.id)) FROM messages t WHERE t.account=g.account AND t.thread=g.thread) END,
-                {is_spam}
+                {is_spam},
+                (SELECT group_concat(co.name, char(31)) FROM collection_members cm JOIN collections co ON co.id=cm.collection WHERE cm.message=g.id)
              FROM messages g {filter} ORDER BY {order} LIMIT ?8 OFFSET ?9",
             // Matches are marked with STX/ETX (U+0002, U+0003) for the app to highlight.
             snippet = if fts.is_some() {
@@ -1982,6 +2014,7 @@ fn query_messages_on(
                     thread_size: r.get::<_, i64>(16)? as u32,
                     preview: None,
                     spam: r.get::<_, bool>(17)?,
+                    collections: split_list(r.get::<_, Option<String>>(18)?.unwrap_or_default()),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;

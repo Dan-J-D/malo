@@ -3,7 +3,7 @@
   import { SvelteMap } from 'svelte/reactivity';
   import { api, app, qs } from '../api/client';
   import type * as T from '../api/types';
-  import { live, route, scope, go, attempt, accountName, setReviewed, markSpam, notify } from '../state.svelte';
+  import { live, route, scope, go, attempt, accountName, setReviewed, markSpam, notify, refreshCollections } from '../state.svelte';
   import { commands, type Command } from '../commands.svelte';
   import { contextMenu, menuUnder, copy, type Entry } from '../menu.svelte';
   import { reveal, shortDate, highlights, when, CATEGORIES, isGmail, type Category } from '../format';
@@ -20,6 +20,7 @@
   import RestoreDialog from '../components/RestoreDialog.svelte';
   import ExportDialog from '../components/ExportDialog.svelte';
   import SavedSearchDialog from '../components/SavedSearchDialog.svelte';
+  import CollectionsDialog from '../components/CollectionsDialog.svelte';
   import { fade } from 'svelte/transition';
   import { ms } from '../motion';
 
@@ -82,6 +83,49 @@
       onSearch(true);
     });
   });
+
+  // A collection from the sidebar: searched by its name, in every account.
+  const collectionId = $derived(params.get('collection'));
+  const viewing = $derived(live.collections.find((c) => c.id === collectionId) ?? null);
+  const collectionQuery = $derived(viewing ? `tag:"${viewing.name}"` : '');
+  $effect(() => {
+    const cq = collectionQuery;
+    if (!cq) return;
+    untrack(() => {
+      scope.account = '';
+      field = '';
+      q = cq;
+      folder = 'mail';
+      showDrafts = false;
+      newOnly = false;
+      onSearch(true);
+    });
+  });
+
+  // ── Collections: messages grouped by hand ──
+  let collecting = $state<T.MessageSummary[] | null>(null);
+  /** After messages went into or out of a collection: rows show it, a list filtered by
+   *  collections is loaded again. */
+  function collectionsChanged(ids: number[], name: string, add: boolean) {
+    if (/(^|\s)-?(tag|collection):/i.test(q)) return reset();
+    const set = new Set(ids);
+    const lower = name.toLowerCase();
+    touch((x) => {
+      if (!set.has(x.id)) return;
+      const rest = x.collections.filter((n) => n.toLowerCase() !== lower);
+      x.collections = add ? [...rest, name].sort((a, b) => a.localeCompare(b)) : rest;
+    });
+    for (const id of ids) {
+      const m = selected.get(id);
+      if (m) selected.set(id, { ...m, collections: add ? [...m.collections.filter((n) => n.toLowerCase() !== lower), name] : m.collections.filter((n) => n.toLowerCase() !== lower) });
+    }
+  }
+  async function removeFrom(c: T.Collection, list: T.MessageSummary[]) {
+    const ids = list.map((m) => m.id);
+    if (!(await attempt(() => api.post(`/collections/${c.id}/messages`, { ids, add: false }), `Removed from “${c.name}”`))) return;
+    collectionsChanged(ids, c.name, false);
+    await refreshCollections().catch(() => undefined);
+  }
 
   // ── Restoring to a mail account, and saving searches ──
   let restoring = $state<{ selection: T.RestoreSelection; what: string; from: string } | null>(null);
@@ -390,6 +434,9 @@
       { label: 'Export as mbox, Maildir or zip…', icon: 'download', run: () => exportMessages(chosen()) },
       { label: 'Restore to a mail account…', icon: 'upload', run: () => restoreMessages(chosen()) },
       '-',
+      { label: 'Add to collection…', icon: 'folder', keys: 'l', run: () => (collecting = chosen()) },
+      viewing && { label: `Remove from “${viewing.name}”`, icon: 'x', run: () => viewing && removeFrom(viewing, chosen()) },
+      '-',
       folder === 'spam'
         ? { label: 'Not spam', icon: 'inbox', keys: '!', run: () => spam([...selected.keys()], false) }
         : { label: 'Mark as spam', icon: 'ban', keys: '!', run: () => spam([...selected.keys()], true) },
@@ -407,7 +454,7 @@
     pages = Object.fromEntries(Object.entries(pages).map(([p, rows]) => [p, rows.map((m) => {
       const c = { ...m };
       f(c);
-      return c.reviewed === m.reviewed ? m : c;
+      return c.reviewed === m.reviewed && c.collections === m.collections ? m : c;
     })]));
   }
 
@@ -500,6 +547,11 @@
       { label: 'Export as mbox, Maildir or zip…', icon: 'download', run: () => exportMessages([m]) },
       { label: 'Restore to a mail account…', icon: 'upload', run: () => restoreMessages([m]) },
       '-',
+      { label: 'Add to collection…', icon: 'folder', keys: 'l', run: () => (collecting = [m]) },
+      ...live.collections
+        .filter((c) => m.collections.some((n) => n.toLowerCase() === c.name.toLowerCase()))
+        .map((c): Entry => ({ label: `Remove from “${c.name}”`, icon: 'x', run: () => removeFrom(c, [m]) })),
+      '-',
       m.spam
         ? { label: 'Not spam', icon: 'inbox', keys: '!', run: () => spam([m.id], false) }
         : { label: 'Mark as spam', icon: 'ban', keys: '!', run: () => spam([m.id], true) },
@@ -540,6 +592,8 @@
       { id: 'select-clear', group: 'Selection', label: 'Clear selection', keys: 'escape', disabled: !sel, run: clearSelection },
       { id: 'select-read', group: 'Selection', label: `Mark ${n} selected as read`, keys: 'shift+i', disabled: !sel, run: () => markSelected(true) },
       { id: 'select-unread', group: 'Selection', label: `Mark ${n} selected as unread`, keys: 'shift+u', disabled: !sel, run: () => markSelected(false) },
+      { id: 'collect', group: sel ? 'Selection' : 'Mail', label: sel ? `Add ${n} selected to a collection…` : 'Add to collection…', keys: 'l',
+        disabled: !sel && !m, run: () => (collecting = sel ? chosen() : m ? [m] : null) },
       { id: 'select-save', group: 'Selection', label: `Save ${n} selected as .eml files…`, disabled: !sel, run: saveSelected },
       sel
         ? { id: 'spam', group: 'Selection', label: folder === 'spam' ? `Mark ${n} selected as not spam` : `Mark ${n} selected as spam`, keys: '!', run: () => spam([...selected.keys()], folder !== 'spam') }
@@ -599,7 +653,8 @@
   const inFolder = $derived(folder !== 'mail' && !(account && mailbox));
 
   const newTotal = $derived(boxes.reduce((n, b) => n + Number(b.new_count), 0));
-  const title = $derived(account && mailbox ? reveal(boxes.find((b) => b.name === mailbox)?.display_name.split('/').pop() ?? mailbox) : folder === 'spam' ? 'Spam' : folder === 'trash' ? 'Trash' : account ? accountName(account) : 'All mail');
+  const inCollection = $derived(!!viewing && q.trim() === collectionQuery);
+  const title = $derived(inCollection && viewing ? viewing.name : account && mailbox ? reveal(boxes.find((b) => b.name === mailbox)?.display_name.split('/').pop() ?? mailbox) : folder === 'spam' ? 'Spam' : folder === 'trash' ? 'Trash' : account ? accountName(account) : 'All mail');
   // Mail a running backup found since the list was loaded (any account; a refresh sorts it out).
   const fresh = $derived(live.foundCount - baseFound);
 
@@ -627,6 +682,7 @@
         {/if}
         <button class="bg-transparent p-1.5 text-muted hover:text-fg" onclick={() => markSelected(true)} title="Mark as read (Shift+I)" aria-label="Mark as read"><Icon name="check" /></button>
         <button class="bg-transparent p-1.5 text-muted hover:text-fg" onclick={() => markSelected(false)} title="Mark as unread (Shift+U)" aria-label="Mark as unread"><Icon name="mail" /></button>
+        <button class="bg-transparent p-1.5 text-muted hover:text-fg" onclick={() => (collecting = chosen())} title="Add to collection… (l)" aria-label="Add to collection"><Icon name="folder" /></button>
         <button class="bg-transparent p-1.5 text-muted hover:text-fg" onclick={saveSelected} title="Save as .eml files…" aria-label="Save as .eml files"><Icon name="download" /></button>
         {#if folder === 'spam'}
           <button class="bg-transparent p-1.5 text-muted hover:text-fg" onclick={() => spam([...selected.keys()], false)} title="Not spam (!)" aria-label="Not spam"><Icon name="inbox" /></button>
@@ -640,7 +696,7 @@
       </header>
     {:else}
       <header class="flex h-13 flex-none items-center gap-2 border-b border-line px-4">
-        <Icon name={inFolder ? (folder === 'spam' ? 'ban' : 'trash') : 'inbox'} />
+        <Icon name={inFolder ? (folder === 'spam' ? 'ban' : 'trash') : inCollection ? 'folder' : 'inbox'} />
         <h1 class="m-0 flex-1 truncate text-base font-semibold">{title}</h1>
         <button class="bg-transparent p-1.5 text-muted hover:text-fg" onclick={markAll} title="Mark everything in this view as read (Shift+A)" aria-label="Mark all read">
           <Icon name="checks" size={15} />
@@ -873,6 +929,7 @@
         <span class="flex flex-none items-center gap-1.5">
           {#if cat}<span class={cat.tone} title={cat.label}><Icon name={cat.icon} size={13} /></span>{/if}
           {#if m.envelope.attachment_count}<span class="text-faint" title="{m.envelope.attachment_count} attachment(s)"><Icon name="paperclip" size={13} /></span>{/if}
+          {#if m.collections.length}<span class="text-faint" title="In {m.collections.join(', ')}" role="img" aria-label="In collections: {m.collections.join(', ')}"><Icon name="folder" size={13} /></span>{/if}
           {#if m.spam && folder !== 'spam'}<span class="text-warn" title="Spam"><Icon name="ban" size={13} /></span>{/if}
           <!-- Two marks side by side, like sent/delivered ticks: the first for the backup, the
                second for the account's mail server. A cross where it isn't (yet). -->
@@ -906,6 +963,9 @@
 {/if}
 {#if restoring}
   <RestoreDialog {...restoring} onclose={() => (restoring = null)} />
+{/if}
+{#if collecting}
+  <CollectionsDialog messages={collecting} onchange={collectionsChanged} onclose={() => (collecting = null)} />
 {/if}
 {#if savingSearch}
   <SavedSearchDialog query={q.trim()} {account} onclose={(s) => { savingSearch = false; if (s) go(`/browse?search=${s.id}`); }} />

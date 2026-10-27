@@ -1,6 +1,7 @@
 //! Malo core: crypto, IMAP, index, storage, backup, integrity checks, purge and the safe viewer.
 //! No HTTP or GUI code lives here.
 
+pub mod collections;
 pub mod compose;
 pub mod compress;
 pub mod config;

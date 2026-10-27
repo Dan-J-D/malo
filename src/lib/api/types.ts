@@ -232,7 +232,7 @@ name: string, display_name: string,
  */
 special_use: string | null, kind: MailFolderKind, shown: boolean, messages: number, };
 
-export type MailFolderKind = "mailbox" | "label" | "primary" | "all_mail" | "category" | "smart";
+export type MailFolderKind = "mailbox" | "label" | "primary" | "all_mail" | "category" | "smart" | "collection";
 
 export type MailViewSettings = { 
 /**
@@ -440,6 +440,23 @@ mail_folder: boolean, };
 
 export type SavedSearchInput = { name: string, query: string, account_id?: string, mail_folder: boolean, };
 
+export type Collection = { id: string, name: string, 
+/**
+ * Also a folder in mail apps (under `Collections/`), with the messages of the mail login's
+ * account. Copying mail into it adds it; deleting it there takes it out again.
+ */
+mail_folder: boolean, count: number, };
+
+export type CollectionInput = { name: string, mail_folder: boolean, };
+
+export type CollectionMembersRequest = { ids: Array<number>, add: boolean, };
+
+export type CollectionMembersResult = { 
+/**
+ * Messages that were added (or taken out); the others already were.
+ */
+changed: number, collection: Collection, };
+
 export type AlertChannel = { "kind": "webhook", url: string, } | { "kind": "ntfy", 
 /**
  * Defaults to `https://ntfy.sh`.
@@ -531,7 +548,11 @@ preview?: string | null,
 /**
  * Spam: marked so in Malo, or in the mail server's Junk folder and not marked otherwise.
  */
-spam: boolean, };
+spam: boolean, 
+/**
+ * Names of the collections it is in.
+ */
+collections: Array<string>, };
 
 export type MessageList = { total: number, messages: Array<MessageSummary>, 
 /**

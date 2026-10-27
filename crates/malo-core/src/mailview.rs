@@ -25,6 +25,9 @@ pub enum FolderSource {
     Category(String),
     /// A saved search (search box syntax): the account's messages it finds.
     Search(String),
+    /// A collection (by id): the account's messages in it. Copying mail here adds it to the
+    /// collection, expunging takes it out.
+    Collection(String),
 }
 
 /// Most messages a smart folder shows (the newest).
@@ -45,6 +48,29 @@ pub fn smart_folders(
             delimiter: Some("/".into()),
             special_use: None,
             source: FolderSource::Search(s.query.clone()),
+        })
+        .filter(|f| {
+            !existing
+                .iter()
+                .any(|e| e.name.eq_ignore_ascii_case(&f.name))
+        })
+        .collect()
+}
+
+/// Collections shown as folders (under `Collections/`) to mail apps. A name taken by a real
+/// folder is left out.
+pub fn collection_folders(
+    collections: &[malo_api::Collection],
+    existing: &[Folder],
+) -> Vec<Folder> {
+    collections
+        .iter()
+        .filter(|c| c.mail_folder)
+        .map(|c| Folder {
+            name: crate::collections::folder_name(&c.name),
+            delimiter: Some("/".into()),
+            special_use: None,
+            source: FolderSource::Collection(c.id.clone()),
         })
         .filter(|f| {
             !existing
@@ -274,7 +300,7 @@ const IN_LABEL: &str =
 /// account and `?2` the folder name) and its further parameters from `?3` on.
 fn belongs(source: &FolderSource, found: &str) -> (String, Vec<String>) {
     match source {
-        FolderSource::Search(_) => (
+        FolderSource::Search(_) | FolderSource::Collection(_) => (
             "m.message IN (SELECT value FROM json_each(?3))".into(),
             vec![found.to_string()],
         ),
@@ -449,6 +475,9 @@ impl Index {
         let found = match &folder.source {
             FolderSource::Search(q) => {
                 serde_json::to_string(&self.matching_ids(Some(account), q, SMART_FOLDER_MAX)?)?
+            }
+            FolderSource::Collection(id) => {
+                serde_json::to_string(&self.collection_message_ids(id, account)?)?
             }
             _ => String::new(),
         };

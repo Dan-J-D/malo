@@ -32,6 +32,7 @@
     if (f.kind === 'primary') return 'Primary';
     if (f.kind === 'all_mail') return 'All mail';
     if (f.kind === 'category') return 'Category';
+    if (f.kind === 'collection') return 'Collection';
     return (f.special_use && ROLES[f.special_use]) || (f.kind === 'label' ? 'Label' : '');
   }
 

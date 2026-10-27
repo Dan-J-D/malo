@@ -76,6 +76,10 @@ pub struct ManifestEntry {
     /// whose objects all have the size [`crypto::encrypted_len`] (or the plain size) gives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stored_size: Option<u64>,
+    /// Collections the message is in, by name (one list per message, repeated in each of its
+    /// entries).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collections: Vec<String>,
 }
 
 /// Result of [`Store::scan`].
@@ -1435,6 +1439,7 @@ pub(crate) mod tests {
             object_path: "x".into(),
             envelope: crate::index::empty_envelope(),
             stored_size: None,
+            collections: vec![],
         };
         let path = store.manifest_path(&a, "INBOX", "INBOX");
         store

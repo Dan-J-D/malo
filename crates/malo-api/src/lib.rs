@@ -480,6 +480,8 @@ pub enum MailFolderKind {
     Category,
     /// A saved search shown as a folder (`Smart/…`).
     Smart,
+    /// A collection shown as a folder (`Collections/…`).
+    Collection,
 }
 
 /// Which folders mail apps see. Messages a mail app moved keep their place either way.
@@ -980,6 +982,45 @@ pub struct SavedSearchInput {
     pub mail_folder: bool,
 }
 
+// ───────────────────────────── collections ─────────────────────────────
+
+/// Messages grouped by hand. Kept in Malo only (never on the mail server), in the backup's
+/// manifests too, so a rebuild brings them back. Searchable as `tag:<name>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct Collection {
+    pub id: String,
+    pub name: String,
+    /// Also a folder in mail apps (under `Collections/`), with the messages of the mail login's
+    /// account. Copying mail into it adds it; deleting it there takes it out again.
+    pub mail_folder: bool,
+    #[ts(type = "number")]
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct CollectionInput {
+    pub name: String,
+    #[serde(default)]
+    pub mail_folder: bool,
+}
+
+/// Adds messages to a collection, or takes them out.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct CollectionMembersRequest {
+    #[ts(type = "Array<number>")]
+    pub ids: Vec<i64>,
+    #[serde(default = "yes")]
+    pub add: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct CollectionMembersResult {
+    /// Messages that were added (or taken out); the others already were.
+    #[ts(type = "number")]
+    pub changed: u64,
+    pub collection: Collection,
+}
+
 // ───────────────────────────── alerts ─────────────────────────────
 
 /// Where alerts go.
@@ -1274,6 +1315,9 @@ pub struct MessageSummary {
     /// Spam: marked so in Malo, or in the mail server's Junk folder and not marked otherwise.
     #[serde(default)]
     pub spam: bool,
+    /// Names of the collections it is in.
+    #[serde(default)]
+    pub collections: Vec<String>,
 }
 
 /// A value for a search operator (`from:`, `to:`, `file:`), most used first.
@@ -1742,6 +1786,10 @@ pub fn typescript_bindings() -> String {
         UsageReport,
         SavedSearch,
         SavedSearchInput,
+        Collection,
+        CollectionInput,
+        CollectionMembersRequest,
+        CollectionMembersResult,
         AlertChannel,
         AlertSettings,
         AlertEvent,

@@ -1594,6 +1594,8 @@ fn mail_view_info(user: &UnlockedUser, account: &str) -> anyhow::Result<MailView
     let smart =
         malo_core::mailview::smart_folders(&user.config().saved_searches, account, &folders);
     folders.extend(smart);
+    let collections = malo_core::mailview::collection_folders(&user.index.collections()?, &folders);
+    folders.extend(collections);
     let gmail = folders
         .iter()
         .any(|f| f.special_use.as_deref() == Some("\\All") && f.source == FolderSource::Mailbox);
@@ -1611,6 +1613,7 @@ fn mail_view_info(user: &UnlockedUser, account: &str) -> anyhow::Result<MailView
                 FolderSource::AllMail => MailFolderKind::AllMail,
                 FolderSource::Category(_) => MailFolderKind::Category,
                 FolderSource::Search(_) => MailFolderKind::Smart,
+                FolderSource::Collection(_) => MailFolderKind::Collection,
             },
             shown: inbox || !settings.hidden.contains(&f.name),
             name: f.name,
@@ -2221,6 +2224,100 @@ pub async fn delete_saved_search(u: Unlocked, Path(id): Path<String>) -> ApiResu
         })
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ───────────────────────────── collections ─────────────────────────────
+
+/// Collections are listed in the manifests: those of these accounts are rewritten by the next
+/// backup, on every destination.
+pub(crate) fn collections_changed(user: &UnlockedUser, accounts: &[String]) {
+    if accounts.is_empty() {
+        return;
+    }
+    let destinations: Vec<String> = user
+        .config()
+        .destinations
+        .iter()
+        .map(|d| d.id.clone())
+        .collect();
+    best_effort(
+        malo_core::sync::manifests_changed(&user.index, accounts, &destinations),
+        "marking manifests for a rewrite",
+    );
+}
+
+fn collection_err(e: malo_core::collections::CollectionError) -> ApiErr {
+    use malo_core::collections::CollectionError as E;
+    match e {
+        E::NameTaken => ApiErr::conflict(e.to_string()),
+        E::NotFound => ApiErr::not_found("collection"),
+        E::Invalid(_) | E::TooMany => ApiErr::bad_request(e.to_string()),
+    }
+}
+
+pub async fn list_collections(u: Unlocked) -> ApiResult<Json<Vec<Collection>>> {
+    Ok(Json(u.user.index.collections()?))
+}
+
+pub async fn create_collection(
+    u: Unlocked,
+    Json(input): Json<CollectionInput>,
+) -> ApiResult<(StatusCode, Json<Collection>)> {
+    let c = u
+        .user
+        .index
+        .create_collection(&input.name, input.mail_folder)?
+        .map_err(collection_err)?;
+    Ok((StatusCode::CREATED, Json(c)))
+}
+
+pub async fn update_collection(
+    u: Unlocked,
+    Path(id): Path<String>,
+    Json(input): Json<CollectionInput>,
+) -> ApiResult<Json<Collection>> {
+    let (c, accounts) = u
+        .user
+        .index
+        .update_collection(&id, &input.name, input.mail_folder)?
+        .map_err(collection_err)?;
+    collections_changed(&u.user, &accounts);
+    Ok(Json(c))
+}
+
+pub async fn delete_collection(u: Unlocked, Path(id): Path<String>) -> ApiResult<StatusCode> {
+    let accounts = u
+        .user
+        .index
+        .delete_collection(&id)?
+        .ok_or_else(|| ApiErr::not_found("collection"))?;
+    collections_changed(&u.user, &accounts);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn collection_members(
+    u: Unlocked,
+    Path(id): Path<String>,
+    Json(req): Json<CollectionMembersRequest>,
+) -> ApiResult<Json<CollectionMembersResult>> {
+    if req.ids.len() > 100_000 {
+        return Err(ApiErr::bad_request("at most 100000 messages at once"));
+    }
+    let (changed, accounts) = u
+        .user
+        .index
+        .collection_members(&id, &req.ids, req.add)?
+        .ok_or_else(|| ApiErr::not_found("collection"))?;
+    collections_changed(&u.user, &accounts);
+    let collection = u
+        .user
+        .index
+        .collection(&id)?
+        .ok_or_else(|| ApiErr::not_found("collection"))?;
+    Ok(Json(CollectionMembersResult {
+        changed,
+        collection,
+    }))
 }
 
 pub async fn admin_put_settings(

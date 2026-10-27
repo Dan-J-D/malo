@@ -1190,6 +1190,33 @@ async fn rebuild_index_and_recovery_kit() {
             })
             .await,
     );
+    // A collection goes into the manifests with the next backup, and comes back with a rebuild.
+    let kept: Collection = fran
+        .post(
+            "/collections",
+            &CollectionInput {
+                name: "Kept forever".into(),
+                mail_folder: false,
+            },
+        )
+        .await;
+    let first: MessageList = fran.get("/messages?limit=1").await;
+    let _: CollectionMembersResult = fran
+        .post(
+            &format!("/collections/{}/messages", kept.id),
+            &CollectionMembersRequest {
+                ids: vec![first.messages[0].id],
+                add: true,
+            },
+        )
+        .await;
+    job_result::<serde_json::Value>(
+        &fran
+            .run_job(JobKind::Backup {
+                account_id: acc.id.clone(),
+            })
+            .await,
+    );
     let me: Me = fran.get("/me").await;
     assert!(me.recovery_kit_pending);
     // The app checks a password before keeping it in a profile; a wrong one is not a lost session.
@@ -1410,6 +1437,15 @@ async fn rebuild_index_and_recovery_kit() {
     let dests: Vec<DestinationView> = heir_api.get("/destinations").await;
     assert_eq!(dests.len(), 1);
     assert_eq!(dests[0].missing_secrets.as_deref(), Some(&[][..]));
+    let tagged: MessageList = heir_api.get("/messages?q=tag%3A%22kept%20forever%22").await;
+    assert_eq!(
+        tagged.total, 1,
+        "the collection comes back from the manifests"
+    );
+    assert_eq!(
+        tagged.messages[0].envelope.subject,
+        first.messages[0].envelope.subject
+    );
     let list: MessageList = heir_api.get("/messages?limit=100").await;
     let subjects: Vec<_> = list
         .messages

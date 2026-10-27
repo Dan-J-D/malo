@@ -38,6 +38,7 @@ export const live = $state({
   deleted: [] as number[],
   notices: [] as { id: number; level: string; message: string }[],
   savedSearches: [] as T.SavedSearch[],
+  collections: [] as T.Collection[],
 });
 
 /** Account chosen in the sidebar switcher; '' shows mail from every account. */
@@ -133,6 +134,10 @@ export async function refreshDestinations() {
 
 export async function refreshSavedSearches() {
   live.savedSearches = await api.get<T.SavedSearch[]>('/saved-searches');
+}
+
+export async function refreshCollections() {
+  live.collections = await api.get<T.Collection[]>('/collections');
 }
 
 export async function refreshJobs() {
@@ -266,7 +271,7 @@ export async function enterApp(me: T.Me) {
   session.phase = 'app';
   clearFound();
   scope.account = '';
-  await Promise.all([refreshAccounts(), refreshDestinations(), refreshJobs(), refreshSavedSearches()]).catch((e) => notify(errorText(e), 'error'));
+  await Promise.all([refreshAccounts(), refreshDestinations(), refreshJobs(), refreshSavedSearches(), refreshCollections()]).catch((e) => notify(errorText(e), 'error'));
   live.latestReport = await api.get<T.CheckReport | null>('/checks/latest').catch(() => null);
   await app.subscribe((batch) => handleBatch(batch.events));
   if (me.skipped_while_locked > 0) {
