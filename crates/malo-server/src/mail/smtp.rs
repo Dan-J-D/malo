@@ -372,6 +372,7 @@ pub async fn session<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     ip: IpAddr,
     greet: bool,
+    opened: std::time::Instant,
 ) -> anyhow::Result<()> {
     Session {
         io: BufReader::new(stream),
@@ -382,7 +383,7 @@ pub async fn session<S: AsyncRead + AsyncWrite + Unpin>(
         from: None,
         to: vec![],
         failed_auth: 0,
-        opened: std::time::Instant::now(),
+        opened,
         lines: 0,
     }
     .run()

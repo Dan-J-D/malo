@@ -66,13 +66,24 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Conn<S> {
                     .await
                     .map_err(|_| anyhow!("the SMTP server stopped responding"))??
                     .ok_or_else(|| anyhow!("the SMTP server closed the connection"))?;
-            let line = String::from_utf8_lossy(&line);
-            anyhow::ensure!(line.len() >= 3, "malformed SMTP reply: {}", line.trim());
-            let code: u16 = line[..3]
-                .parse()
-                .map_err(|_| anyhow!("malformed SMTP reply: {}", line.trim()))?;
-            let more = line.as_bytes().get(3) == Some(&b'-');
-            text.push(line.get(4..).unwrap_or("").trim_end().to_string());
+            // The code is read from the bytes: a reply with a multi-byte character among the first
+            // ones would put a string slice off a character boundary.
+            let code: u16 = line
+                .get(..3)
+                .filter(|c| c.iter().all(u8::is_ascii_digit))
+                .and_then(|c| std::str::from_utf8(c).ok()?.parse().ok())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "malformed SMTP reply: {}",
+                        String::from_utf8_lossy(&line).trim()
+                    )
+                })?;
+            let more = line.get(3) == Some(&b'-');
+            text.push(
+                String::from_utf8_lossy(line.get(4..).unwrap_or_default())
+                    .trim_end()
+                    .to_string(),
+            );
             if !more {
                 return Ok(Reply {
                     code,
@@ -302,7 +313,35 @@ pub async fn send(
 
 #[cfg(test)]
 mod tests {
-    use super::dot_stuff;
+    use super::{dot_stuff, Conn};
+    use std::time::Duration;
+
+    async fn reply_to(server: &'static [u8]) -> anyhow::Result<u16> {
+        let (mut ours, theirs) = tokio::io::duplex(4096);
+        tokio::io::AsyncWriteExt::write_all(&mut ours, server).await?;
+        drop(ours);
+        let mut c = Conn {
+            io: tokio::io::BufReader::new(theirs),
+            ehlo: vec![],
+        };
+        Ok(c.reply(Duration::from_secs(5)).await?.code)
+    }
+
+    /// A server (or anyone before STARTTLS) sending bytes that aren't a reply code gets an error,
+    /// not a panic.
+    #[tokio::test]
+    async fn malformed_replies_are_errors() {
+        assert_eq!(reply_to(b"250-a\r\n250 ok\r\n").await.unwrap(), 250);
+        for bad in [
+            &b"25\xc3\xa9 x\r\n"[..],
+            b"1\xff\r\n",
+            b"\xe2\x82\xac\r\n",
+            b"25\r\n",
+            b"+25 x\r\n",
+        ] {
+            assert!(reply_to(bad).await.is_err(), "{bad:?}");
+        }
+    }
 
     #[test]
     fn dot_stuffing() {

@@ -7,6 +7,7 @@
 
 mod common;
 
+use base64::Engine as _;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
@@ -1703,6 +1704,16 @@ async fn path_traversal_is_rejected_everywhere() {
     let mut gcs = gcs_dest("bad", "fine", true);
     gcs.options
         .insert("credential_path".into(), "/etc/shadow".into());
+    cases.push(gcs);
+    // An "external account" credential would read a server file and post it to its token URL.
+    let mut gcs = gcs_dest("bad", "fine", true);
+    gcs.options.remove("allow_anonymous");
+    gcs.options.insert(
+        "credential".into(),
+        base64::engine::general_purpose::STANDARD.encode(
+            r#"{"type":"external_account","audience":"a","subject_token_type":"x","token_url":"http://127.0.0.1:9/t","credential_source":{"file":"/etc/passwd","format":{"type":"text"}}}"#,
+        ),
+    );
     cases.push(gcs);
     for c in &cases {
         let created = status(kim.call(Method::POST, "/destinations", Some(c)).await);

@@ -1149,7 +1149,23 @@ async fn download_to(
         let _ = std::fs::remove_file(&tmp);
     }
     placed.map_err(err)?;
+    mark_downloaded(&target);
     Ok(Some(target.display().to_string()))
+}
+
+/// Marks a saved file as downloaded from the internet (Windows' "mark of the web"), so Office
+/// opens it in Protected View, blocks its macros, and SmartScreen checks it before it runs. Mail
+/// came from the internet whatever server Malo copied it from. Best effort: a file system without
+/// alternate data streams (FAT, network shares) can't hold the mark.
+fn mark_downloaded(path: &std::path::Path) {
+    #[cfg(windows)]
+    {
+        let mut stream = path.as_os_str().to_owned();
+        stream.push(":Zone.Identifier");
+        let _ = std::fs::write(stream, "[ZoneTransfer]\r\nZoneId=3\r\n");
+    }
+    #[cfg(not(windows))]
+    let _ = path;
 }
 
 /// Streams a server response into a new hidden file next to `target`, with a random name: it
@@ -1277,7 +1293,7 @@ async fn save_raw_many(
                 };
                 match place_new(&tmp, &target) {
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n < 10_000 => n += 1,
-                    res => break res,
+                    res => break res.map(|()| mark_downloaded(&target)),
                 }
             };
             let _ = std::fs::remove_file(&tmp);
@@ -1413,7 +1429,41 @@ fn open_external(app: AppHandle, url: String) -> CmdResult<()> {
     if !matches!(u.scheme(), "http" | "https" | "mailto") {
         return Err("only http, https and mailto links can be opened".into());
     }
+    let u = if u.scheme() == "mailto" {
+        safe_mailto(u)
+    } else {
+        u
+    };
     app.opener().open_url(u.as_str(), None::<&str>).map_err(err)
+}
+
+/// A mailto link with only the fields a message link needs. Some mail apps (Evolution, KMail,
+/// older Thunderbird) also take `attach=` and similar, which would attach a file of the user's
+/// to a reply addressed to whoever wrote the link.
+fn safe_mailto(mut u: url::Url) -> url::Url {
+    const KEEP: &[&str] = &["to", "cc", "bcc", "subject", "body", "in-reply-to"];
+    let kept: Vec<(String, String)> = u
+        .query_pairs()
+        .filter(|(k, _)| KEEP.contains(&k.to_ascii_lowercase().as_str()))
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    u.set_query(None);
+    if !kept.is_empty() {
+        // Spaces as %20: mail apps don't read the `+` of form encoding as a space.
+        let q = kept
+            .iter()
+            .map(|(k, v)| format!("{}={}", enc(k), enc(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+        u.set_query(Some(&q));
+    }
+    u
+}
+
+fn enc(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes())
+        .collect::<String>()
+        .replace('+', "%20")
 }
 
 #[tauri::command]
@@ -1566,6 +1616,23 @@ mod tests {
         place_new(&tmp, &dir.join("message-3.eml")).unwrap();
         assert_eq!(std::fs::read(dir.join("message-3.eml")).unwrap(), b"new");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mailto_links_cannot_attach_files() {
+        let clean = |s: &str| safe_mailto(url::Url::parse(s).unwrap()).to_string();
+        assert_eq!(
+            clean("mailto:a@b.example?subject=Hi%20there&attach=/home/me/.ssh/id_rsa&body=x"),
+            "mailto:a@b.example?subject=Hi%20there&body=x"
+        );
+        for bad in [
+            "mailto:a@b?ATTACH=~/.gnupg",
+            "mailto:a@b?attachment=file:///etc/passwd",
+            "mailto:a@b?x-attach=/x",
+        ] {
+            assert_eq!(clean(bad), "mailto:a@b", "{bad}");
+        }
+        assert_eq!(clean("mailto:a@b"), "mailto:a@b");
     }
 
     #[test]

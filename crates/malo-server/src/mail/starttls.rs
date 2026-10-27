@@ -3,12 +3,12 @@
 //! other until the connection timed out. Such an app gets a plain-text greeting that offers
 //! STARTTLS and nothing else, so passwords and mail still only travel encrypted.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
-use super::read_line;
+use super::{read_line, LOGIN_DEADLINE};
 
 /// How long a client gets to start TLS before it's taken for one waiting for a greeting.
 const SPEAKS_FIRST: Duration = Duration::from_millis(1500);
@@ -48,7 +48,7 @@ pub enum Outcome {
 }
 
 /// IMAP before STARTTLS: CAPABILITY, ID, NOOP, LOGOUT and STARTTLS; logins are refused.
-pub async fn imap(tcp: &mut TcpStream) -> anyhow::Result<Outcome> {
+pub async fn imap(tcp: &mut TcpStream, opened: Instant) -> anyhow::Result<Outcome> {
     const CAPS: &str = "IMAP4rev1 STARTTLS LOGINDISABLED";
     let mut io = BufReader::new(tcp);
     let mut tried_login = false;
@@ -58,7 +58,7 @@ pub async fn imap(tcp: &mut TcpStream) -> anyhow::Result<Outcome> {
         )
         .await?;
     for _ in 0..MAX_COMMANDS {
-        let Some(line) = next_line(&mut io).await? else {
+        let Some(line) = next_line(&mut io, opened).await? else {
             break;
         };
         let line = String::from_utf8_lossy(&line);
@@ -109,14 +109,14 @@ pub async fn imap(tcp: &mut TcpStream) -> anyhow::Result<Outcome> {
 }
 
 /// SMTP before STARTTLS: EHLO (offering STARTTLS), HELO, NOOP, RSET, QUIT and STARTTLS.
-pub async fn smtp(tcp: &mut TcpStream) -> anyhow::Result<Outcome> {
+pub async fn smtp(tcp: &mut TcpStream, opened: Instant) -> anyhow::Result<Outcome> {
     let mut io = BufReader::new(tcp);
     let mut tried_login = false;
     io.get_mut()
         .write_all(b"220 malo ESMTP Malo mail submission\r\n")
         .await?;
     for _ in 0..MAX_COMMANDS {
-        let Some(line) = next_line(&mut io).await? else {
+        let Some(line) = next_line(&mut io, opened).await? else {
             break;
         };
         let line = String::from_utf8_lossy(&line);
@@ -157,8 +157,13 @@ pub async fn smtp(tcp: &mut TcpStream) -> anyhow::Result<Outcome> {
     })
 }
 
-async fn next_line(io: &mut BufReader<&mut TcpStream>) -> anyhow::Result<Option<Vec<u8>>> {
-    match tokio::time::timeout(LINE_TIMEOUT, read_line(io, MAX_LINE)).await {
+/// A line, or None once the client has been quiet for too long or the login deadline has passed.
+async fn next_line(
+    io: &mut BufReader<&mut TcpStream>,
+    opened: Instant,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let left = LOGIN_DEADLINE.saturating_sub(opened.elapsed());
+    match tokio::time::timeout(LINE_TIMEOUT.min(left), read_line(io, MAX_LINE)).await {
         Ok(l) => Ok(l?),
         Err(_) => Ok(None),
     }

@@ -330,6 +330,9 @@ fn serve(
             let (state, acceptor) = (state.clone(), acceptor.clone());
             tokio::spawn(async move {
                 let _permit = (permit, ip_slot);
+                // The login deadline counts from here: the plain-text STARTTLS part and the TLS
+                // handshake use it up too.
+                let opened = std::time::Instant::now();
                 let mut tcp = tcp;
                 tcp.set_nodelay(true).ok();
                 let greet = match starttls::opening(&tcp).await {
@@ -339,8 +342,8 @@ fn serve(
                             tracing::info!("mail: {peer} connected without TLS; offering STARTTLS");
                         }
                         let outcome = match service {
-                            Service::Imap => starttls::imap(&mut tcp).await,
-                            Service::Smtp => starttls::smtp(&mut tcp).await,
+                            Service::Imap => starttls::imap(&mut tcp, opened).await,
+                            Service::Smtp => starttls::smtp(&mut tcp, opened).await,
                         };
                         match outcome {
                             Ok(starttls::Outcome::StartTls) => {
@@ -383,8 +386,8 @@ fn serve(
                         }
                     };
                 let res = match service {
-                    Service::Imap => imap::session(state, stream, peer.ip(), greet).await,
-                    Service::Smtp => smtp::session(state, stream, peer.ip(), greet).await,
+                    Service::Imap => imap::session(state, stream, peer.ip(), greet, opened).await,
+                    Service::Smtp => smtp::session(state, stream, peer.ip(), greet, opened).await,
                 };
                 if let Err(e) = res {
                     if imap::tracing_on() {

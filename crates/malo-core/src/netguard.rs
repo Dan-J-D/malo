@@ -173,10 +173,45 @@ pub fn storage_http_client() -> reqwest013::ClientBuilder {
         .tls_backend_preconfigured(Arc::unwrap_or_clone(crate::tls::webpki_config()))
 }
 
+/// With the block on, a URL whose host is an address given as a number must be public: HTTP
+/// clients connect to those directly, without asking [`Resolver`]. A URL without a scheme is
+/// read as https.
+pub fn check_url_literal(what: &str, url: &str) -> anyhow::Result<()> {
+    check_url_literal_with(what, url, blocking())
+}
+
+/// [`check_url_literal`] with an explicit setting.
+pub fn check_url_literal_with(what: &str, url: &str, block: bool) -> anyhow::Result<()> {
+    if !block {
+        return Ok(());
+    }
+    let url = url.trim();
+    let with_scheme = if url.contains("://") {
+        url.to_string()
+    } else {
+        format!("https://{url}")
+    };
+    let Ok(u) = reqwest::Url::parse(&with_scheme) else {
+        return Ok(());
+    };
+    let ip = match u.host() {
+        Some(url::Host::Ipv4(ip)) => IpAddr::V4(ip),
+        Some(url::Host::Ipv6(ip)) => IpAddr::V6(ip),
+        _ => return Ok(()),
+    };
+    if is_private(ip) {
+        anyhow::bail!(
+            "{what} is on a private network address ({ip}); this server only allows public addresses"
+        );
+    }
+    Ok(())
+}
+
 /// An HTTP(S) URL for credentials to be sent to: https, or http to this machine (for local test
 /// servers). With the block on, addresses given as numbers must be public too, as the resolver
 /// isn't asked about those.
 pub fn check_credential_url(what: &str, url: &str) -> anyhow::Result<()> {
+    check_url_literal(what, url)?;
     let u = reqwest::Url::parse(url).map_err(|_| anyhow::anyhow!("{what} isn't a valid URL"))?;
     let loopback = match u.host() {
         Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
@@ -259,6 +294,29 @@ mod tests {
         }
         let public = resolve_with("8.8.8.8", 53, true).await.unwrap();
         assert_eq!(public, vec!["8.8.8.8:53".parse().unwrap()]);
+    }
+
+    /// The resolver never sees addresses given as numbers, so they are checked from the URL.
+    #[test]
+    fn private_literals_in_urls() {
+        for u in [
+            "http://169.254.169.254/latest",
+            "https://10.0.0.5:9000",
+            "10.0.0.5:9000",
+            "http://[::1]:9/t",
+            "http://2130706433/",
+            "http://0x7f.1/",
+        ] {
+            assert!(check_url_literal_with("x", u, false).is_ok(), "{u}");
+            assert!(check_url_literal_with("x", u, true).is_err(), "{u}");
+        }
+        for u in [
+            "https://8.8.8.8/",
+            "https://s3.example.com",
+            "https://localhost/",
+        ] {
+            assert!(check_url_literal_with("x", u, true).is_ok(), "{u}");
+        }
     }
 
     #[test]
