@@ -117,7 +117,7 @@
       <label class="check"><input type="checkbox" class="switch" bind:checked={s.check_problems} /> An integrity check finds missing or damaged copies, or can't run</label>
       <label class="check"><input type="checkbox" class="switch" bind:checked={s.skipped_locked} /> Scheduled jobs are skipped because Malo is locked</label>
       {#if s.skipped_locked && hasPush}
-        <p class="muted small">While you're locked the server can't read your settings, so it keeps the ntfy, webhook and Apprise addresses above readable on its disk for this alert. Turn it off to keep them encrypted too.</p>
+        <p class="callout small" role="note"><strong>Stored unencrypted on the server.</strong> While you're locked the server can't read your settings, so for this alert it keeps the ntfy, webhook and Apprise addresses above, and the ntfy token, readable in <span class="mono">server.db</span>. Anyone with access to the server's data could use them to send you notifications. Turn this alert off to keep them encrypted with the rest of your settings.</p>
       {/if}
       {#if s.skipped_locked && hasEmail}
         <p class="muted small">Email can't send this one: the account's password stays sealed while you're locked.</p>
