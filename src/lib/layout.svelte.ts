@@ -40,3 +40,20 @@ export function navWidth(w: number): number {
 }
 
 export const navRail = () => panes.nav <= NAV_RAIL;
+
+/** Phone-sized window: one pane at a time, and a tab bar (with the sidebar as a drawer) instead
+ *  of the sidebar. */
+export const screen = $state({
+  phone: false,
+  drawer: false,
+  /** Writing a message: the tab bar steps aside, as it does while reading one. */
+  writing: false,
+});
+if (typeof window !== 'undefined') {
+  const mq = window.matchMedia('(max-width: 767px)');
+  screen.phone = mq.matches;
+  mq.addEventListener('change', (e) => {
+    screen.phone = e.matches;
+    if (!e.matches) screen.drawer = false;
+  });
+}

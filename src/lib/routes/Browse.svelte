@@ -3,11 +3,11 @@
   import { SvelteMap } from 'svelte/reactivity';
   import { api, app, qs } from '../api/client';
   import type * as T from '../api/types';
-  import { live, route, scope, go, attempt, accountName, setReviewed, notify } from '../state.svelte';
+  import { live, route, scope, go, attempt, accountName, setReviewed, markSpam, notify } from '../state.svelte';
   import { commands, type Command } from '../commands.svelte';
   import { contextMenu, menuUnder, copy, type Entry } from '../menu.svelte';
   import { reveal, shortDate, highlights, when, CATEGORIES, isGmail, type Category } from '../format';
-  import { panes, savePanes, LIST_MIN, LIST_MAX, LIST_DEFAULT } from '../layout.svelte';
+  import { panes, savePanes, screen, LIST_MIN, LIST_MAX, LIST_DEFAULT } from '../layout.svelte';
   import Viewer from '../components/Viewer.svelte';
   import Composer, { type ComposeInit } from '../components/Composer.svelte';
   import Avatar from '../components/Avatar.svelte';
@@ -30,6 +30,10 @@
   const account = $derived(scope.account);
   let mailbox = $state('');
   let newOnly = $state(false);
+  /** Spam and Trash are kept out of the list unless asked for (a mailbox shows all it has). */
+  let folder = $state<'mail' | 'spam' | 'trash'>('mail');
+  const folderParam = $derived(account && mailbox ? '' : folder);
+  let spamTotal = $state(0);
   let q = $state('');
   /** Search column for words without an operator ("Search in"). */
   let field = $state('');
@@ -112,6 +116,7 @@
   function loadBoxes() {
     const a = account;
     attempt(() => api.get<T.MailboxInfo[]>(`/mailboxes${qs({ account: a })}`)).then((b) => { if (a === account) boxes = b ?? []; });
+    attempt(() => api.get<T.MessageList>(`/messages${qs({ account: a, folder: 'spam', limit: 1 })}`)).then((r) => { if (a === account && r) spamTotal = r.total; });
   }
   $effect(() => {
     void account;
@@ -146,7 +151,7 @@
   const at = (i: number) => pages[Math.floor(i / PAGE)]?.[i % PAGE];
 
   const query = (p: number) =>
-    `/messages${qs({ account, mailbox: account ? mailbox : '', new: newOnly, q, field: q.trim() ? field : '', category: categoryParam, sort, limit: PAGE, offset: p * PAGE, max_id: maxId })}`;
+    `/messages${qs({ account, mailbox: account ? mailbox : '', folder: folderParam, new: newOnly, q, field: q.trim() ? field : '', category: categoryParam, sort, limit: PAGE, offset: p * PAGE, max_id: maxId })}`;
 
   async function fetchPage(p: number) {
     if (pages[p] || inflight.has(p)) return;
@@ -180,7 +185,7 @@
   }
 
   $effect(() => {
-    void account; void mailbox; void newOnly; void sort; void categoryParam;
+    void account; void mailbox; void folderParam; void newOnly; void sort; void categoryParam;
     untrack(reset);
   });
 
@@ -269,7 +274,7 @@
       const want = Math.min(total, SELECT_MAX);
       for (let offset = 0; offset < want; offset += 1000) {
         const r = await attempt(() => api.get<T.MessageList>(
-          `/messages${qs({ account, mailbox: account ? mailbox : '', new: newOnly, q, sort, limit: Math.min(1000, want - offset), offset, max_id: maxId })}`,
+          `/messages${qs({ account, mailbox: account ? mailbox : '', folder: folderParam, new: newOnly, q, sort, limit: Math.min(1000, want - offset), offset, max_id: maxId })}`,
         ));
         if (!r || g !== gen) return;
         for (const m of r.messages) selected.set(m.id, m);
@@ -283,6 +288,8 @@
   function rowClick(e: MouseEvent, m: T.MessageSummary, i: number) {
     if (e.shiftKey) return void selectRange(i);
     if (e.ctrlKey || e.metaKey) return toggle(m, i);
+    // On a phone, while choosing messages, a tap adds or removes one.
+    if (screen.phone && selected.size) return toggle(m, i);
     open(m, i);
   }
 
@@ -295,6 +302,16 @@
     touch((x) => { if (set.has(x.id)) x.reviewed = reviewed; });
     loadBoxes();
     notify(`Marked ${ids.length.toLocaleString()} as ${reviewed ? 'read' : 'unread'}`, 'success');
+  }
+
+  /** Spam or not: the rows leave this view (or join it), so the list reloads. */
+  async function spam(ids: number[], spam: boolean) {
+    const jobs = await markSpam(ids, spam);
+    if (!jobs) return;
+    pendingJobs = [...pendingJobs, ...jobs];
+    if (openId !== null && ids.includes(openId) && (folder === 'spam') !== spam) go('/browse');
+    reset();
+    loadBoxes();
   }
 
   async function saveSelected() {
@@ -334,6 +351,9 @@
       { label: 'Mark as unread', icon: 'mail', keys: 'shift+u', run: () => markSelected(false) },
       { label: `Save ${n === 1 ? '.eml' : `${n.toLocaleString()} .eml files`}…`, icon: 'download', run: saveSelected },
       '-',
+      folder === 'spam'
+        ? { label: 'Not spam', icon: 'inbox', keys: '!', run: () => spam([...selected.keys()], false) }
+        : { label: 'Mark as spam', icon: 'ban', keys: '!', run: () => spam([...selected.keys()], true) },
       { label: 'Delete from mail server…', icon: 'trash', keys: 'delete', danger: true, run: () => (deleteScope = 'server') },
       { label: 'Delete from backup…', icon: 'trash', keys: 'shift+delete', danger: true, run: () => (deleteScope = 'everywhere') },
       '-',
@@ -433,6 +453,9 @@
       subject && { label: 'Copy subject', icon: 'copy', run: () => copy(subject, 'Subject copied') },
       { label: 'Save .eml…', icon: 'download', run: () => attempt(() => app.saveRaw(m.id)) },
       '-',
+      m.spam
+        ? { label: 'Not spam', icon: 'inbox', keys: '!', run: () => spam([m.id], false) }
+        : { label: 'Mark as spam', icon: 'ban', keys: '!', run: () => spam([m.id], true) },
       { label: 'Delete from mail server…', icon: 'trash', danger: true, disabled: m.deleted_on_server, run: () => deleteOne(m, 'server') },
       { label: 'Delete from backup…', icon: 'trash', danger: true, run: () => deleteOne(m, 'everywhere') },
     ];
@@ -468,6 +491,11 @@
       { id: 'select-read', group: 'Selection', label: `Mark ${n} selected as read`, keys: 'shift+i', disabled: !sel, run: () => markSelected(true) },
       { id: 'select-unread', group: 'Selection', label: `Mark ${n} selected as unread`, keys: 'shift+u', disabled: !sel, run: () => markSelected(false) },
       { id: 'select-save', group: 'Selection', label: `Save ${n} selected as .eml files…`, disabled: !sel, run: saveSelected },
+      sel
+        ? { id: 'spam', group: 'Selection', label: folder === 'spam' ? `Mark ${n} selected as not spam` : `Mark ${n} selected as spam`, keys: '!', run: () => spam([...selected.keys()], folder !== 'spam') }
+        : { id: 'spam', group: 'Mail', label: m?.spam ? 'Not spam' : 'Mark as spam', keys: '!', disabled: !m, run: () => m && spam([m.id], !m.spam) },
+      { id: 'folder-spam', group: 'Mail', label: folder === 'spam' ? 'Leave Spam' : 'Show spam', keys: 'g s', disabled: !!(account && mailbox), run: () => openFolder(folder === 'spam' ? 'mail' : 'spam') },
+      { id: 'folder-trash', group: 'Mail', label: folder === 'trash' ? 'Leave Trash' : 'Show trash', keys: 'g t', disabled: !!(account && mailbox), run: () => openFolder(folder === 'trash' ? 'mail' : 'trash') },
       { id: 'select-del-server', group: 'Selection', label: sel ? `Delete ${n} selected from mail server…` : 'Delete from mail server…', keys: 'delete, #',
         disabled: !sel && !m, run: () => (sel ? (deleteScope = 'server') : m && deleteOne(m, 'server')) },
       { id: 'select-del-backup', group: 'Selection', label: sel ? `Delete ${n} selected from backup…` : 'Delete from backup…', keys: 'shift+delete',
@@ -502,8 +530,26 @@
     ];
   });
 
+  function openFolder(f: typeof folder) {
+    folder = f;
+    if (f !== 'mail') { showDrafts = false; newOnly = false; }
+    if (openId !== null) go('/browse');
+  }
+
+  $effect(() => {
+    screen.writing = composing !== null;
+    return () => (screen.writing = false);
+  });
+
+  // A mailbox shows everything in it, spam or not.
+  $effect(() => {
+    if (account && mailbox) untrack(() => (folder = 'mail'));
+  });
+  /** Showing Spam or Trash rather than the mail itself. */
+  const inFolder = $derived(folder !== 'mail' && !(account && mailbox));
+
   const newTotal = $derived(boxes.reduce((n, b) => n + Number(b.new_count), 0));
-  const title = $derived(account && mailbox ? reveal(boxes.find((b) => b.name === mailbox)?.display_name.split('/').pop() ?? mailbox) : account ? accountName(account) : 'All mail');
+  const title = $derived(account && mailbox ? reveal(boxes.find((b) => b.name === mailbox)?.display_name.split('/').pop() ?? mailbox) : folder === 'spam' ? 'Spam' : folder === 'trash' ? 'Trash' : account ? accountName(account) : 'All mail');
   // Mail a running backup found since the list was loaded (any account; a refresh sorts it out).
   const fresh = $derived(live.foundCount - baseFound);
 
@@ -515,10 +561,11 @@
   };
 </script>
 
-<div class="grid h-full gap-2" style="grid-template-columns: min({panes.list}px, 60%) minmax(0, 1fr)">
+<!-- On a phone, one pane at a time: the list, or the message (or draft) open in the reader. -->
+<div class="grid h-full {screen.phone ? '' : 'gap-2'}" style="grid-template-columns: {screen.phone ? 'minmax(0, 1fr)' : `min(${panes.list}px, 60%) minmax(0, 1fr)`}">
   <!-- Message list -->
-  <div class="relative min-h-0 min-w-0">
-  <section class="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-line bg-panel">
+  <div class="relative min-h-0 min-w-0 {screen.phone && (openId !== null || composing) ? 'hidden' : ''}">
+  <section class="flex h-full min-h-0 flex-col overflow-hidden bg-panel {screen.phone ? '' : 'rounded-xl border border-line'}">
     {#if selected.size}
       <!-- Same height as the title header, and swapped without a transition: the rows below must not move. -->
       <header bind:this={selBar} class="flex h-13 flex-none items-center gap-1 border-b border-line bg-accent/8 px-3" {@attach contextMenu(selectionMenu)}
@@ -531,6 +578,11 @@
         <button class="bg-transparent p-1.5 text-muted hover:text-fg" onclick={() => markSelected(true)} title="Mark as read (Shift+I)" aria-label="Mark as read"><Icon name="check" /></button>
         <button class="bg-transparent p-1.5 text-muted hover:text-fg" onclick={() => markSelected(false)} title="Mark as unread (Shift+U)" aria-label="Mark as unread"><Icon name="mail" /></button>
         <button class="bg-transparent p-1.5 text-muted hover:text-fg" onclick={saveSelected} title="Save as .eml files…" aria-label="Save as .eml files"><Icon name="download" /></button>
+        {#if folder === 'spam'}
+          <button class="bg-transparent p-1.5 text-muted hover:text-fg" onclick={() => spam([...selected.keys()], false)} title="Not spam (!)" aria-label="Not spam"><Icon name="inbox" /></button>
+        {:else}
+          <button class="bg-transparent p-1.5 text-muted hover:text-warn" onclick={() => spam([...selected.keys()], true)} title="Mark as spam (!)" aria-label="Mark as spam"><Icon name="ban" /></button>
+        {/if}
         <button class="bg-transparent p-1.5 text-muted hover:text-bad" onclick={(e) => menuUnder(e.currentTarget, [
           { label: 'Delete from mail server…', icon: 'trash', keys: 'delete', danger: true, run: () => (deleteScope = 'server') },
           { label: 'Delete from backup…', icon: 'trash', keys: 'shift+delete', danger: true, run: () => (deleteScope = 'everywhere') },
@@ -538,7 +590,7 @@
       </header>
     {:else}
       <header class="flex h-13 flex-none items-center gap-2 border-b border-line px-4">
-        <Icon name="inbox" />
+        <Icon name={inFolder ? (folder === 'spam' ? 'ban' : 'trash') : 'inbox'} />
         <h1 class="m-0 flex-1 truncate text-base font-semibold">{title}</h1>
         <button class="bg-transparent p-1.5 text-muted hover:text-fg" onclick={markAll} title="Mark everything in this view as read (Shift+A)" aria-label="Mark all read">
           <Icon name="checks" size={15} />
@@ -552,6 +604,22 @@
     <div class="flex flex-col gap-2.5 px-3 pt-3 pb-2">
       <SearchBox bind:this={searchBox} bind:value={q} bind:field {account} onchange={onSearch} />
 
+      {#if inFolder}
+        <!-- In place of the view switch, the same height: where this is, and the way back. -->
+        <div class="flex min-h-9 items-center gap-2.5 rounded-lg py-1.5 pr-1.5 pl-3 text-[0.85rem] {folder === 'spam' ? 'bg-warn/12 text-fg' : 'bg-raised text-fg'}" in:fade={{ duration: ms(150) }}>
+          <span class="flex-none {folder === 'spam' ? 'text-warn' : 'text-muted'}"><Icon name={folder === 'spam' ? 'ban' : 'trash'} size={14} /></span>
+          <span class="min-w-0 flex-1 leading-snug text-muted">
+            {#if folder === 'spam'}
+              Junk your mail server filed, and mail you marked. <span class="text-fg">Not spam</span> returns it to the inbox.
+            {:else}
+              In your mail server's Trash. The backup stays until you delete it.
+            {/if}
+          </span>
+          <button class="flex-none px-2 py-1 text-[0.85rem]" onclick={() => openFolder('mail')} title="Back to your mail">
+            <Icon name="arrow-left" size={13} /> {account ? accountName(account) : 'All mail'}
+          </button>
+        </div>
+      {:else}
       <Segmented label="Show" value={showDrafts ? 'drafts' : newOnly ? 'new' : 'all'}
         onchange={(v) => { showDrafts = v === 'drafts'; newOnly = v === 'new'; if (showDrafts) loadDrafts(); }}
         options={[
@@ -559,6 +627,7 @@
           { value: 'new', label: 'New', count: newTotal, title: "Messages you haven't read yet" },
           { value: 'drafts', label: 'Drafts', count: draftsInView.length || undefined, title: 'Messages you started writing (Shift+D)' },
         ]} />
+      {/if}
 
       {#if tabs && !showDrafts}
         <!-- Gmail categories: the chosen one is named, the others are icons with a tooltip. -->
@@ -617,11 +686,20 @@
     </div>
     {:else}
     <div class="flex items-center justify-between gap-2 px-4 pt-2 pb-1 text-[0.85rem] text-muted">
-      <span class="flex-1 truncate">{newOnly ? 'New since last visit' : 'Messages'} <span class="text-faint tabular-nums">[{total.toLocaleString()}]</span></span>
+      <span class="flex-1 truncate">{inFolder ? (folder === 'spam' ? 'Spam' : 'Trash') : newOnly ? 'New since last visit' : 'Messages'} <span class="text-faint tabular-nums">[{total.toLocaleString()}]</span></span>
       {#if fresh > 0}
         <button class="rounded-full bg-accent/15 px-2.5 py-0.5 text-[0.8rem] text-accent-2 hover:bg-accent/25!" onclick={reset} transition:fade={{ duration: ms(150) }}>
           <Icon name="refresh" size={12} /> {fresh.toLocaleString()} new · show
         </button>
+      {/if}
+      {#if !inFolder && !(account && mailbox)}
+        <!-- Set aside from the list, one click away. -->
+        <span class="flex flex-none items-center">
+          <button class="gap-1 bg-transparent px-1.5 py-0.5 text-[0.85rem] text-muted hover:text-fg" onclick={() => openFolder('spam')} title="Show spam (g s)">
+            <Icon name="ban" size={13} /> Spam{#if spamTotal}<span class="text-faint tabular-nums">{spamTotal.toLocaleString()}</span>{/if}
+          </button>
+          <button class="bg-transparent p-1 text-muted hover:text-fg" onclick={() => openFolder('trash')} title="Show trash (g t)" aria-label="Show trash"><Icon name="trash" size={13} /></button>
+        </span>
       {/if}
       <Select variant="ghost" class="text-[0.85rem]" label="Sort by" title="Sort by" value={sort} onchange={setSort}
         options={sorts.map(([k, label]) => ({ value: k, label }))} />
@@ -634,7 +712,7 @@
       class="min-h-0 flex-1 overflow-y-auto px-2 pb-2 [scroll-behavior:auto] transition-opacity duration-200 {loading ? 'opacity-50' : ''}"
       role="listbox" aria-label="Messages" tabindex="-1" {@attach contextMenu(listMenu)}>
       {#if total === 0}
-        <p class="m-0 px-3 py-10 text-center text-muted">{loading ? 'Loading…' : q ? 'No messages match this search.' : newOnly ? 'Nothing new since your last visit.' : 'No messages backed up here yet.'}</p>
+        <p class="m-0 px-3 py-10 text-center text-muted">{loading ? 'Loading…' : q ? 'No messages match this search.' : inFolder ? (folder === 'spam' ? 'No spam. Messages you mark as spam, or your mail server files as junk, show up here.' : 'Trash is empty.') : newOnly ? 'Nothing new since your last visit.' : 'No messages backed up here yet.'}</p>
       {:else}
         <ul class="relative m-0 list-none p-0" style="height: {total * ROW}px">
           {#each visible as i (i)}
@@ -645,6 +723,13 @@
                 <!-- Its own column left of the avatar, the full height of the row: shown on hover, and
                      on every row while something is selected. -->
                 {@const on = selected.has(m.id)}
+                {#if screen.phone}
+                  <!-- No hover on a touch screen: the avatar is the checkbox, and turns into a tick. -->
+                  <button class="absolute top-0 left-0 z-10 flex h-full w-[3.4rem] items-start justify-center rounded-l-lg bg-transparent! p-0 pt-[0.7rem] pl-1 active:scale-100!"
+                    role="checkbox" aria-checked={on} aria-label="Select message" onclick={() => toggle(m, i)}>
+                    {#if on}<span class="grid size-[34px] animate-[check-pop_300ms_var(--ease-spring)] place-items-center rounded-full bg-accent text-white"><Icon name="check" size={16} /></span>{/if}
+                  </button>
+                {:else}
                 <button class="absolute inset-y-0 left-0 z-10 flex w-11 items-start justify-center rounded-l-lg bg-transparent p-0 pt-5 hover:bg-transparent! active:scale-100! {on || selected.size ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100'}"
                   role="checkbox" aria-checked={on} aria-label="Select message" title="Select (x, or Ctrl/Shift-click the row)"
                   onclick={(e) => { if (e.shiftKey) void selectRange(i); else toggle(m, i); }}>
@@ -652,8 +737,9 @@
                     {#if on}<span class="grid animate-[check-pop_300ms_var(--ease-spring)]"><Icon name="check" size={12} /></span>{/if}
                   </span>
                 </button>
+                {/if}
               {:else}
-                <div class="flex h-full items-start gap-3 py-2.5 pr-2.5 pl-11" aria-label="Loading">
+                <div class="flex h-full items-start gap-3 py-2.5 pr-2.5 {screen.phone ? 'pl-3' : 'pl-11'}" aria-label="Loading">
                   <span class="mt-0.5 size-[34px] flex-none rounded-full bg-raised"></span>
                   <span class="flex flex-1 flex-col gap-2 pt-1">
                     <span class="h-3 w-2/5 rounded bg-raised"></span>
@@ -668,20 +754,22 @@
     </div>
     {/if}
   </section>
+  {#if !screen.phone}
   <Resizer label="Resize message list" width={Math.min(panes.list, LIST_MAX)} min={LIST_MIN} max={LIST_MAX} set={(w) => (panes.list = Math.min(LIST_MAX, Math.max(LIST_MIN, w)))}
     reset={() => (panes.list = LIST_DEFAULT)} done={savePanes} />
+  {/if}
   </div>
 
   <!-- Reader -->
-  <section class="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border border-line bg-panel">
+  <section class="flex min-h-0 min-w-0 flex-col overflow-hidden bg-panel {screen.phone ? (openId !== null || composing ? '' : 'hidden') : 'rounded-xl border border-line'}">
     {#if composing}
       {#key composing}
         <Composer init={composing} onclose={closeComposer} onsent={closeComposer} />
       {/key}
     {:else if openId !== null}
-      <Viewer id={openId} ondelete={deleteOne}>
+      <Viewer id={openId} ondelete={deleteOne} onspam={(m, s) => spam([m.id], s)}>
         {#snippet toolbar()}
-          <button class="bg-transparent p-1.5 text-muted hover:text-fg" onclick={() => go('/browse')} aria-label="Close message" title="Close (Esc)"><Icon name="x" /></button>
+          <button class="bg-transparent p-1.5 text-muted hover:text-fg" onclick={() => go('/browse')} aria-label={screen.phone ? 'Back to the list' : 'Close message'} title={screen.phone ? 'Back' : 'Close (Esc)'}><Icon name={screen.phone ? 'arrow-left' : 'x'} /></button>
           <span class="mx-1 h-4 w-px bg-line"></span>
           <button class="bg-transparent p-1.5 text-muted hover:text-fg" disabled={index <= 0} onclick={() => step(-1)} aria-label="Previous message" title="Previous (k)"><span class="rotate-180"><Icon name="chevron" size={16} /></span></button>
           <button class="bg-transparent p-1.5 text-muted hover:text-fg" disabled={index < 0 || index >= total - 1} onclick={() => step(1)} aria-label="Next message" title="Next (j)"><Icon name="chevron" size={16} /></button>
@@ -708,7 +796,7 @@
   {@const on = selected.has(m.id)}
   {@const joinUp = on && isSelected(i - 1)}
   {@const joinDown = on && isSelected(i + 1)}
-  <button class="flex h-full w-full items-start gap-3 overflow-hidden rounded-lg py-2.5 pr-2.5 pl-11 text-left active:scale-[0.99] {joinUp ? 'rounded-t-none' : ''} {joinDown ? 'rounded-b-none' : ''} {on ? 'bg-accent/12!' : openId === m.id ? 'bg-raised!' : 'bg-transparent'}" onclick={(e) => rowClick(e, m, i)}
+  <button class="flex h-full w-full items-start gap-3 overflow-hidden rounded-lg py-2.5 pr-2.5 {screen.phone ? 'pl-3' : 'pl-11'} text-left active:scale-[0.99] {joinUp ? 'rounded-t-none' : ''} {joinDown ? 'rounded-b-none' : ''} {on ? 'bg-accent/12! hover:bg-accent/18!' : openId === m.id ? 'bg-raised! hover:bg-hover!' : 'bg-transparent hover:bg-hover/50!'} {openId === m.id ? 'shadow-[inset_3px_0_0_var(--accent-2)]' : ''}" onclick={(e) => rowClick(e, m, i)}
     {@attach contextMenu(() => messageMenu(m, i))}>
     <span class="relative mt-0.5">
       <Avatar name={sender} seed={m.envelope.from} size={34} />
@@ -727,6 +815,7 @@
         <span class="flex flex-none items-center gap-1.5">
           {#if cat}<span class={cat.tone} title={cat.label}><Icon name={cat.icon} size={13} /></span>{/if}
           {#if m.envelope.attachment_count}<span class="text-faint" title="{m.envelope.attachment_count} attachment(s)"><Icon name="paperclip" size={13} /></span>{/if}
+          {#if m.spam && folder !== 'spam'}<span class="text-warn" title="Spam"><Icon name="ban" size={13} /></span>{/if}
           {#if m.deleted_on_server}<span class="text-faint" title="Deleted on the mail server; only the backup remains"><Icon name="trash" size={13} /></span>{/if}
           {#if st}<span class={st[1]} title={m.state === 'stored' ? `Stored on ${m.stored}/${m.destinations} destinations` : (m.error ?? st[2])}><Icon name={st[0]} size={13} /></span>{/if}
         </span>

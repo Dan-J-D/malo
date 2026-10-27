@@ -168,25 +168,65 @@ fn guess_special_use(folders: &mut [Folder]) {
             continue;
         }
         let hit = folders.iter().position(|f| {
-            let name = crate::layout::decode_utf7(&f.name);
-            let leaf = match f.delimiter.as_deref().filter(|d| !d.is_empty()) {
-                Some(d) => match name.split_once(d) {
-                    Some((parent, leaf)) if parent.eq_ignore_ascii_case("INBOX") => {
-                        leaf.to_string()
-                    }
-                    Some(_) => return false,
-                    None => name,
-                },
-                None => name,
-            };
             f.source == FolderSource::Mailbox
                 && f.special_use.is_none()
-                && names.contains(&leaf.to_lowercase().as_str())
+                && names.contains(
+                    &role_name(&f.name, f.delimiter.as_deref())
+                        .unwrap_or_default()
+                        .as_str(),
+                )
         });
         if let Some(i) = hit {
             folders[i].special_use = Some(role.to_string());
         }
     }
+}
+
+/// The lower-case name a folder's role is guessed from: a top-level folder's name, or that of one
+/// right under INBOX. None for deeper folders.
+fn role_name(raw: &str, delimiter: Option<&str>) -> Option<String> {
+    let name = crate::layout::decode_utf7(raw);
+    let leaf = match delimiter.filter(|d| !d.is_empty()) {
+        Some(d) => match name.split_once(d) {
+            Some((parent, leaf)) if parent.eq_ignore_ascii_case("INBOX") => leaf.to_string(),
+            Some(_) => return None,
+            None => name,
+        },
+        None => name,
+    };
+    Some(leaf.to_lowercase())
+}
+
+/// A mailbox for [`role_mailboxes`]: id, raw name, hierarchy delimiter, special-use attribute.
+pub type MailboxRole = (i64, String, Option<String>, Option<String>);
+
+/// The ids of an account's mailboxes with `role` (`\Junk`, `\Trash`): the ones the server marked,
+/// or, when it marked none, the one whose name implies it (like [`guess_special_use`]).
+/// `mailboxes` is `(id, name, delimiter, special_use)` for one account, every UIDVALIDITY included.
+pub fn role_mailboxes(mailboxes: &[MailboxRole], role: &str) -> Vec<i64> {
+    let marked: Vec<i64> = mailboxes
+        .iter()
+        .filter(|m| m.3.as_deref() == Some(role))
+        .map(|m| m.0)
+        .collect();
+    if !marked.is_empty() {
+        return marked;
+    }
+    let Some((_, names)) = ROLE_NAMES.iter().find(|(r, _)| *r == role) else {
+        return vec![];
+    };
+    // Every row of the first matching name (older UIDVALIDITYs of it too).
+    let Some(first) = mailboxes.iter().find(|m| {
+        m.3.is_none()
+            && names.contains(&role_name(&m.1, m.2.as_deref()).unwrap_or_default().as_str())
+    }) else {
+        return vec![];
+    };
+    mailboxes
+        .iter()
+        .filter(|m| m.1 == first.1)
+        .map(|m| m.0)
+        .collect()
 }
 
 /// The folder of a Gmail category.

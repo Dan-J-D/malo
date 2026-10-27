@@ -18,6 +18,7 @@ pub mod purge;
 pub mod rebuild;
 pub mod search;
 pub mod smtp;
+pub mod spam;
 pub mod store;
 pub mod sync;
 pub mod tls;

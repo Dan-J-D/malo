@@ -490,6 +490,45 @@ impl ImapConn {
         Ok(())
     }
 
+    /// MOVE where the server has it, otherwise COPY and then `\Deleted` + `UID EXPUNGE` of only
+    /// these UIDs (never a bare EXPUNGE: without UIDPLUS nothing is moved).
+    pub async fn move_or_copy(&mut self, uids: &[u32], target: &str) -> anyhow::Result<()> {
+        if self.caps.mv() {
+            return self.uid_move(uids, target).await;
+        }
+        if !self.caps.uidplus() {
+            bail!("the server supports neither MOVE nor UIDPLUS; refusing to move messages");
+        }
+        for chunk in uids.chunks(200) {
+            self.session.uid_copy(uid_set(chunk), target).await?;
+        }
+        self.delete_uids(uids).await?;
+        Ok(())
+    }
+
+    /// UIDs in the selected mailbox of messages with this Message-ID header (`<…>`), lowest first.
+    /// None for an ID that can't be searched safely as a quoted string.
+    pub async fn uids_by_message_id(
+        &mut self,
+        message_id: &str,
+    ) -> anyhow::Result<Option<Vec<u32>>> {
+        if message_id.is_empty()
+            || message_id.len() > 500
+            || message_id
+                .chars()
+                .any(|c| c == '"' || c == '\\' || c.is_control() || !c.is_ascii())
+        {
+            return Ok(None);
+        }
+        let found = self
+            .session
+            .uid_search(format!("HEADER Message-ID \"{message_id}\""))
+            .await?;
+        let mut uids: Vec<u32> = found.into_iter().collect();
+        uids.sort_unstable();
+        Ok(Some(uids))
+    }
+
     pub async fn uids_by_gm_msgid(&mut self, ids: &[u64]) -> anyhow::Result<HashMap<u64, u32>> {
         let mut out = HashMap::new();
         for id in ids {

@@ -208,7 +208,7 @@
     <button type="button" class="primary" disabled={!canSend} onclick={send} title="Send (Ctrl+Enter)">
       <Icon name="send" size={14} /> {sending ? 'Sending…' : 'Send'}
     </button>
-    <span class="text-[0.8rem] text-faint">Ctrl+Enter</span>
+    <span class="hidden text-[0.8rem] text-faint md:inline">Ctrl+Enter</span>
     <span class="flex-1"></span>
     <button type="button" class="bg-transparent text-muted hover:text-bad" onclick={discard} title="Delete this draft"><Icon name="trash" size={14} /> Discard</button>
   </footer>

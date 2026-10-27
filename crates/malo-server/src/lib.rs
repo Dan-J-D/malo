@@ -153,6 +153,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/messages", get(list_messages))
         .route("/search/suggest", get(search_suggest))
         .route("/messages/reviewed", post(mark_reviewed))
+        .route("/messages/spam", post(mark_spam))
         .route("/messages/{id}", get(get_message))
         .route("/messages/{id}/view", get(view_message))
         .route("/messages/{id}/thread", get(message_thread))

@@ -163,6 +163,11 @@
   th, td { text-align: left; padding: 0.55rem 0.6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
   tr:last-child td { border-bottom: none; }
   th { color: var(--muted); font-weight: 500; font-size: 0.85rem; }
+  /* On a phone a wide table scrolls sideways inside its card instead of widening the page. */
+  @media (max-width: 767px) {
+    table { display: block; max-width: 100%; overflow-x: auto; }
+    th, td { padding: 0.5rem 0.45rem; }
+  }
 
   details > summary { cursor: pointer; color: var(--muted); }
   details > summary:hover { color: var(--text); }

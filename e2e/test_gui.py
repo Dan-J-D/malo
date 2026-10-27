@@ -358,7 +358,7 @@ def main():
         wait(lambda: "Plain hello" in text(d), what="browse list")
 
         # Lock now: keys wiped and the profile closed with them, back to the profile's password.
-        button(d, "Lock now").click()
+        titled(d, "Lock now").click()
         wait(lambda: "Open a profile" in text(d) and "Locked" in text(d), what="locked profile screen")
         shot(d, "07-locked")
         unlock_profile(d, "not the profile password")
@@ -366,7 +366,7 @@ def main():
         unlock_profile(d)
         wait(lambda: "Overview" in text(d), timeout=90, what="dashboard from the profile (logged in by it)")
         # Forgotten password: connect without the profile; the recovery kit resets it.
-        button(d, "Lock now").click()
+        titled(d, "Lock now").click()
         button(d, "Connect without a profile").click()
         button(d, "Use local server").click()
         wait(lambda: "Log in to unlock" in text(d), what="login screen")
@@ -384,7 +384,7 @@ def main():
         button(d, "Reset password").click()
         wait(lambda: "Overview" in text(d), timeout=90, what="dashboard after reset")
         wait(lambda: "Back up now" in text(d), what="accounts kept after reset")
-        button(d, "Lock now").click()
+        titled(d, "Lock now").click()
         wait(lambda: "Log in to unlock" in text(d), what="locked again")
         fill(d, "Password", "owner-password-2", exact=True)
         button(d, "Unlock").click()
@@ -437,7 +437,7 @@ def main():
         d.execute_script("location.hash = '#/admin'")
         button(d, "Create invite code").click()
         code = wait(lambda: xp(d, "//p[contains(., 'Invite code')]/span[contains(@class,'mono')]").text, what="invite code")
-        button(d, "Log out").click()
+        titled(d, "Log out").click()
         unlock_profile(d)
         wait(lambda: "Log in to unlock" in text(d), what="login after unlocking the profile")
         assert field(d, "Username").get_attribute("value") == "remote-admin", "profile fills in the username"

@@ -92,6 +92,16 @@ export async function setReviewed(ids: number[], reviewed: boolean): Promise<boo
   return true;
 }
 
+/** "Mark as spam" / "Not spam": marks the messages in Malo at once, and starts moving those still
+ *  on their mail server into its Junk folder (or back to the inbox). Returns the jobs started. */
+export async function markSpam(ids: number[], spam: boolean): Promise<string[] | null> {
+  const r = await attempt(() => api.post<T.SpamResponse>('/messages/spam', { ids, spam }));
+  if (!r) return null;
+  const what = ids.length === 1 ? '' : ` ${ids.length.toLocaleString()}`;
+  notify(`Marked${what} as ${spam ? 'spam' : 'not spam'}${r.jobs.length ? '; moving on the mail server' : ''}`, 'success');
+  return r.jobs.map((j) => j.id);
+}
+
 export function deleteText(r: T.DeleteSummary): string {
   const parts = [];
   if (r.deleted_from_backup) parts.push(`${r.deleted_from_backup} deleted from the backup`);
@@ -146,6 +156,13 @@ function handle(ev: T.SyncEvent) {
         const r = ev.job.result as T.DeleteSummary;
         notify(`${accountName(r.account_id)}: ${deleteText(r)}${r.errors.length ? ` — ${r.errors[0]}` : ''}`, r.errors.length ? 'warning' : 'success');
         void refreshAccounts();
+      }
+      if (ev.job.kind.type === 'move_spam' && ev.job.state === 'done' && ev.job.result) {
+        const r = ev.job.result as T.SpamSummary;
+        if (r.moved || r.errors.length) {
+          const moved = r.moved ? `moved ${r.moved.toLocaleString()} ${r.spam ? 'to Junk' : 'back to the inbox'}` : 'nothing moved';
+          notify(`${accountName(r.account_id)}: ${moved}${r.errors.length ? ` — ${r.errors[0]}` : ''}`, r.errors.length ? 'warning' : 'success');
+        }
       }
       break;
     case 'job_progress': {

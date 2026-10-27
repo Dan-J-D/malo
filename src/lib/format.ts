@@ -59,6 +59,10 @@ export function jobLabel(kind: import('./api/types').JobKind, accountName: (id: 
       const n = `${kind.message_ids.length} message${kind.message_ids.length === 1 ? '' : 's'}`;
       return `Delete ${n} from ${kind.scope === 'server' ? 'mail server' : 'backup'} · ${accountName(kind.account_id)}`;
     }
+    case 'move_spam': {
+      const n = `${kind.message_ids.length} message${kind.message_ids.length === 1 ? '' : 's'}`;
+      return `Move ${n} ${kind.spam ? 'to Junk' : 'back to the inbox'} · ${accountName(kind.account_id)}`;
+    }
   }
 }
 

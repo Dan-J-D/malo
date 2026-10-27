@@ -292,9 +292,32 @@ export type DeleteScope = "server" | "everywhere";
 
 export type DeleteSummary = { account_id: string, deleted_from_server: number, deleted_from_backup: number, skipped: number, errors: Array<string>, };
 
+export type SpamRequest = { ids: Array<number>, spam: boolean, };
+
+export type SpamResponse = { 
+/**
+ * Messages marked in Malo.
+ */
+marked: number, 
+/**
+ * The jobs moving messages on their mail servers (none when every message was already
+ * gone from its server).
+ */
+jobs: Array<JobInfo>, };
+
+export type SpamSummary = { account_id: string, spam: boolean, 
+/**
+ * Moved on the mail server.
+ */
+moved: number, 
+/**
+ * Already where they belong, or no longer on the server.
+ */
+skipped: number, errors: Array<string>, };
+
 export type CheckScope = { "scope": "all" } | { "scope": "account", account_id: string, } | { "scope": "destination", destination_id: string, };
 
-export type JobKind = { "type": "backup", account_id: string, } | { "type": "check", scope: CheckScope, deep: boolean, } | { "type": "purge_dry_run", account_id: string, } | { "type": "purge", account_id: string, } | { "type": "repair", scope: CheckScope, } | { "type": "rebuild_index", destination_id: string, } | { "type": "rebuild_index_all" } | { "type": "search_index" } | { "type": "delete_messages", account_id: string, message_ids: Array<number>, scope: DeleteScope, };
+export type JobKind = { "type": "backup", account_id: string, } | { "type": "check", scope: CheckScope, deep: boolean, } | { "type": "purge_dry_run", account_id: string, } | { "type": "purge", account_id: string, } | { "type": "repair", scope: CheckScope, } | { "type": "rebuild_index", destination_id: string, } | { "type": "rebuild_index_all" } | { "type": "search_index" } | { "type": "delete_messages", account_id: string, message_ids: Array<number>, scope: DeleteScope, } | { "type": "move_spam", account_id: string, message_ids: Array<number>, spam: boolean, };
 
 export type JobState = "queued" | "running" | "done" | "failed" | "cancelled" | "skipped_locked";
 
@@ -332,7 +355,11 @@ thread_size: number,
 /**
  * In a conversation: the start of the text, without quoted replies.
  */
-preview?: string | null, };
+preview?: string | null, 
+/**
+ * Spam: marked so in Malo, or in the mail server's Junk folder and not marked otherwise.
+ */
+spam: boolean, };
 
 export type MessageList = { total: number, messages: Array<MessageSummary>, 
 /**

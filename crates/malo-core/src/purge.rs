@@ -649,7 +649,7 @@ fn record_deleted(
 /// Gmail id, received date and Message-ID must match. Without a Message-ID, the message is
 /// downloaded and its SHA-256 compared with the backup. Servers can reuse UIDVALIDITY (Dovecot
 /// does for a mailbox recreated within the same second), so UIDs alone are never trusted.
-async fn confirm_identity<'a>(
+pub(crate) async fn confirm_identity<'a>(
     conn: &mut ImapConn,
     exclude_flagged: bool,
     items: &[(u32, &'a MessageRow)],

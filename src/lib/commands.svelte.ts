@@ -34,12 +34,19 @@ export function commands(get: () => Command[]) {
 
 export const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
 
-/** The keydown as a key spec: modifiers in a fixed order, then the key. Shift is part of symbols like '?'. */
-function combo(e: KeyboardEvent): string {
-  let k = e.key.toLowerCase();
+/** The keydown as key specs to try, best first: modifiers in a fixed order, then the key. Shift is
+ *  part of symbols like '?'. A key on the digit row also counts as its digit, after the character it
+ *  typed: Option+digit types a symbol on a Mac, and some layouts put '?' or the digits themselves
+ *  on shifted digit keys, so neither reading alone works everywhere. */
+function combos(e: KeyboardEvent): string[] {
+  const typed = combo(e, e.key.toLowerCase());
+  const digit = /^Digit\d$/.test(e.code) ? combo(e, e.code.slice(5)) : null;
+  return digit && digit !== typed ? [typed, digit] : [typed];
+}
+
+function combo(e: KeyboardEvent, key: string): string {
+  let k = key;
   if (k === ' ') k = 'space';
-  // Option+digit types a symbol on a Mac; the digit is what the shortcut means.
-  if (/^Digit\d$/.test(e.code)) k = e.code.slice(5);
   const symbol = k.length === 1 && !/[a-z0-9]/.test(k);
   const parts = [];
   if (isMac ? e.metaKey : e.ctrlKey) parts.push('mod');
@@ -77,7 +84,8 @@ let pendingTimer: ReturnType<typeof setTimeout>;
 
 function onKey(e: KeyboardEvent) {
   if (e.defaultPrevented || e.isComposing || menu.open || ['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) return;
-  const k = combo(e);
+  const tries = combos(e);
+  const k = tries[0];
   // Shift+F10 and the Menu key open the focused element's context menu (WebKitGTK doesn't always).
   if ((k === 'shift+f10' || k === 'contextmenu') && document.activeElement instanceof HTMLElement && !editable(document.activeElement)) {
     e.preventDefault();
@@ -88,17 +96,21 @@ function onKey(e: KeyboardEvent) {
   const typing = editable(e.target);
   const dialog = !!document.querySelector('[aria-modal="true"]');
   const usable = all().filter((c) => !c.disabled && (c.anywhere || (!typing && !dialog)));
-  const seq = pending ? `${pending} ${k}` : null;
+  const before = pending;
   pending = null;
   clearTimeout(pendingTimer);
   const match = (spec: string) => [...usable].reverse().find((c) => specs(c).includes(spec));
-  const hit = (seq && match(seq)) || match(k);
+  let hit: Command | undefined;
+  for (const t of tries) {
+    hit = (before ? match(`${before} ${t}`) : undefined) ?? match(t);
+    if (hit) break;
+  }
   if (hit) {
     e.preventDefault();
     hit.run();
     return;
   }
-  if (!seq && usable.some((c) => specs(c).some((s) => s.startsWith(k + ' ')))) {
+  if (!before && usable.some((c) => specs(c).some((s) => s.startsWith(k + ' ')))) {
     e.preventDefault();
     pending = k;
     pendingTimer = setTimeout(() => (pending = null), 1500);

@@ -396,7 +396,8 @@ async fn execute(
     if let JobKind::Backup { account_id }
     | JobKind::Purge { account_id }
     | JobKind::PurgeDryRun { account_id }
-    | JobKind::DeleteMessages { account_id, .. } = kind
+    | JobKind::DeleteMessages { account_id, .. }
+    | JobKind::MoveSpam { account_id, .. } = kind
     {
         crate::net::check_account(state, ctx.account(account_id)?)
             .await
@@ -446,6 +447,13 @@ async fn execute(
             scope,
         } => serde_json::to_value(
             purge::delete_selected(ctx, account_id, message_ids, *scope).await?,
+        )?,
+        JobKind::MoveSpam {
+            account_id,
+            message_ids,
+            spam,
+        } => serde_json::to_value(
+            malo_core::spam::move_on_server(ctx, account_id, message_ids, *spam).await?,
         )?,
         JobKind::RebuildIndex { .. } | JobKind::RebuildIndexAll => {
             let from = match kind {

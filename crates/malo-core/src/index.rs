@@ -281,6 +281,28 @@ pub struct MessageQuery {
     pub field: Option<String>,
     /// Gmail category (see [`crate::search::CATEGORIES`]); `primary` is mail in none of the others.
     pub category: Option<String>,
+    /// Spam and Trash, apart from the rest of the mail (None: no such filter).
+    pub folder: Option<MailFolder>,
+}
+
+/// Where a message belongs in the mail list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MailFolder {
+    /// Everything but spam and trash.
+    Mail,
+    Spam,
+    Trash,
+}
+
+impl MailFolder {
+    pub fn parse(s: &str) -> Option<MailFolder> {
+        match s {
+            "mail" => Some(MailFolder::Mail),
+            "spam" => Some(MailFolder::Spam),
+            "trash" => Some(MailFolder::Trash),
+            _ => None,
+        }
+    }
 }
 
 /// Order of a message list. Ties (and messages without a date) fall back to discovery order.
@@ -429,6 +451,8 @@ impl Index {
         {
             conn.execute_batch("UPDATE messages SET indexed_sha=NULL")?;
         }
+        // Spam as marked in Malo: 1 spam, 0 not spam, NULL as the mail server files it (Junk).
+        let _ = conn.execute_batch("ALTER TABLE messages ADD COLUMN spam INTEGER");
         unescape_stored_labels(&conn)?;
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS messages_thread ON messages(account, thread) WHERE thread IS NOT NULL",
@@ -1087,6 +1111,19 @@ impl Index {
         })
     }
 
+    /// Marks messages as spam (or not spam); None goes back to how the mail server files them.
+    pub fn set_spam(&self, ids: &[i64], spam: Option<bool>) -> anyhow::Result<u64> {
+        self.with(|c| {
+            let tx = c.unchecked_transaction()?;
+            let mut n = 0;
+            for id in ids {
+                n += tx.execute("UPDATE messages SET spam=?2 WHERE id=?1", params![id, spam])?;
+            }
+            tx.commit()?;
+            Ok(n as u64)
+        })
+    }
+
     pub fn account_stats(&self, account: &str) -> anyhow::Result<(u64, u64)> {
         self.with(|c| {
             c.query_row(
@@ -1617,6 +1654,19 @@ fn query_messages_on(
     } else {
         "?6 IS NULL"
     };
+    // Junk and Trash: ids of every account's mailboxes with that role, comma-separated.
+    let (junk, trash) = role_mailbox_lists(c)?;
+    // Never NULL (`g.spam=1 OR …` is NULL when unmarked), or `NOT` would drop the message too.
+    let is_spam = format!(
+        "(CASE WHEN g.spam IS NULL THEN {} ELSE g.spam=1 END)",
+        filed_in("?21")
+    );
+    let is_trash = format!("(NOT {is_spam} AND {})", filed_in("?22"));
+    let folder = q.folder.map(|f| match f {
+        MailFolder::Mail => "mail",
+        MailFolder::Spam => "spam",
+        MailFolder::Trash => "trash",
+    });
     let filter = format!(
         "WHERE {by_id}
           AND (?1 IS NULL OR g.account=?1)
@@ -1635,7 +1685,9 @@ fn query_messages_on(
           AND (?17 IS NULL OR coalesce(g.category, 'primary') = ?17)
           AND (?18 IS NULL OR (coalesce(g.category, 'primary') = ?18) = ?19)
           AND (?5 IS NULL OR instr(',' || ?5 || ',', ',' || g.state || ',') > 0)
-          AND (?7 IS NULL OR g.id<=?7)"
+          AND (?7 IS NULL OR g.id<=?7)
+          AND (?20 IS NULL OR (?20='spam' AND {is_spam}) OR (?20='trash' AND {is_trash})
+            OR (?20='mail' AND NOT {is_spam} AND NOT {is_trash}))"
     );
     {
         let limit = if q.limit == 0 { 100 } else { q.limit.min(1000) };
@@ -1660,7 +1712,10 @@ fn query_messages_on(
                 .as_deref()
                 .filter(|c| crate::search::CATEGORIES.contains(c)),
             search.category.as_ref().map(|c| c.0.as_str()),
-            search.category.as_ref().map(|c| c.1)
+            search.category.as_ref().map(|c| c.1),
+            folder,
+            junk,
+            trash
         ];
         // The total only matters for paging a list; counting is a full scan.
         let total: i64 = match id {
@@ -1681,7 +1736,8 @@ fn query_messages_on(
                 {snippet},
                 g.category,
                 CASE WHEN g.thread IS NULL THEN 1 ELSE
-                  (SELECT COUNT(DISTINCT coalesce(t.message_id_hdr, t.id)) FROM messages t WHERE t.account=g.account AND t.thread=g.thread) END
+                  (SELECT COUNT(DISTINCT coalesce(t.message_id_hdr, t.id)) FROM messages t WHERE t.account=g.account AND t.thread=g.thread) END,
+                {is_spam}
              FROM messages g {filter} ORDER BY {order} LIMIT ?8 OFFSET ?9",
             // Matches are marked with STX/ETX (U+0002, U+0003) for the app to highlight.
             snippet = if fts.is_some() {
@@ -1723,11 +1779,51 @@ fn query_messages_on(
                     category: r.get(15)?,
                     thread_size: r.get::<_, i64>(16)? as u32,
                     preview: None,
+                    spam: r.get::<_, bool>(17)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok((total as u64, rows))
     }
+}
+
+/// SQL: the message `g` is filed only in the mailboxes listed in parameter `set` (comma-separated
+/// ids). Only memberships still on the server count, unless it is on the server nowhere any more:
+/// then where it last was.
+fn filed_in(set: &str) -> String {
+    let considered = "(m.deleted_on_server_at IS NULL OR NOT EXISTS(SELECT 1 FROM memberships l WHERE l.message=g.id AND l.deleted_on_server_at IS NULL))";
+    let inside = format!("instr(',' || {set} || ',', ',' || m.mailbox || ',') > 0");
+    format!(
+        "(EXISTS(SELECT 1 FROM memberships m WHERE m.message=g.id AND {considered} AND {inside})
+          AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.message=g.id AND {considered} AND NOT {inside}))"
+    )
+}
+
+/// Every account's Junk and Trash mailbox ids, each list comma-separated (see
+/// [`crate::mailview::role_mailboxes`]).
+fn role_mailbox_lists(c: &Connection) -> rusqlite::Result<(String, String)> {
+    let mut stmt = c.prepare(
+        "SELECT id, account, name, delimiter, special_use FROM mailboxes ORDER BY account, id",
+    )?;
+    let rows: Vec<(String, crate::mailview::MailboxRole)> = stmt
+        .query_map([], |r| {
+            Ok((r.get(1)?, (r.get(0)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+        })?
+        .collect::<Result<_, _>>()?;
+    let mut by_account: std::collections::BTreeMap<&str, Vec<crate::mailview::MailboxRole>> =
+        Default::default();
+    for (account, mb) in &rows {
+        by_account.entry(account).or_default().push(mb.clone());
+    }
+    let join = |role: &str| {
+        by_account
+            .values()
+            .flat_map(|mbs| crate::mailview::role_mailboxes(mbs, role))
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    Ok((join("\\Junk"), join("\\Trash")))
 }
 
 /// About two lines of text: quoted replies (`>`) and the "On … wrote:" line before them are
@@ -2202,6 +2298,89 @@ mod tests {
         assert_eq!(top(MessageSort::Oldest).0, 260);
         assert_eq!(top(MessageSort::Largest).0, 260);
         assert_eq!(top(MessageSort::Sender).1, "a");
+    }
+
+    /// Spam and Trash are apart from the rest: by the server's folder (marked or only named so),
+    /// unless marked otherwise in Malo; a purged message stays where it last was.
+    #[test]
+    fn spam_and_trash_folders() {
+        let idx = Index::open_in_memory().unwrap();
+        let mb = |acc: &str, name: &str, special: Option<&str>| {
+            idx.upsert_mailbox(acc, name, name, name, Some("/"), special, 1)
+                .unwrap()
+        };
+        let inbox = mb("a", "INBOX", None);
+        let junk = mb("a", "[Gmail]/Spam", Some("\\Junk"));
+        let trash = mb("a", "Trash", Some("\\Trash"));
+        // Account b's server marks nothing: its folder named "Junk" is the one.
+        let b_inbox = mb("b", "INBOX", None);
+        let b_junk = mb("b", "Junk", None);
+        let env = empty_envelope();
+        let mut uid = 0;
+        let mut msg = |acc: &str, mailbox: i64| {
+            uid += 1;
+            let id = idx
+                .insert_message(&NewMessage {
+                    account: acc,
+                    run: None,
+                    size: 10,
+                    internaldate: None,
+                    message_id_hdr: None,
+                    gm_msgid: None,
+                    envelope: &env,
+                    state: MessageState::Verified,
+                    sha256: None,
+                })
+                .unwrap();
+            idx.add_membership(id, mailbox, uid, &[], &[]).unwrap();
+            (id, uid)
+        };
+        let (ham, _) = msg("a", inbox.id);
+        let (spam, _) = msg("a", junk.id);
+        let (binned, _) = msg("a", trash.id);
+        let (b_ham, _) = msg("b", b_inbox.id);
+        let (b_spam, _) = msg("b", b_junk.id);
+        // Purged from Junk: still spam.
+        let (gone, gone_uid) = msg("a", junk.id);
+        idx.mark_deleted_on_server(junk.id, &[gone_uid], true)
+            .unwrap();
+        // Moved from the inbox to Junk: the inbox copy is gone, the Junk one counts.
+        let (moved, moved_uid) = msg("a", inbox.id);
+        idx.mark_deleted_on_server(inbox.id, &[moved_uid], false)
+            .unwrap();
+        idx.add_membership(moved, junk.id, 99, &[], &[]).unwrap();
+
+        let ids = |folder: MailFolder| {
+            let mut v: Vec<i64> = idx
+                .list_messages(
+                    &MessageQuery {
+                        folder: Some(folder),
+                        ..Default::default()
+                    },
+                    1,
+                )
+                .unwrap()
+                .1
+                .into_iter()
+                .map(|m| m.id)
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(ids(MailFolder::Mail), vec![ham, b_ham]);
+        assert_eq!(ids(MailFolder::Spam), vec![spam, b_spam, gone, moved]);
+        assert_eq!(ids(MailFolder::Trash), vec![binned]);
+
+        // Marked in Malo: that wins over the folder, both ways.
+        idx.set_spam(&[ham], Some(true)).unwrap();
+        idx.set_spam(&[spam], Some(false)).unwrap();
+        assert_eq!(ids(MailFolder::Mail), vec![spam, b_ham]);
+        assert_eq!(ids(MailFolder::Spam), vec![ham, b_spam, gone, moved]);
+        let summary = idx.summary(ham, 1).unwrap().unwrap();
+        assert!(summary.spam);
+        assert!(!idx.summary(spam, 1).unwrap().unwrap().spam);
+        // Without a folder, everything.
+        assert_eq!(idx.list_messages(&MessageQuery::default(), 1).unwrap().0, 7);
     }
 
     #[test]

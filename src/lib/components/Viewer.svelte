@@ -22,7 +22,14 @@
     id,
     toolbar,
     ondelete,
-  }: { id: number; toolbar?: Snippet; ondelete?: (m: T.MessageSummary, scope: T.DeleteScope) => void } = $props();
+    onspam,
+  }: {
+    id: number;
+    toolbar?: Snippet;
+    ondelete?: (m: T.MessageSummary, scope: T.DeleteScope) => void;
+    /** "Mark as spam" (true) or "Not spam" (false) for the opened message. */
+    onspam?: (m: T.MessageSummary, spam: boolean) => void;
+  } = $props();
 
   let thread: T.MessageSummary[] = $state([]);
   let expanded: number[] = $state([]);
@@ -180,7 +187,17 @@
       thread.length > 1 && { label: expanded.length === thread.length ? 'Collapse all' : 'Expand all', icon: 'layers', run: () => (expanded = expanded.length === thread.length ? [id] : thread.map((m) => m.id)) },
       subject && { label: 'Copy subject', icon: 'copy', run: () => copy(subject, 'Subject copied') },
       { label: 'Save .eml…', icon: 'download', keys: 'mod+s', run: () => attempt(() => app.saveRaw(id)) },
+      onspam && '-',
+      onspam && (opened.spam
+        ? { label: 'Not spam', icon: 'inbox', keys: '!', run: () => setSpam(false) }
+        : { label: 'Mark as spam', icon: 'ban', keys: '!', run: () => setSpam(true) }),
     ];
+  }
+
+  function setSpam(spam: boolean) {
+    if (!opened || !onspam) return;
+    onspam(opened, spam);
+    opened.spam = spam;
   }
 
   function deleteMenu(): Entry[] {
@@ -210,6 +227,9 @@
     </button>
     {#if many}<button class="p-1.5" onclick={() => reply(id, 'reply')} aria-label="Reply" title="Reply (r)"><Icon name="reply" size={15} /></button>{/if}
     <button class="p-1.5" onclick={() => reply(id, 'forward')} aria-label="Forward" title="Forward (f)"><Icon name="forward" size={15} /></button>
+    {#if onspam && !opened.spam}
+      <button class="p-1.5 hover:text-warn" onclick={() => setSpam(true)} aria-label="Mark as spam" title="Mark as spam (!)"><Icon name="ban" size={15} /></button>
+    {/if}
     <button class="p-1.5" onclick={(e) => menuUnder(e.currentTarget, moreMenu())} aria-label="More actions" title="More"><Icon name="more" size={15} /></button>
     {#if ondelete}
       <button class="bg-bad/15 p-1.5 text-bad hover:bg-bad! hover:text-white" onclick={(e) => menuUnder(e.currentTarget, deleteMenu())} aria-label="Delete" title="Delete"><Icon name="trash" size={15} /></button>
@@ -225,7 +245,15 @@
   {:else}
     {#key id}
     <article class="flex flex-col" in:fly={{ y: 8, duration: ms(240), easing: ease }} {@attach contextMenu(moreMenu)}>
-      <header class="flex flex-col gap-3 px-6 pt-5 pb-4">
+      {#if opened.spam}
+        <!-- Spam reads like any other message; this says why it's set apart and how to undo it. -->
+        <div class="mx-4 mt-4 flex items-center md:mx-6 gap-2.5 rounded-lg bg-warn/12 py-1.5 pr-1.5 pl-3 text-[0.85rem]">
+          <span class="flex-none text-warn"><Icon name="ban" size={14} /></span>
+          <span class="flex-1 text-muted">In Spam. Be careful with its links and attachments.</span>
+          {#if onspam}<button class="flex-none px-2 py-1 text-[0.85rem]" onclick={() => setSpam(false)} title="Not spam (!)"><Icon name="inbox" size={13} /> Not spam</button>{/if}
+        </div>
+      {/if}
+      <header class="flex flex-col gap-3 px-4 pt-5 pb-4 md:px-6">
         <div>
           <h2 class="subject m-0 text-[1.15rem] leading-snug font-medium">{reveal(opened.envelope.subject) || '(no subject)'}{#if thread.length > 1}<span class="ml-1.5 font-normal text-faint tabular-nums">[{thread.length}]</span>{/if}</h2>
           {#if span}<div class="mt-1.5 flex items-center gap-1.5 text-[0.85rem] text-muted"><Icon name="calendar" size={14} /> {span}</div>{/if}
@@ -246,7 +274,7 @@
       </header>
 
       {#if attachments.length}
-        <section class="px-6 pb-4">
+        <section class="px-4 pb-4 md:px-6">
           <div class="mb-2 text-[0.9rem] text-muted">Attachments <span class="text-faint">[{attachments.length}]</span></div>
           <div class="flex flex-wrap gap-2">
             {#each attachments as { m, a } (`${m.id}-${a.index}`)}

@@ -787,6 +787,11 @@ pub async fn create_job(
             account_id,
             message_ids,
             ..
+        }
+        | JobKind::MoveSpam {
+            account_id,
+            message_ids,
+            ..
         } => {
             cfg.account(account_id)
                 .ok_or_else(|| ApiErr::not_found("account"))?;
@@ -886,6 +891,8 @@ pub struct MessagesQuery {
     pub field: Option<String>,
     /// Gmail category: primary, social, promotions, updates, forums.
     pub category: Option<String>,
+    /// mail (everything but spam and trash), spam or trash. Ignored with a mailbox.
+    pub folder: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -960,6 +967,13 @@ pub async fn list_messages(
                 .unwrap_or_default(),
             field: q.field,
             category: q.category,
+            folder: match mailbox {
+                Some(_) => None,
+                None => q
+                    .folder
+                    .as_deref()
+                    .and_then(malo_core::index::MailFolder::parse),
+            },
         },
         dests,
     )?;
@@ -979,6 +993,59 @@ pub async fn mark_reviewed(u: Unlocked, Json(req): Json<ReviewedRequest>) -> Api
         u.user.index.set_reviewed(&req.ids, req.reviewed)?
     };
     Ok(Json(n))
+}
+
+/// Marks messages as spam or not spam in Malo, then moves those still on their mail server (one
+/// job per account; imported accounts have no server).
+pub async fn mark_spam(
+    State(state): State<SharedState>,
+    u: Unlocked,
+    Json(req): Json<SpamRequest>,
+) -> ApiResult<Json<SpamResponse>> {
+    if req.ids.is_empty() || req.ids.len() > malo_api::MAX_DELETE_BATCH {
+        return Err(ApiErr::bad_request(format!(
+            "select between 1 and {} messages",
+            malo_api::MAX_DELETE_BATCH
+        )));
+    }
+    let index = &u.user.index;
+    let cfg = u.user.config();
+    let mut on_server: std::collections::BTreeMap<String, Vec<i64>> = Default::default();
+    let mut ids = Vec::new();
+    for id in &req.ids {
+        let Some(msg) = index.message(*id)? else {
+            continue;
+        };
+        ids.push(*id);
+        if cfg.account(&msg.account).is_none_or(|a| a.imported) {
+            continue;
+        }
+        let mut live = false;
+        for m in index.memberships(*id)? {
+            if !m.deleted_on_server && index.mailbox(m.mailbox)?.is_some_and(|b| b.current) {
+                live = true;
+                break;
+            }
+        }
+        if live {
+            on_server.entry(msg.account.clone()).or_default().push(*id);
+        }
+    }
+    let marked = index.set_spam(&ids, Some(req.spam))?;
+    let mut jobs = Vec::new();
+    for (account_id, message_ids) in on_server {
+        jobs.push(jobs::submit(
+            &state,
+            &u.user.user_id,
+            JobKind::MoveSpam {
+                account_id,
+                message_ids,
+                spam: req.spam,
+            },
+            JobTrigger::Manual,
+        )?);
+    }
+    Ok(Json(SpamResponse { marked, jobs }))
 }
 
 pub async fn get_message(u: Unlocked, Path(id): Path<i64>) -> ApiResult<Json<MessageSummary>> {

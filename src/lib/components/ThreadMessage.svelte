@@ -11,6 +11,8 @@
   import type { Snippet } from 'svelte';
   import Avatar from './Avatar.svelte';
   import Icon from './Icon.svelte';
+  import Segmented from './Segmented.svelte';
+  import { authReport, receivedSpf, verdicts, tone, meaning, type Method } from '../auth';
 
   // One message of a conversation. Collapsed it is a single line; expanded it loads and shows the
   // message: plain text first, sanitized HTML in a sandboxed frame on request, remote images only
@@ -40,6 +42,8 @@
   let remote = $state(false);
   let mode: 'message' | 'headers' | 'source' = $state('message');
   let source = $state('');
+  let authOpen = $state(false);
+  let headerFilter = $state('');
   let error = $state('');
   let section: HTMLElement | undefined = $state();
 
@@ -187,6 +191,20 @@
     return replyElsewhere.some((a) => domain(a) !== own);
   });
   const suspicious = $derived(links.filter((l) => l.shown).length);
+  const auth = $derived(view ? authReport(view.authentication_results) : null);
+  const checks = $derived(view ? verdicts(auth, receivedSpf(view.headers)) : null);
+  const METHOD_NAMES: [Method, string][] = [['spf', 'SPF'], ['dkim', 'DKIM'], ['dmarc', 'DMARC']];
+  const TONE_ICON = { ok: 'check', warn: 'alert', bad: 'x', muted: 'help' } as const;
+  /** Headers a reader looks for first; the rest follow in message order. */
+  const KEY_HEADERS = ['from', 'sender', 'reply-to', 'to', 'cc', 'subject', 'date', 'return-path', 'message-id'];
+  const shownHeaders = $derived.by(() => {
+    if (!view) return [];
+    const q = headerFilter.trim().toLowerCase();
+    return view.headers
+      .map(([k, v], i) => ({ k, v, i, key: KEY_HEADERS.indexOf(k.toLowerCase()) }))
+      .filter((h) => !q || h.k.toLowerCase().includes(q) || h.v.toLowerCase().includes(q))
+      .sort((a, b) => (a.key < 0 ? 99 : a.key) - (b.key < 0 ? 99 : b.key) || a.i - b.i);
+  });
   const recipients = $derived((view ? [...view.to, ...view.cc] : m.envelope.to).map((r) => reveal(personName(r))).join(', '));
   const many = $derived((view ? view.to.length + view.cc.length : m.envelope.to.length) > 1);
 
@@ -225,7 +243,7 @@
 <section bind:this={section} class="border-b border-line last:border-b-0" {@attach contextMenu(menu)}>
   <!-- The header line opens and closes the message. -->
   <!-- No press effect: the whole row shrinking and springing back reads as a bounce. -->
-  <button class="flex w-full items-start gap-3 rounded-none bg-transparent px-6 py-4 text-left hover:bg-transparent! active:transform-none!"
+  <button class="flex w-full items-start gap-3 rounded-none bg-transparent px-4 py-4 text-left md:px-6 hover:bg-transparent! active:transform-none!"
     onclick={ontoggle} aria-expanded={expanded}>
     <Avatar name={sender} seed={m.envelope.from} size={36} />
     <span class="min-w-0 flex-1">
@@ -247,7 +265,7 @@
   <!-- Opens once the message is loaded (a local request: no visible wait), so it slides open to
        its full height in one go instead of to a "Loading…" line that then jumps. -->
   {#if expanded && (view || error)}
-    <div class="-mt-2 pb-5 pl-[4.75rem] pr-6" transition:slide={{ duration: ms(240), easing: ease }}>
+    <div class="-mt-2 pr-4 pb-5 pl-4 md:pr-6 md:pl-[4.75rem]" transition:slide={{ duration: ms(240), easing: ease }}>
       {#if error}
         <p class="callout bad my-2">{error}</p>
       {:else if view}
@@ -265,6 +283,59 @@
           <div class="mb-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-[0.9rem] {replyOtherDomain ? 'border-warn/40 bg-warn/8' : 'border-line'}">
             <span class="mt-0.5 {replyOtherDomain ? 'text-warn' : 'text-muted'}"><Icon name="reply" size={15} /></span>
             <span>Replies go to <span class="untrusted mono">{reveal(replyElsewhere.join(', '))}</span>{replyOtherDomain ? ', not to the sender’s domain.' : '.'}</span>
+          </div>
+        {/if}
+
+        <div class="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+          <Segmented label="Show" class="w-[21.5rem] max-w-full" bind:value={mode} onchange={(v) => v === 'source' && showSource()} options={[
+            { value: 'message', label: 'Message', icon: 'mail-open' },
+            { value: 'headers', label: 'Headers', icon: 'file', title: `${view.headers.length} headers` },
+            { value: 'source', label: 'Source', icon: 'server' },
+          ]} />
+          <span class="flex-1"></span>
+          {#if checks}
+            <button class="gap-1.5 border border-line bg-transparent px-2 py-1 text-[0.8rem] {authOpen ? 'bg-raised!' : ''}" aria-expanded={authOpen}
+              onclick={() => (authOpen = !authOpen)} title={auth ? `Checked by ${auth.by} when the message arrived` : 'No authentication results in this message'}>
+              {#each METHOD_NAMES as [m, name]}
+                {@const t = tone(checks[m][0]?.result)}
+                <span class="pill {t} gap-1 px-1.5!"><Icon name={TONE_ICON[t]} size={12} />{name}</span>
+              {/each}
+              <span class="inline-flex text-muted transition-transform {authOpen ? 'rotate-180' : ''}"><Icon name="chevron" size={13} /></span>
+            </button>
+          {/if}
+        </div>
+
+        {#if authOpen && checks}
+          <div class="mb-4 overflow-hidden rounded-lg border border-line text-[0.85rem]" transition:slide={{ duration: ms(200), easing: ease }}>
+            <div class="flex items-center gap-2 border-b border-line bg-sunken px-3 py-2 text-muted">
+              <Icon name="shield" size={14} />
+              {#if auth}<span>Checked by <span class="mono text-fg">{auth.by || 'the receiving server'}</span> when the message arrived</span>
+              {:else}<span>This message carries no Authentication-Results: the receiving server didn’t record a check</span>{/if}
+            </div>
+            {#each METHOD_NAMES as [m, name]}
+              {@const best = checks[m][0]}
+              {@const t = tone(best?.result)}
+              <div class="grid grid-cols-[5.25rem_minmax(0,1fr)] gap-x-3 border-b border-line px-3 py-2.5 last:border-b-0">
+                <span class="pill {t} self-start justify-self-start"><Icon name={TONE_ICON[t]} size={12} />{name}</span>
+                <div class="min-w-0">
+                  <div><span class="font-medium">{best ? best.result : 'none'}</span><span class="ml-1.5 text-muted">{meaning(best, m)}</span></div>
+                  {#each checks[m] as c}
+                    <div class="mt-0.5 truncate text-muted" title={c.comment}>
+                      {#if c.domain}<span class="untrusted mono text-fg">{c.domain}</span>{/if}
+                      {#if checks[m].length > 1}<span class="pill {tone(c.result)} ml-1 px-1!">{c.result}</span>{/if}
+                      {#each c.props.filter(([k]) => k === 'header.s') as [, sel]}<span class="ml-1">selector <span class="mono">{sel}</span></span>{/each}
+                      {#if m === 'dmarc' && c.comment}<span class="ml-1">{c.comment}</span>{/if}
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/each}
+            {#if auth}
+              <details class="border-t border-line px-3 py-2">
+                <summary class="cursor-pointer text-muted">Show the header{auth.others ? ` (and ${auth.others} more added on the way)` : ''}</summary>
+                {#each view.authentication_results as r, i}<div class="mono mt-1.5 break-all text-[0.8rem] {i === view.authentication_results.indexOf(auth.raw) ? '' : 'text-muted'}">{r}</div>{/each}
+              </details>
+            {/if}
           </div>
         {/if}
 
@@ -300,14 +371,29 @@
             </details>
           {/if}
         {:else if mode === 'headers'}
-          <table class="text-[0.85rem]">
-            <tbody>{#each view.headers as [k, v]}<tr {@attach contextMenu(() => [
-              { label: 'Copy value', icon: 'copy', run: () => copy(v, 'Header copied') },
-              { label: 'Copy header line', icon: 'copy', run: () => copy(`${k}: ${v}`, 'Header copied') },
-            ])}><td class="mono w-44 text-muted">{k}</td><td class="mono">{v}</td></tr>{/each}</tbody>
-          </table>
+          <div class="mb-2 flex items-center gap-2">
+            <div class="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-line px-2.5 py-1 text-muted focus-within:border-accent-2">
+              <Icon name="filter" size={14} />
+              <input class="min-w-0 flex-1 border-0! bg-transparent! p-0! text-[0.85rem] text-fg shadow-none! outline-none!" placeholder="Filter headers" aria-label="Filter headers" bind:value={headerFilter} />
+            </div>
+            <button class="px-2.5 py-1 text-[0.85rem]" onclick={() => copy(view!.headers.map(([k, v]) => `${k}: ${v}`).join('\n'), 'Headers copied')}><Icon name="copy" size={14} /> Copy all</button>
+          </div>
+          <div class="overflow-hidden rounded-lg border border-line">
+            <table class="w-full text-[0.82rem]">
+              <tbody>{#each shownHeaders as h (h.i)}<tr class="border-b border-line align-top last:border-b-0 {h.key >= 0 ? '' : 'text-muted'}" {@attach contextMenu(() => [
+                { label: 'Copy value', icon: 'copy', run: () => copy(h.v, 'Header copied') },
+                { label: 'Copy header line', icon: 'copy', run: () => copy(`${h.k}: ${h.v}`, 'Header copied') },
+              ])}><td class="mono w-40 bg-sunken px-3 py-1.5 whitespace-nowrap {h.key >= 0 ? 'font-medium text-fg' : ''}">{h.k}</td><td class="untrusted mono px-3 py-1.5 break-all">{h.v}</td></tr>{/each}</tbody>
+            </table>
+            {#if !shownHeaders.length}<p class="m-0 px-3 py-2 text-[0.85rem] text-muted">No header matches “{headerFilter}”.</p>{/if}
+          </div>
         {:else}
-          <pre class="m-0 font-mono text-[0.8rem] whitespace-pre-wrap break-words">{source || 'Loading…'}</pre>
+          <div class="mb-2 flex items-center gap-2">
+            <span class="flex-1 text-[0.85rem] text-muted">Exactly as backed up{source ? ` · ${bytes(new TextEncoder().encode(source).length)}` : ''}</span>
+            <button class="px-2.5 py-1 text-[0.85rem]" disabled={!source} onclick={() => copy(source, 'Source copied')}><Icon name="copy" size={14} /> Copy</button>
+            <button class="px-2.5 py-1 text-[0.85rem]" onclick={saveRaw}><Icon name="download" size={14} /> Save .eml…</button>
+          </div>
+          <pre class="m-0 max-h-[70vh] overflow-auto rounded-lg border border-line bg-sunken px-3 py-2.5 font-mono text-[0.78rem] leading-relaxed whitespace-pre-wrap break-all">{source || 'Loading…'}</pre>
         {/if}
 
         {#if view.attachments.length}
@@ -328,12 +414,6 @@
           </div>
         {/if}
 
-        {#if view.authentication_results.length}
-          <details class="mt-3 text-[0.85rem]"><summary>Sender authentication (SPF / DKIM / DMARC)</summary>
-            {#each view.authentication_results as r}<div class="mono mt-1 text-muted">{r}</div>{/each}
-          </details>
-        {/if}
-
         <div class="mt-4 flex items-center gap-2">
           <button class="px-2.5 py-1 text-[0.9rem]" onclick={() => onreply('reply')}><Icon name="reply" size={14} /> Reply</button>
           {#if many}<button class="px-2.5 py-1 text-[0.9rem]" onclick={() => onreply('reply-all')}><Icon name="reply-all" size={14} /> Reply all</button>{/if}
@@ -345,5 +425,5 @@
     </div>
   {/if}
 
-  {#if composer}<div class="pr-6 pb-5 pl-[4.75rem]">{@render composer()}</div>{/if}
+  {#if composer}<div class="pr-4 pb-5 pl-4 md:pr-6 md:pl-[4.75rem]">{@render composer()}</div>{/if}
 </section>

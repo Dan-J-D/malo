@@ -10,8 +10,11 @@
   import { contextMenu } from '../menu.svelte';
   import { accountMenu, backupAll, verifyAll } from '../actions';
 
+  // `drawer`: the whole sidebar, slid in over a phone's screen.
+  let { drawer = false }: { drawer?: boolean } = $props();
+
   // Icon rail: the sidebar dragged narrow. Labels move into tooltips, counts become dots.
-  const rail = $derived(navRail());
+  const rail = $derived(!drawer && navRail());
 
   const core = [
     ['/browse', 'Mail', 'inbox'],
@@ -36,6 +39,20 @@
   const lockIn = $derived.by(() => {
     void now;
     return until(session.me?.expires_at);
+  });
+  // Share of the unlock window still left, for the meter under the user.
+  const keysLeft = $derived.by(() => {
+    void now;
+    const from = Date.parse(session.me?.unlocked_at ?? '');
+    const to = Date.parse(session.me?.expires_at ?? '');
+    if (!(to > from)) return 0;
+    return Math.min(1, Math.max(0, (to - Date.now()) / (to - from)));
+  });
+  /** Which server this is, briefly: the profile's name, or the host without scheme and port. */
+  const server = $derived.by(() => {
+    if (session.profile?.name) return session.profile.name;
+    if (session.local) return 'Local server';
+    try { return new URL(session.url ?? '').hostname; } catch { return session.url ?? ''; }
   });
   // "Back up now" follows the switcher: the chosen account, or every account.
   const backupable = $derived(live.accounts.filter((a) => a.enabled && !a.imported && (!scope.account || a.id === scope.account)));
@@ -86,7 +103,7 @@
   ];
 </script>
 
-<nav bind:this={navEl} class="relative flex h-screen flex-col gap-4 overflow-x-hidden overflow-y-auto pt-3.5 pb-2.5 {rail ? 'px-2' : 'pr-2.5 pl-3'}">
+<nav bind:this={navEl} class="relative flex {drawer ? 'h-full' : 'h-dvh'} flex-col gap-4 overflow-x-hidden overflow-y-auto pt-3.5 pb-2 {rail ? 'px-2' : 'pr-2.5 pl-3'}">
   <span aria-hidden="true"
     class="pointer-events-none absolute top-0 rounded-lg {rail ? 'right-2 left-2' : 'right-2.5 left-3'} bg-panel shadow-sm dark:bg-raised dark:shadow-none {mark.animate ? 'transition-[transform,height] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]' : ''} {mark.shown ? '' : 'opacity-0'}"
     style="transform: translateY({mark.top}px); height: {mark.height}px"></span>
@@ -172,25 +189,30 @@
   </div>
 
   {#if rail}
-  <div class="flex flex-col items-center gap-1 border-t border-line pt-3">
-    <span title="{session.me?.username} · {session.local ? 'Local server' : session.url} · keys unlocked for {lockIn}"><Avatar name={session.me?.username ?? '?'} size={26} /></span>
+  <div class="flex flex-col items-center gap-0.5 rounded-xl border border-line bg-panel py-2 dark:bg-raised">
+    <span title="{session.me?.username} · {server} · keys unlocked for {lockIn}"><Avatar name={session.me?.username ?? '?'} size={26} /></span>
     <button class="bg-transparent p-2 text-muted hover:text-fg" onclick={() => logout(true)} title="Lock now: wipe keys from the server; backups pause until you log in (Ctrl+Shift+L)" aria-label="Lock now"><Icon name="lock" size={15} /></button>
     <button class="bg-transparent p-2 text-muted hover:text-fg" onclick={() => logout(false)} title="Log out" aria-label="Log out"><Icon name="logout" size={15} /></button>
   </div>
   {:else}
-  <div class="flex flex-col gap-1.5 border-t border-line px-1.5 pt-3">
+  <div class="rounded-xl border border-line bg-panel p-2.5 pb-3 dark:bg-raised">
     <div class="flex min-w-0 items-center gap-2.5">
-      <Avatar name={session.me?.username ?? '?'} size={26} />
-      <div class="min-w-0 text-[0.85rem] leading-tight">
+      <Avatar name={session.me?.username ?? '?'} size={30} />
+      <div class="min-w-0 flex-1 leading-tight">
         <div class="truncate font-medium">{session.me?.username}</div>
-        <div class="truncate text-muted" title={session.profile?.path}>{session.profile ? `${session.profile.name} · ` : ''}{session.local ? 'Local server' : session.url}</div>
+        <div class="truncate text-[0.8rem] text-muted" title={[session.profile?.name, session.local ? 'Local server' : session.url, session.profile?.path].filter(Boolean).join('\n')}>{server}</div>
       </div>
+      <button class="shrink-0 bg-transparent p-1.5 text-muted hover:bg-hover hover:text-fg" onclick={() => logout(true)}
+        title="Lock now: wipe keys from the server; backups pause until you log in (Ctrl+Shift+L)" aria-label="Lock now"><Icon name="lock" size={15} /></button>
+      <button class="shrink-0 bg-transparent p-1.5 text-muted hover:bg-hover hover:text-fg" onclick={() => logout(false)} title="Log out" aria-label="Log out"><Icon name="logout" size={15} /></button>
     </div>
-    <div class="text-[0.85rem] text-muted" title="Keys are wiped from server memory when this runs out">Keys unlocked for {lockIn}</div>
-    <div class="flex gap-1">
-      <button class="bg-transparent px-2 py-1 text-[0.85rem] text-muted hover:text-fg" onclick={() => logout(true)}
-        title="Wipe keys from the server now; backups pause until you log in (Ctrl+Shift+L)"><Icon name="lock" size={14} /> Lock now</button>
-      <button class="bg-transparent px-2 py-1 text-[0.85rem] text-muted hover:text-fg" onclick={() => logout(false)}><Icon name="logout" size={14} /> Log out</button>
+    <div class="mt-2.5 px-0.5" title="Keys are wiped from server memory when this runs out; backups pause until you log in again">
+      <div class="h-1 overflow-hidden rounded-full bg-black/10 dark:bg-white/12" role="meter" aria-label="Time left until keys lock" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(keysLeft * 100)}>
+        <div class="h-full rounded-full transition-[width] duration-700 {keysLeft < 0.1 ? 'bg-warn' : 'bg-accent-2'}" style="width: {keysLeft * 100}%"></div>
+      </div>
+      <div class="mt-1.5 flex items-baseline justify-between gap-2 text-[0.8rem] text-muted">
+        <span>Keys unlocked</span><span class="tabular-nums">{lockIn} left</span>
+      </div>
     </div>
   </div>
   {/if}

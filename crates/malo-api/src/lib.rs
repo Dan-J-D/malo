@@ -633,6 +633,39 @@ pub struct DeleteSummary {
     pub errors: Vec<String>,
 }
 
+/// Marks messages as spam, or as not spam (`spam: false`). Malo records it at once; messages
+/// still on their mail server are also moved there, into its Junk folder (or back to the inbox),
+/// by a job per account.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct SpamRequest {
+    #[ts(type = "Array<number>")]
+    pub ids: Vec<i64>,
+    pub spam: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+pub struct SpamResponse {
+    /// Messages marked in Malo.
+    #[ts(type = "number")]
+    pub marked: u64,
+    /// The jobs moving messages on their mail servers (none when every message was already
+    /// gone from its server).
+    pub jobs: Vec<JobInfo>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+pub struct SpamSummary {
+    pub account_id: String,
+    pub spam: bool,
+    /// Moved on the mail server.
+    #[ts(type = "number")]
+    pub moved: u64,
+    /// Already where they belong, or no longer on the server.
+    #[ts(type = "number")]
+    pub skipped: u64,
+    pub errors: Vec<String>,
+}
+
 // ───────────────────────────── jobs ─────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -676,6 +709,14 @@ pub enum JobKind {
         message_ids: Vec<i64>,
         scope: DeleteScope,
     },
+    /// Moves messages the user marked as spam into the mail server's Junk folder, or ones marked
+    /// as not spam back to the inbox (at most [`MAX_DELETE_BATCH`]).
+    MoveSpam {
+        account_id: String,
+        #[ts(type = "Array<number>")]
+        message_ids: Vec<i64>,
+        spam: bool,
+    },
 }
 
 impl JobKind {
@@ -684,7 +725,8 @@ impl JobKind {
         match self {
             JobKind::Backup { account_id }
             | JobKind::Purge { account_id }
-            | JobKind::DeleteMessages { account_id, .. } => Some(account_id),
+            | JobKind::DeleteMessages { account_id, .. }
+            | JobKind::MoveSpam { account_id, .. } => Some(account_id),
             _ => None,
         }
     }
@@ -847,6 +889,9 @@ pub struct MessageSummary {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub preview: Option<String>,
+    /// Spam: marked so in Malo, or in the mail server's Junk folder and not marked otherwise.
+    #[serde(default)]
+    pub spam: bool,
 }
 
 /// A value for a search operator (`from:`, `to:`, `file:`), most used first.
@@ -1285,6 +1330,9 @@ pub fn typescript_bindings() -> String {
         PurgeSummary,
         DeleteScope,
         DeleteSummary,
+        SpamRequest,
+        SpamResponse,
+        SpamSummary,
         CheckScope,
         JobKind,
         JobState,
