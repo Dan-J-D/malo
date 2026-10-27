@@ -2,7 +2,9 @@
 //! anything Malo encrypts must decrypt to the same bytes however it is split into chunks.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use malo_core::crypto::{decrypt_object, encrypt_object, Key, StreamDecryptor};
+use malo_core::crypto::{
+    decrypt_object, encrypt_object, encrypt_object_compressed, Key, StreamDecryptor,
+};
 
 fuzz_target!(|data: &[u8]| {
     let key: Key = zeroize::Zeroizing::new([7u8; 32]);
@@ -37,4 +39,14 @@ fuzz_target!(|data: &[u8]| {
         assert!(decrypt_object(&key, &bad).is_err(), "tampering at byte {i} not detected");
         assert!(decrypt_object(&key, &ct[..ct.len() - 1]).is_err(), "truncation not detected");
     }
+    // 3. The same for compressed objects.
+    let ct = encrypt_object_compressed(&key, data);
+    assert_eq!(decrypt_object(&key, &ct).expect("compressed round trip"), data);
+    let mut d = StreamDecryptor::new(&key);
+    let mut out = Vec::new();
+    for chunk in ct.chunks(split * 13) {
+        out.extend(d.update(chunk).expect("chunked compressed round trip"));
+    }
+    out.extend(d.finish().expect("final compressed segment"));
+    assert_eq!(out, data);
 });

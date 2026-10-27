@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, app } from '../api/client';
+  import { api, app, ApiError } from '../api/client';
   import type * as T from '../api/types';
   import { session, live, enterApp, errorText, notify, leaveServer, go } from '../state.svelte';
   import LocalData from '../components/LocalData.svelte';
@@ -19,6 +19,12 @@
   let kitPassphrase = $state('');
   let busy = $state(false);
   let error = $state('');
+  /** Two-step login: the server asked for a code from the authenticator app. */
+  let needCode = $state(session.profileTotp);
+  /** Only the code is missing: the password kept in the profile was accepted. */
+  const profileCode = $derived(session.profileTotp && mode === 'login');
+  let code = $state('');
+  let codeInput: HTMLInputElement | undefined = $state();
   // Logged in from a profile that kept the password, with the kit still to save: the kit form
   // asks for the password itself.
   let pendingMe: T.Me | null = $state(session.kitPending);
@@ -95,7 +101,10 @@
         } satisfies T.RecoverRequest);
         notify('Password reset. Your backups and settings are unchanged.', 'success');
       }
-      const me = await app.login(username, password);
+      const me = profileCode
+        ? await app.loginProfile(code)
+        : await app.login(username, password, mode === 'login' && needCode ? code : null);
+      code = '';
       kit = null;
       kitPassphrase = '';
       pendingMe = me;
@@ -103,7 +112,17 @@
       if (!me.recovery_kit_pending) next();
       password = password2 = '';
     } catch (e) {
-      error = errorText(e);
+      if (e instanceof ApiError && e.code === 'totp_required') {
+        // The password was right; ask for the code and keep what was typed.
+        needCode = true;
+        setTimeout(() => codeInput?.focus());
+      } else {
+        error = errorText(e);
+        if (e instanceof ApiError && e.code === 'totp_wrong') {
+          code = '';
+          setTimeout(() => codeInput?.focus());
+        }
+      }
     } finally {
       busy = false;
     }
@@ -185,7 +204,11 @@
         {#if mode === 'setup'}
           <label>Setup token <input bind:value={setupToken} required placeholder="printed in the server log on first start" /></label>
         {/if}
+        {#if profileCode}
+          <p class="muted">The password kept in <strong>{session.profile?.name}</strong> was accepted.</p>
+        {:else}
         <label>Username <input bind:value={username} required autocomplete="username" /></label>
+        {/if}
         {#if mode === 'recover' || mode === 'restore'}
           <div class="row small">
             <button type="button" onclick={chooseKit}>Choose recovery kit…</button>
@@ -193,7 +216,15 @@
           </div>
           {#if sealed}<label>Kit passphrase <input type="password" bind:value={kitPassphrase} required autocomplete="off" /></label>{/if}
         {/if}
+        {#if !profileCode}
         <label>{mode === 'recover' ? 'New password' : 'Password'} <input type="password" bind:value={password} required autocomplete={mode === 'login' ? 'current-password' : 'new-password'} minlength={mode === 'login' ? 1 : 10} /></label>
+        {/if}
+        {#if mode === 'login' && needCode}
+          <label>Code from your authenticator app
+            <input bind:this={codeInput} bind:value={code} required autocomplete="one-time-code" inputmode="text" spellcheck="false" placeholder="123456" maxlength="16" />
+          </label>
+          <p class="muted small">Lost the app? Enter one of your recovery codes instead (each works once).</p>
+        {/if}
         {#if mode !== 'login'}
           <label>Repeat password <input type="password" bind:value={password2} required autocomplete="new-password" /></label>
         {/if}

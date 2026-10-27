@@ -2129,6 +2129,7 @@ impl World {
         let req = LoginRequest {
             username: um.name.clone(),
             password: um.password.clone(),
+            totp: None,
         };
         let disabled = um.disabled;
         let r = anon
@@ -3013,6 +3014,7 @@ impl World {
                 let req = LoginRequest {
                     username: um.name.clone(),
                     password: um.password.clone(),
+                    totp: None,
                 };
                 match anon
                     .call::<_, LoginResponse>(Method::POST, "/auth/login", Some(&req))
@@ -3314,6 +3316,7 @@ impl World {
                     required_for_purge: d.required_for_purge,
                     deep_check: d.deep_check.clone(),
                     recovery_secrets: keep,
+                    features: Default::default(),
                 };
                 let (st, _) = self
                     .call(
@@ -3394,6 +3397,7 @@ impl World {
                         required_for_purge: d.required_for_purge,
                         deep_check: d.deep_check.clone(),
                         recovery_secrets: d.recovery_secrets.unwrap_or(false),
+                        features: Default::default(),
                     };
                     let (st, v) = self
                         .call(

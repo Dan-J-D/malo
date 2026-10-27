@@ -26,6 +26,11 @@ pub enum Role {
 pub struct LoginRequest {
     pub username: String,
     pub password: String,
+    /// Code from the authenticator app (or a recovery code) when two-step login is on. Without
+    /// it, such a login fails with the code `totp_required` and changes nothing.
+    #[serde(default)]
+    #[ts(optional)]
+    pub totp: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -54,6 +59,47 @@ pub struct Me {
     pub recovery_kit_outdated: bool,
     /// Jobs that came due while the user was locked and were skipped.
     pub skipped_while_locked: u32,
+    /// Logging in also asks for a code from an authenticator app. Older servers don't send it.
+    #[serde(default)]
+    pub totp_enabled: bool,
+    /// Recovery codes left for two-step login.
+    #[serde(default)]
+    pub totp_recovery_codes_left: u32,
+}
+
+// ───────────────────────────── two-step login (TOTP) ─────────────────────────────
+
+/// Starts turning on two-step login: asks for the password again.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct TotpSetupRequest {
+    pub password: String,
+}
+
+/// A new authenticator secret, not in use until confirmed with a code from it.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct TotpSetup {
+    /// Base32, for typing into the app by hand.
+    pub secret: String,
+    /// `otpauth://totp/…`
+    pub uri: String,
+    /// The URI as a QR code (SVG markup).
+    pub qr_svg: String,
+}
+
+/// Confirms [`TotpSetup`] with a code from the app, or (with the password) turns two-step login
+/// off or replaces the recovery codes.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct TotpCodeRequest {
+    pub code: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub password: Option<String>,
+}
+
+/// One-time codes for when the authenticator app is lost. Shown once; Malo keeps only hashes.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct TotpRecoveryCodes {
+    pub codes: Vec<String>,
 }
 
 /// Sets a new password with the recovery kit when the old one is forgotten. The user, their
@@ -432,6 +478,8 @@ pub enum MailFolderKind {
     AllMail,
     /// A Gmail inbox category (Social, Promotions, Updates, Forums).
     Category,
+    /// A saved search shown as a folder (`Smart/…`).
+    Smart,
 }
 
 /// Which folders mail apps see. Messages a mail app moved keep their place either way.
@@ -474,6 +522,64 @@ pub enum DeepCheckMode {
     Off,
 }
 
+/// S3 Object Lock / B2 File Lock retention mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum LockMode {
+    /// Users with a special permission can still shorten or remove the lock.
+    Governance,
+    /// Nobody can delete or shorten it until it expires, not even the account's root user.
+    Compliance,
+}
+
+/// Every message object written to the destination is locked against deletion and overwriting
+/// for `days`. Integrity checks extend the lock of objects still in the backup, so it rolls
+/// forward and old mail stays protected. Needs a bucket created with Object Lock (S3) or File
+/// Lock (B2) enabled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ObjectLock {
+    pub mode: LockMode,
+    pub days: u32,
+}
+
+/// Longest lock Malo sets (ten years).
+pub const MAX_LOCK_DAYS: u32 = 3650;
+
+/// How Malo uses a destination, apart from where it is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct DestinationFeatures {
+    /// Compress messages with zstd before encrypting them (encrypted destinations only; plain
+    /// destinations keep browsable `.eml` files).
+    #[serde(default = "yes")]
+    pub compress: bool,
+    /// S3 and B2 only.
+    #[serde(default)]
+    #[ts(optional)]
+    pub object_lock: Option<ObjectLock>,
+    /// Limit on writes to this destination, in KiB/s (0: none).
+    #[serde(default)]
+    pub upload_kib_per_sec: u32,
+    /// Limit on reads from this destination, in KiB/s (0: none).
+    #[serde(default)]
+    pub download_kib_per_sec: u32,
+    /// Storage price per GB and month, for the cost estimate.
+    #[serde(default)]
+    #[ts(optional)]
+    pub price_per_gb_month: Option<f64>,
+}
+
+impl Default for DestinationFeatures {
+    fn default() -> Self {
+        Self {
+            compress: true,
+            object_lock: None,
+            upload_kib_per_sec: 0,
+            download_kib_per_sec: 0,
+            price_per_gb_month: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct DestinationInput {
     /// Revision the client edited (from the view). A stale one is rejected with 409 so a device
@@ -495,6 +601,8 @@ pub struct DestinationInput {
     /// restore brings the destination back without them and asks for them again.
     #[serde(default)]
     pub recovery_secrets: bool,
+    #[serde(default)]
+    pub features: DestinationFeatures,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -524,6 +632,12 @@ pub struct DestinationView {
     #[ts(type = "number")]
     pub stored_bytes: u64,
     pub health: Option<DestinationHealth>,
+    #[serde(default)]
+    pub features: DestinationFeatures,
+    /// Objects still stored without compression (a *Compress stored mail* job shrinks them).
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub uncompressed_objects: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -534,6 +648,10 @@ pub struct DestinationTest {
     pub write_ms: u64,
     #[ts(type = "number")]
     pub read_ms: u64,
+    /// With Object Lock set: what the bucket and a locked probe object showed.
+    #[serde(default)]
+    #[ts(optional)]
+    pub lock: Option<String>,
 }
 
 // ───────────────────────────── purge ─────────────────────────────
@@ -717,6 +835,267 @@ pub enum JobKind {
         message_ids: Vec<i64>,
         spam: bool,
     },
+    /// Uploads backed-up messages to a mail account (`IMAP APPEND`).
+    RestoreToImap {
+        target_account_id: String,
+        selection: RestoreSelection,
+        target: RestoreTarget,
+    },
+    /// Rewrites objects stored before compression (or on a destination that just turned it on)
+    /// compressed. All destinations without one.
+    CompressStored {
+        #[serde(default)]
+        #[ts(optional)]
+        destination_id: Option<String>,
+    },
+}
+
+/// Which backed-up messages a restore uploads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "by", rename_all = "snake_case")]
+pub enum RestoreSelection {
+    Messages {
+        #[ts(type = "Array<number>")]
+        ids: Vec<i64>,
+    },
+    /// Everything a search finds (the same syntax as the search box).
+    Search {
+        query: String,
+        #[serde(default)]
+        #[ts(optional)]
+        account_id: Option<String>,
+    },
+    /// Every message of an account, optionally of one mailbox.
+    Account {
+        account_id: String,
+        #[serde(default)]
+        #[ts(optional)]
+        mailbox: Option<String>,
+    },
+}
+
+/// Where restored messages go on the target account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "to", rename_all = "snake_case")]
+pub enum RestoreTarget {
+    /// The mailboxes they were backed up from (created when missing; Gmail labels become labels).
+    Original,
+    /// One folder for all of them, created when missing.
+    Folder { name: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct RestoreRequest {
+    pub target_account_id: String,
+    pub selection: RestoreSelection,
+    pub target: RestoreTarget,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+pub struct RestoreSummary {
+    pub target_account_id: String,
+    #[ts(type = "number")]
+    pub restored: u64,
+    /// Already in the target mailbox (same Message-ID).
+    #[ts(type = "number")]
+    pub skipped: u64,
+    #[ts(type = "number")]
+    pub failed: u64,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+pub struct CompressSummary {
+    #[ts(type = "number")]
+    pub objects: u64,
+    #[ts(type = "number")]
+    pub bytes_before: u64,
+    #[ts(type = "number")]
+    pub bytes_after: u64,
+    #[ts(type = "number")]
+    pub failed: u64,
+    pub errors: Vec<String>,
+}
+
+// ───────────────────────────── storage usage ─────────────────────────────
+
+/// What one account takes up on one destination.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+pub struct UsageCell {
+    pub account_id: String,
+    pub destination_id: String,
+    #[ts(type = "number")]
+    pub messages: u64,
+    /// Size of the messages themselves.
+    #[ts(type = "number")]
+    pub message_bytes: u64,
+    /// What the objects take up on the destination (after compression and encryption;
+    /// duplicates stored once).
+    #[ts(type = "number")]
+    pub stored_bytes: u64,
+}
+
+/// Stored bytes of one destination at the end of a day.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct UsagePoint {
+    /// `YYYY-MM-DD`
+    pub date: String,
+    pub destination_id: String,
+    #[ts(type = "number")]
+    pub stored_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+pub struct UsageReport {
+    pub cells: Vec<UsageCell>,
+    /// Daily totals per destination, oldest first, from the first backup on.
+    pub history: Vec<UsagePoint>,
+}
+
+// ───────────────────────────── saved searches ─────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SavedSearch {
+    pub id: String,
+    pub name: String,
+    /// Search box syntax.
+    pub query: String,
+    /// Limited to one account; all accounts without.
+    #[serde(default)]
+    #[ts(optional)]
+    pub account_id: Option<String>,
+    /// Also a folder in mail apps (under `Smart/`), with the messages of the mail login's account.
+    #[serde(default)]
+    pub mail_folder: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct SavedSearchInput {
+    pub name: String,
+    pub query: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub mail_folder: bool,
+}
+
+// ───────────────────────────── alerts ─────────────────────────────
+
+/// Where alerts go.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AlertChannel {
+    /// A JSON `POST` with `title`, `message`, `severity` and `event` (see the README).
+    Webhook { url: String },
+    /// An ntfy topic, on ntfy.sh or a server of your own.
+    Ntfy {
+        /// Defaults to `https://ntfy.sh`.
+        server: String,
+        topic: String,
+        /// An access token for protected topics ([`REDACTED`] in views).
+        #[serde(default)]
+        #[ts(optional)]
+        token: Option<String>,
+    },
+    /// The notify endpoint of an Apprise API server, e.g. `http://apprise:8000/notify/malo`,
+    /// which passes the alert on to whatever services it is set up for.
+    Apprise { url: String },
+    /// An email sent through the outgoing (SMTP) server of one of your accounts. Only while
+    /// you're logged in: the account's credentials are sealed while you're locked.
+    Email { account_id: String, to: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct AlertSettings {
+    #[serde(default)]
+    pub channels: Vec<AlertChannel>,
+    /// Alert when an account's backup failed this many times in a row (0: never).
+    #[serde(default = "default_backup_failures")]
+    pub backup_failures: u32,
+    /// An integrity check found missing or damaged copies, or couldn't run.
+    #[serde(default = "yes")]
+    pub check_problems: bool,
+    /// Signing in to a mail account with OAuth stopped working (the refresh token was refused).
+    #[serde(default = "yes")]
+    pub oauth_failures: bool,
+    /// A destination can't be reached.
+    #[serde(default = "yes")]
+    pub destination_unreachable: bool,
+    /// Scheduled jobs are being skipped because you're locked. Sent through webhooks, ntfy and
+    /// Apprise only, whose addresses the server then keeps readable while you're locked.
+    #[serde(default = "yes")]
+    pub skipped_locked: bool,
+    /// Also say when a problem alerted about is over.
+    #[serde(default = "yes")]
+    pub recoveries: bool,
+}
+
+fn default_backup_failures() -> u32 {
+    3
+}
+
+impl Default for AlertSettings {
+    fn default() -> Self {
+        Self {
+            channels: vec![],
+            backup_failures: default_backup_failures(),
+            check_problems: true,
+            oauth_failures: true,
+            destination_unreachable: true,
+            skipped_locked: true,
+            recoveries: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum AlertEvent {
+    BackupFailing,
+    CheckProblems,
+    OauthFailing,
+    DestinationUnreachable,
+    SkippedLocked,
+    Recovered,
+    Test,
+}
+
+/// What happened when an alert was sent to one channel.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct AlertDelivery {
+    /// The channel, e.g. "ntfy alerts" or "email to me@example.com".
+    pub channel: String,
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
+// ───────────────────────────── export ─────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportFormat {
+    /// mboxrd: one file per folder (zipped when there are several).
+    Mbox,
+    /// A zipped Maildir++ tree per account, with flags in the file names.
+    Maildir,
+    /// A zip of `.eml` files in their folders.
+    Zip,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct ExportRequest {
+    pub selection: RestoreSelection,
+    pub format: ExportFormat,
+}
+
+/// A prepared export: download it once from `/export/{token}` within a few minutes.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct ExportTicket {
+    pub token: String,
+    pub filename: String,
+    #[ts(type = "number")]
+    pub messages: u64,
 }
 
 impl JobKind {
@@ -727,6 +1106,9 @@ impl JobKind {
             | JobKind::Purge { account_id }
             | JobKind::DeleteMessages { account_id, .. }
             | JobKind::MoveSpam { account_id, .. } => Some(account_id),
+            JobKind::RestoreToImap {
+                target_account_id, ..
+            } => Some(target_account_id),
             _ => None,
         }
     }
@@ -1186,6 +1568,12 @@ pub struct AdminSettings {
     /// server or MinIO on the LAN is common.
     #[serde(default)]
     pub block_private_networks: bool,
+    /// Server-wide limit on writes to storage, in KiB/s, shared by every user (0: none).
+    #[serde(default)]
+    pub upload_kib_per_sec: u32,
+    /// Server-wide limit on downloads from mail servers and storage, in KiB/s (0: none).
+    #[serde(default)]
+    pub download_kib_per_sec: u32,
 }
 
 impl Default for AdminSettings {
@@ -1197,6 +1585,8 @@ impl Default for AdminSettings {
             default_max_accounts: 20,
             max_jobs_per_user: 2,
             block_private_networks: false,
+            upload_kib_per_sec: 0,
+            download_kib_per_sec: 0,
         }
     }
 }
@@ -1288,6 +1678,10 @@ pub fn typescript_bindings() -> String {
         LoginRequest,
         LoginResponse,
         Me,
+        TotpSetupRequest,
+        TotpSetup,
+        TotpCodeRequest,
+        TotpRecoveryCodes,
         ChangePasswordRequest,
         DeleteAccountRequest,
         SetupRequest,
@@ -1320,6 +1714,9 @@ pub fn typescript_bindings() -> String {
         MailFolderKind,
         MailViewSettings,
         DeepCheckMode,
+        LockMode,
+        ObjectLock,
+        DestinationFeatures,
         DestinationInput,
         DestinationView,
         DestinationTest,
@@ -1335,6 +1732,23 @@ pub fn typescript_bindings() -> String {
         SpamSummary,
         CheckScope,
         JobKind,
+        RestoreSelection,
+        RestoreTarget,
+        RestoreRequest,
+        RestoreSummary,
+        CompressSummary,
+        UsageCell,
+        UsagePoint,
+        UsageReport,
+        SavedSearch,
+        SavedSearchInput,
+        AlertChannel,
+        AlertSettings,
+        AlertEvent,
+        AlertDelivery,
+        ExportFormat,
+        ExportRequest,
+        ExportTicket,
         JobState,
         JobTrigger,
         JobProgress,
@@ -1370,6 +1784,7 @@ pub fn typescript_bindings() -> String {
         ApiError,
     );
     out.push_str(&format!("export const REDACTED = {REDACTED:?};\n"));
+    out.push_str(&format!("export const MAX_LOCK_DAYS = {MAX_LOCK_DAYS};\n"));
     out
 }
 

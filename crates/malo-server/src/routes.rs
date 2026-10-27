@@ -49,7 +49,7 @@ fn best_effort<T>(r: anyhow::Result<T>, what: &str) {
     }
 }
 
-fn ctx_for(state: &SharedState, user: &Arc<UnlockedUser>) -> JobCtx {
+pub(crate) fn ctx_for(state: &SharedState, user: &Arc<UnlockedUser>) -> JobCtx {
     jobs::job_ctx(state, user, "api", CancellationToken::new())
 }
 
@@ -539,6 +539,9 @@ fn destination_view(user: &UnlockedUser, d: &Destination) -> anyhow::Result<Dest
     let (count, bytes) = user.index.replica_stats(&d.id).unwrap_or_default();
     v.object_count = count;
     v.stored_bytes = bytes;
+    if d.compresses() {
+        v.uncompressed_objects = user.index.uncompressed_count(&d.id).unwrap_or_default();
+    }
     v.health = user
         .index
         .reports(1)
@@ -748,6 +751,7 @@ async fn test_destination(
             error: Some(format!("{e:#}")),
             write_ms: 0,
             read_ms: 0,
+            lock: None,
         },
     }
 }
@@ -783,6 +787,23 @@ pub async fn create_job(
             CheckScope::All => {}
         },
         JobKind::RebuildIndexAll | JobKind::SearchIndex => {}
+        JobKind::CompressStored { destination_id } => {
+            if let Some(id) = destination_id {
+                let d = cfg
+                    .destination(id)
+                    .ok_or_else(|| ApiErr::not_found("destination"))?;
+                if !d.compresses() {
+                    return Err(ApiErr::bad_request(
+                        "turn compression on for this destination first (encrypted destinations only)",
+                    ));
+                }
+            }
+        }
+        JobKind::RestoreToImap {
+            target_account_id,
+            selection,
+            target,
+        } => check_restore(&cfg, target_account_id, selection, target)?,
         JobKind::DeleteMessages {
             account_id,
             message_ids,
@@ -1320,6 +1341,10 @@ pub async fn view_message(
 }
 
 fn download(bytes: Vec<u8>, filename: &str, content_type: &str) -> Response {
+    download_body(Body::from(bytes), filename, content_type)
+}
+
+fn download_body(body: Body, filename: &str, content_type: &str) -> Response {
     let safe: String = filename
         .chars()
         .map(|c| {
@@ -1355,7 +1380,7 @@ fn download(bytes: Vec<u8>, filename: &str, content_type: &str) -> Response {
             header::CONTENT_SECURITY_POLICY,
             "sandbox; default-src 'none'",
         )
-        .body(Body::from(bytes))
+        .body(body)
         .unwrap()
 }
 
@@ -1565,7 +1590,10 @@ pub async fn delete_mail_login(
 fn mail_view_info(user: &UnlockedUser, account: &str) -> anyhow::Result<MailViewInfo> {
     use malo_core::mailview::FolderSource;
     let settings = user.index.imap_settings(account)?;
-    let folders = user.index.imap_all_folders(account, &settings)?;
+    let mut folders = user.index.imap_all_folders(account, &settings)?;
+    let smart =
+        malo_core::mailview::smart_folders(&user.config().saved_searches, account, &folders);
+    folders.extend(smart);
     let gmail = folders
         .iter()
         .any(|f| f.special_use.as_deref() == Some("\\All") && f.source == FolderSource::Mailbox);
@@ -1582,6 +1610,7 @@ fn mail_view_info(user: &UnlockedUser, account: &str) -> anyhow::Result<MailView
                 FolderSource::Primary => MailFolderKind::Primary,
                 FolderSource::AllMail => MailFolderKind::AllMail,
                 FolderSource::Category(_) => MailFolderKind::Category,
+                FolderSource::Search(_) => MailFolderKind::Smart,
             },
             shown: inbox || !settings.hidden.contains(&f.name),
             name: f.name,
@@ -1845,6 +1874,353 @@ pub async fn admin_get_settings(
     _a: Admin,
 ) -> ApiResult<Json<AdminSettings>> {
     Ok(Json(state.db.admin_settings()?))
+}
+
+/// `POST /restore`: uploads backed-up mail to a mail account.
+pub async fn restore(
+    State(state): State<SharedState>,
+    u: Unlocked,
+    Json(req): Json<malo_api::RestoreRequest>,
+) -> ApiResult<(StatusCode, Json<JobInfo>)> {
+    let cfg = u.user.config();
+    check_restore(&cfg, &req.target_account_id, &req.selection, &req.target)?;
+    let job = jobs::submit(
+        &state,
+        &u.user.user_id,
+        JobKind::RestoreToImap {
+            target_account_id: req.target_account_id,
+            selection: req.selection,
+            target: req.target,
+        },
+        JobTrigger::Manual,
+    )?;
+    Ok((StatusCode::ACCEPTED, Json(job)))
+}
+
+fn check_restore(
+    cfg: &malo_core::config::UserConfig,
+    target_account_id: &str,
+    selection: &malo_api::RestoreSelection,
+    target: &malo_api::RestoreTarget,
+) -> ApiResult<()> {
+    use malo_api::RestoreTarget;
+    let account = cfg
+        .account(target_account_id)
+        .ok_or_else(|| ApiErr::not_found("account"))?;
+    malo_core::restore::check_target(account).map_err(|e| ApiErr::bad_request(e.to_string()))?;
+    if let RestoreTarget::Folder { name } = target {
+        malo_core::restore::check_folder_name(name)
+            .map_err(|e| ApiErr::bad_request(e.to_string()))?;
+    }
+    check_selection(cfg, selection)
+}
+
+/// The messages a restore or export is about must exist, in bounds.
+fn check_selection(
+    cfg: &malo_core::config::UserConfig,
+    selection: &malo_api::RestoreSelection,
+) -> ApiResult<()> {
+    use malo_api::RestoreSelection;
+    match selection {
+        RestoreSelection::Messages { ids } => {
+            if ids.is_empty() || ids.len() > malo_core::restore::MAX_RESTORE {
+                return Err(ApiErr::bad_request(format!(
+                    "select between 1 and {} messages",
+                    malo_core::restore::MAX_RESTORE
+                )));
+            }
+        }
+        RestoreSelection::Search { account_id, .. } => {
+            if let Some(a) = account_id {
+                cfg.account(a).ok_or_else(|| ApiErr::not_found("account"))?;
+            }
+        }
+        RestoreSelection::Account { account_id, .. } => {
+            cfg.account(account_id)
+                .ok_or_else(|| ApiErr::not_found("account"))?;
+        }
+    }
+    Ok(())
+}
+
+// ───────────────────────────── export ─────────────────────────────
+
+/// An export waiting to be downloaded.
+pub struct PendingExport {
+    user_id: String,
+    plan: malo_core::export::Plan,
+    format: ExportFormat,
+    expires: chrono::DateTime<Utc>,
+}
+
+/// Works out what a selection exports and returns a ticket to download it with (once, within
+/// ten minutes). Two steps, so the app can save the download with a plain GET.
+pub async fn prepare_export(
+    State(state): State<SharedState>,
+    u: Unlocked,
+    Json(req): Json<ExportRequest>,
+) -> ApiResult<Json<ExportTicket>> {
+    check_selection(&u.user.config(), &req.selection)?;
+    let ctx = ctx_for(&state, &u.user);
+    let selection = req.selection.clone();
+    let plan = tokio::task::spawn_blocking(move || malo_core::export::plan(&ctx, &selection))
+        .await
+        .map_err(|e| ApiErr::from(anyhow::anyhow!(e)))?
+        .map_err(|e| ApiErr::bad_request(format!("{e:#}")))?;
+    if plan.items.is_empty() {
+        return Err(ApiErr::bad_request(if plan.skipped.is_empty() {
+            "nothing to export"
+        } else {
+            "nothing to export: these messages aren't backed up yet"
+        }));
+    }
+    let token = hex::encode(crypto::random_bytes::<24>());
+    let ticket = ExportTicket {
+        token: token.clone(),
+        filename: plan.filename(req.format),
+        messages: plan.items.len() as u64,
+    };
+    let now = Utc::now();
+    let mut pending = state.exports.lock().unwrap();
+    pending.retain(|_, p| p.expires > now);
+    // A few at a time per user: each holds its message list in memory.
+    if pending
+        .values()
+        .filter(|p| p.user_id == u.user.user_id)
+        .count()
+        >= 4
+    {
+        return Err(ApiErr::conflict(
+            "several exports are already waiting to download; save or cancel them first",
+        ));
+    }
+    pending.insert(
+        token,
+        PendingExport {
+            user_id: u.user.user_id.clone(),
+            plan,
+            format: req.format,
+            expires: now + chrono::Duration::minutes(10),
+        },
+    );
+    Ok(Json(ticket))
+}
+
+/// Streams a prepared export. A message that can't be read is listed in `export-errors.txt`
+/// (or, for a single mbox file, ends the download with an error).
+pub async fn download_export(
+    State(state): State<SharedState>,
+    u: Unlocked,
+    Path(token): Path<String>,
+) -> ApiResult<Response> {
+    let pending = {
+        let mut map = state.exports.lock().unwrap();
+        match map.get(&token) {
+            Some(p) if p.user_id == u.user.user_id && p.expires > Utc::now() => map.remove(&token),
+            _ => None,
+        }
+    }
+    .ok_or_else(|| ApiErr::not_found("export (it can be downloaded once, within 10 minutes)"))?;
+    let filename = pending.plan.filename(pending.format);
+    let content_type = pending.plan.content_type(pending.format);
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    let ctx = ctx_for(&state, &u.user);
+    tokio::spawn(async move {
+        if let Err(e) = malo_core::export::write(
+            &ctx,
+            &pending.plan,
+            pending.format,
+            malo_core::export::Sink::new(tx),
+        )
+        .await
+        {
+            tracing::warn!("export failed: {e:#}");
+        }
+    });
+    let stream = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    });
+    Ok(download_body(
+        Body::from_stream(stream),
+        &filename,
+        content_type,
+    ))
+}
+
+// ───────────────────────────── alerts ─────────────────────────────
+
+pub async fn get_alerts(u: Unlocked) -> Json<AlertSettings> {
+    Json(crate::alerts::view(&u.user.config().alerts))
+}
+
+pub async fn put_alerts(
+    State(state): State<SharedState>,
+    u: Unlocked,
+    Json(s): Json<AlertSettings>,
+) -> ApiResult<Json<AlertSettings>> {
+    let cfg = u.user.config();
+    let s = crate::alerts::validate(&cfg, s, &cfg.alerts)
+        .map_err(|e| ApiErr::bad_request(format!("{e:#}")))?;
+    for c in &s.channels {
+        if let AlertChannel::Email { account_id, .. } = c {
+            if let Some(smtp) = cfg.account(account_id).and_then(|a| a.smtp.as_ref()) {
+                crate::net::check_smtp(&state, smtp).await?;
+            }
+        }
+    }
+    let saved = s.clone();
+    u.user
+        .update_config(move |cfg| {
+            cfg.alerts = saved;
+            Ok(())
+        })
+        .await?;
+    crate::alerts::sync_mirror(&state, &u.user.user_id, &s);
+    Ok(Json(crate::alerts::view(&s)))
+}
+
+/// Sends a test alert to the given channels (secrets sent back as [`REDACTED`] are taken from
+/// the saved settings), so they can be tried before saving.
+pub async fn test_alerts(
+    State(state): State<SharedState>,
+    u: Unlocked,
+    Json(s): Json<AlertSettings>,
+) -> ApiResult<Json<Vec<AlertDelivery>>> {
+    let cfg = u.user.config();
+    let s = crate::alerts::validate(&cfg, s, &cfg.alerts)
+        .map_err(|e| ApiErr::bad_request(format!("{e:#}")))?;
+    if s.channels.is_empty() {
+        return Err(ApiErr::bad_request("add a channel to send a test to"));
+    }
+    let alert = crate::alerts::Alert {
+        event: AlertEvent::Test,
+        title: "Test alert from Malo".into(),
+        message: format!(
+            "Alerts for {} reach you here. Malo will tell you when backups fail, checks find problems, sign-ins or destinations stop working, or jobs are skipped while you're locked.",
+            u.user.username
+        ),
+    };
+    Ok(Json(
+        crate::alerts::deliver(&state, &u.user.username, Some(&u.user), &s.channels, &alert).await,
+    ))
+}
+
+// ───────────────────────────── storage usage ─────────────────────────────
+
+pub async fn usage(u: Unlocked) -> ApiResult<Json<malo_api::UsageReport>> {
+    let index = u.user.index.clone();
+    let report = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        Ok(malo_api::UsageReport {
+            cells: index.usage()?,
+            history: index.usage_history()?,
+        })
+    })
+    .await
+    .map_err(|e| ApiErr::from(anyhow::anyhow!(e)))??;
+    Ok(Json(report))
+}
+
+// ───────────────────────────── saved searches ─────────────────────────────
+
+pub async fn list_saved_searches(u: Unlocked) -> ApiResult<Json<Vec<malo_api::SavedSearch>>> {
+    Ok(Json(u.user.config().saved_searches.clone()))
+}
+
+fn saved_search(
+    cfg: &malo_core::config::UserConfig,
+    id: String,
+    input: malo_api::SavedSearchInput,
+) -> ApiResult<malo_api::SavedSearch> {
+    let name = input.name.trim().to_string();
+    if name.is_empty() || name.chars().count() > 80 {
+        return Err(ApiErr::bad_request("name: 1–80 characters"));
+    }
+    if name
+        .chars()
+        .any(|c| malo_core::layout::is_invisible(c) || c.is_control() || c == '/' || c == '"')
+    {
+        return Err(ApiErr::bad_request(
+            "the name can't contain /, \" or invisible characters",
+        ));
+    }
+    if input.query.trim().is_empty() || input.query.len() > 2000 {
+        return Err(ApiErr::bad_request(
+            "enter a search of up to 2000 characters",
+        ));
+    }
+    if let Some(a) = &input.account_id {
+        cfg.account(a).ok_or_else(|| ApiErr::not_found("account"))?;
+    }
+    if cfg
+        .saved_searches
+        .iter()
+        .any(|s| s.id != id && s.name.eq_ignore_ascii_case(&name))
+    {
+        return Err(ApiErr::conflict("a saved search with this name exists"));
+    }
+    Ok(malo_api::SavedSearch {
+        id,
+        name,
+        query: input.query.trim().to_string(),
+        account_id: input.account_id,
+        mail_folder: input.mail_folder,
+    })
+}
+
+pub async fn create_saved_search(
+    u: Unlocked,
+    Json(input): Json<malo_api::SavedSearchInput>,
+) -> ApiResult<(StatusCode, Json<malo_api::SavedSearch>)> {
+    let id = uuid::Uuid::new_v4().simple().to_string()[..16].to_string();
+    let s = u
+        .user
+        .update_config(move |cfg| {
+            anyhow::ensure!(cfg.saved_searches.len() < 200, "at most 200 saved searches");
+            let s = saved_search(cfg, id, input).map_err(|e| anyhow::anyhow!(e.message))?;
+            cfg.saved_searches.push(s.clone());
+            Ok(s)
+        })
+        .await
+        .map_err(|e| ApiErr::bad_request(format!("{e:#}")))?;
+    Ok((StatusCode::CREATED, Json(s)))
+}
+
+pub async fn update_saved_search(
+    u: Unlocked,
+    Path(id): Path<String>,
+    Json(input): Json<malo_api::SavedSearchInput>,
+) -> ApiResult<Json<malo_api::SavedSearch>> {
+    if !u.user.config().saved_searches.iter().any(|s| s.id == id) {
+        return Err(ApiErr::not_found("saved search"));
+    }
+    let s = u
+        .user
+        .update_config(move |cfg| {
+            let s = saved_search(cfg, id.clone(), input).map_err(|e| anyhow::anyhow!(e.message))?;
+            let cur = cfg
+                .saved_searches
+                .iter_mut()
+                .find(|x| x.id == id)
+                .ok_or_else(|| anyhow::anyhow!("saved search not found"))?;
+            *cur = s.clone();
+            Ok(s)
+        })
+        .await
+        .map_err(|e| ApiErr::bad_request(format!("{e:#}")))?;
+    Ok(Json(s))
+}
+
+pub async fn delete_saved_search(u: Unlocked, Path(id): Path<String>) -> ApiResult<StatusCode> {
+    if !u.user.config().saved_searches.iter().any(|s| s.id == id) {
+        return Err(ApiErr::not_found("saved search"));
+    }
+    u.user
+        .update_config(move |cfg| {
+            cfg.saved_searches.retain(|s| s.id != id);
+            Ok(())
+        })
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn admin_put_settings(

@@ -453,6 +453,8 @@ impl Index {
         }
         // Spam as marked in Malo: 1 spam, 0 not spam, NULL as the mail server files it (Junk).
         let _ = conn.execute_batch("ALTER TABLE messages ADD COLUMN spam INTEGER");
+        // Until when the object is known to be locked (Object Lock), extended by checks.
+        let _ = conn.execute_batch("ALTER TABLE replicas ADD COLUMN locked_until TEXT");
         unescape_stored_labels(&conn)?;
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS messages_thread ON messages(account, thread) WHERE thread IS NOT NULL",
@@ -1064,6 +1066,56 @@ impl Index {
         self.query_messages(q, None, destinations)
     }
 
+    /// Ids of every message a search finds (search box syntax), newest first, at most `cap`.
+    pub fn matching_ids(
+        &self,
+        account: Option<&str>,
+        text: &str,
+        cap: usize,
+    ) -> anyhow::Result<Vec<i64>> {
+        let mut q = MessageQuery {
+            account: account.map(str::to_string),
+            text: Some(text.to_string()).filter(|t| !t.trim().is_empty()),
+            limit: 1000,
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        loop {
+            let (_, page) = self.list_messages(&q, 0)?;
+            let n = page.len();
+            out.extend(page.into_iter().map(|m| m.id));
+            if n < 1000 || out.len() >= cap {
+                break;
+            }
+            // Pinned to the first page, so mail arriving meanwhile doesn't shift the pages.
+            if q.max_id.is_none() {
+                q.max_id = out.iter().copied().max();
+            }
+            q.offset += 1000;
+        }
+        out.truncate(cap);
+        Ok(out)
+    }
+
+    /// Ids of an account's messages, optionally only those in mailboxes of one name.
+    pub fn account_message_ids(
+        &self,
+        account: &str,
+        mailbox: Option<&str>,
+    ) -> anyhow::Result<Vec<i64>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT g.id FROM messages g WHERE g.account=?1 AND (?2 IS NULL OR EXISTS(
+                    SELECT 1 FROM memberships m JOIN mailboxes mb ON mb.id=m.mailbox
+                    WHERE m.message=g.id AND mb.name=?2)) ORDER BY g.id",
+            )?;
+            let rows = stmt
+                .query_map(params![account, mailbox], |r| r.get(0))?
+                .collect();
+            rows
+        })
+    }
+
     fn query_messages(
         &self,
         q: &MessageQuery,
@@ -1236,6 +1288,23 @@ impl Index {
         })
     }
 
+    /// The replicas stored in one object of a destination.
+    pub fn replicas_at(
+        &self,
+        destination: &str,
+        object_path: &str,
+    ) -> anyhow::Result<Vec<ReplicaRow>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(&format!(
+                "{REPLICA_SELECT} WHERE r.destination=?1 AND r.object_path=?2 ORDER BY r.message"
+            ))?;
+            let rows = stmt
+                .query_map([destination, object_path], replica_row)?
+                .collect();
+            rows
+        })
+    }
+
     pub fn replicas_in(&self, destination: &str) -> anyhow::Result<Vec<ReplicaRow>> {
         self.with(|c| {
             let mut stmt = c.prepare(&format!(
@@ -1254,6 +1323,139 @@ impl Index {
                 |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
             )
         })
+    }
+
+    /// Moves every replica stored at `old_path` on a destination to `new_path` (a recompressed
+    /// copy of the same content). Returns the messages moved.
+    pub fn move_replica_object(
+        &self,
+        destination: &str,
+        old_path: &str,
+        new_path: &str,
+        stored_size: u64,
+    ) -> anyhow::Result<u64> {
+        let n = self.with(|c| {
+            c.execute(
+                "UPDATE replicas SET object_path=?3, stored_size=?4, locked_until=NULL
+                 WHERE destination=?1 AND object_path=?2",
+                params![destination, old_path, new_path, stored_size as i64],
+            )
+        })?;
+        Ok(n as u64)
+    }
+
+    /// Verified objects on an encrypted destination that were stored without compression.
+    pub fn uncompressed_objects(&self, destination: &str) -> anyhow::Result<Vec<String>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT DISTINCT object_path FROM replicas WHERE destination=?1 AND encrypted=1
+                   AND status='verified' AND object_path NOT LIKE '%.z.enc' ORDER BY object_path",
+            )?;
+            let rows = stmt.query_map([destination], |r| r.get(0))?.collect();
+            rows
+        })
+    }
+
+    pub fn uncompressed_count(&self, destination: &str) -> anyhow::Result<u64> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COUNT(DISTINCT object_path) FROM replicas WHERE destination=?1 AND encrypted=1
+                   AND status='verified' AND object_path NOT LIKE '%.z.enc'",
+                [destination],
+                |r| r.get::<_, i64>(0),
+            )
+        })
+        .map(|n| n as u64)
+    }
+
+    /// Verified objects whose lock isn't known to hold until `until`.
+    pub fn lock_due(&self, destination: &str, until: DateTime<Utc>) -> anyhow::Result<Vec<String>> {
+        let until = until.to_rfc3339();
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT object_path FROM replicas WHERE destination=?1 AND status='verified'
+                 GROUP BY object_path HAVING MIN(COALESCE(locked_until,'')) < ?2 ORDER BY object_path",
+            )?;
+            let rows = stmt.query_map(params![destination, until], |r| r.get(0))?.collect();
+            rows
+        })
+    }
+
+    pub fn set_locked_until(
+        &self,
+        destination: &str,
+        object_path: &str,
+        until: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE replicas SET locked_until=?3 WHERE destination=?1 AND object_path=?2",
+                params![destination, object_path, until.to_rfc3339()],
+            )
+        })?;
+        Ok(())
+    }
+
+    /// What each account takes up on each destination (verified replicas). Objects shared by
+    /// several messages of an account count once.
+    pub fn usage(&self) -> anyhow::Result<Vec<malo_api::UsageCell>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT account, destination, COUNT(*), SUM(size), SUM(stored) FROM (
+                    SELECT g.account AS account, r.destination AS destination, r.object_path,
+                           MAX(g.size) AS size, MAX(r.stored_size) AS stored
+                    FROM replicas r JOIN messages g ON g.id=r.message
+                    WHERE r.status='verified'
+                    GROUP BY g.account, r.destination, r.object_path)
+                 GROUP BY account, destination ORDER BY account, destination",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(malo_api::UsageCell {
+                        account_id: r.get(0)?,
+                        destination_id: r.get(1)?,
+                        messages: r.get::<_, i64>(2)? as u64,
+                        message_bytes: r.get::<_, i64>(3)? as u64,
+                        stored_bytes: r.get::<_, i64>(4)? as u64,
+                    })
+                })?
+                .collect();
+            rows
+        })
+    }
+
+    /// Bytes stored per destination and day, from when each object was written (verified
+    /// replicas that are still there). Running totals, oldest first.
+    pub fn usage_history(&self) -> anyhow::Result<Vec<malo_api::UsagePoint>> {
+        let daily: Vec<(String, String, i64)> = self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT day, destination, SUM(stored) FROM (
+                    SELECT r.destination AS destination, r.object_path,
+                           MIN(substr(COALESCE(r.written_at, r.verified_at, ''), 1, 10)) AS day,
+                           MAX(r.stored_size) AS stored
+                    FROM replicas r JOIN messages g ON g.id=r.message
+                    WHERE r.status='verified'
+                    GROUP BY g.account, r.destination, r.object_path)
+                 WHERE day <> '' GROUP BY day, destination ORDER BY day",
+            )?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect();
+            rows
+        })?;
+        let mut totals: std::collections::BTreeMap<String, u64> = Default::default();
+        Ok(daily
+            .into_iter()
+            .map(|(date, destination_id, bytes)| {
+                let t = totals.entry(destination_id.clone()).or_default();
+                *t += bytes.max(0) as u64;
+                malo_api::UsagePoint {
+                    date,
+                    destination_id,
+                    stored_bytes: *t,
+                }
+            })
+            .collect())
     }
 
     pub fn delete_replicas_for_destination(&self, destination: &str) -> anyhow::Result<()> {

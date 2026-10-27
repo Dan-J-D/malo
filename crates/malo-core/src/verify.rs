@@ -71,6 +71,9 @@ pub async fn run_check(
         );
         let (health, bad) = check_destination(ctx, store, account_filter, deep).await?;
         damaged.extend(bad.into_iter().map(|r| (store.dest.id.clone(), r)));
+        if health.error.is_none() && account_filter.is_none() {
+            extend_locks(ctx, store).await?;
+        }
         report.destinations.push(health);
     }
 
@@ -132,6 +135,49 @@ pub async fn run_check(
         report: report.clone(),
     });
     Ok(report)
+}
+
+/// Keeps Object Lock rolling: every object still in the backup whose lock runs out within half
+/// the lock period is locked again for the full period. A failure is reported, not fatal: the
+/// objects themselves are fine.
+async fn extend_locks(ctx: &JobCtx, store: &Store) -> anyhow::Result<u64> {
+    let Some(locker) = store.locker() else {
+        return Ok(0);
+    };
+    let days = locker.settings().days as i64;
+    let due = ctx.index.lock_due(
+        &store.dest.id,
+        chrono::Utc::now() + chrono::Duration::days((days + 1) / 2),
+    )?;
+    let mut extended = 0;
+    let mut first_error = None;
+    for (i, path) in due.iter().enumerate() {
+        if i % 200 == 0 {
+            ctx.check_cancel()?;
+        }
+        let until = locker.until_from_now();
+        match locker.lock(path, until).await {
+            Ok(()) => {
+                ctx.index.set_locked_until(&store.dest.id, path, until)?;
+                extended += 1;
+            }
+            Err(e) => {
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    if let Some(e) = first_error {
+        let failed = due.len() as u64 - extended;
+        tracing::warn!(dest = %store.dest.name, "Object Lock not extended for {failed} object(s): {e:#}");
+        ctx.events.emit(SyncEvent::Notice {
+            level: "warning".into(),
+            message: format!(
+                "{}: the lock of {failed} object(s) couldn't be extended: {e:#}",
+                store.dest.name
+            ),
+        });
+    }
+    Ok(extended)
 }
 
 fn count_fixed(
@@ -231,10 +277,15 @@ async fn check_destination(
             h.pending += 1;
             continue;
         };
-        let expected = if r.encrypted {
-            crypto::encrypted_len(r.size)
+        // The size recorded when it was written; objects from before compression have the size
+        // their plain size implies. A compressed object of unknown size is only judged by a
+        // deep check.
+        let expected = if r.stored_size > 0 {
+            Some(r.stored_size)
+        } else if crate::store::is_compressed_path(&r.object_path) {
+            None
         } else {
-            r.size
+            Some(crate::store::expected_stored_len(r.encrypted, r.size))
         };
         // A replica already found corrupt is always re-hashed: a size match must not clear it
         // just because this check's deep slice (or a quick check) skips it.
@@ -242,13 +293,15 @@ async fn check_destination(
             || r.status == ReplicaStatus::Corrupt;
         let outcome = match files.get(&r.object_path) {
             None => Verify::Missing,
-            Some(sz) if *sz != expected => Verify::Corrupt(format!("size {sz} ≠ {expected}")),
+            Some(sz) if expected.is_some_and(|e| *sz != e) => {
+                Verify::Corrupt(format!("size {sz} ≠ {}", expected.unwrap_or_default()))
+            }
             Some(_) if deep_done => {
                 if let Some(v) = checked_paths.get(&r.object_path) {
                     v.clone()
                 } else {
                     let v = match store
-                        .verify(&r.object_path, r.encrypted, sha, r.size, true)
+                        .verify(&r.object_path, r.encrypted, sha, r.size, expected, true)
                         .await
                     {
                         Ok(v) => v,

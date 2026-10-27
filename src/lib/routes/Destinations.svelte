@@ -3,6 +3,7 @@
   import Select from '../components/Select.svelte';
   import { api } from '../api/client';
   import type * as T from '../api/types';
+  import { MAX_LOCK_DAYS } from '../api/types';
   import { live, attempt, refreshDestinations, errorText } from '../state.svelte';
   import { bytes } from '../format';
   import Modal from '../components/Modal.svelte';
@@ -31,6 +32,9 @@
     other: { label: 'Other OpenDAL service (generic options)', fields: [] },
   };
 
+  /** Typical list prices (USD per GB-month, standard storage) as placeholders. */
+  const PRICE_HINT: Record<string, string> = { s3: '0.023', b2: '0.006', gcs: '0.020', azblob: '0.018' };
+
   let editing: T.DestinationView | null = $state(null);
   let open = $state(false);
   let kind = $state('fs');
@@ -42,8 +46,15 @@
   let error = $state('');
 
   function blank(): T.DestinationInput {
-    return { revision: null, name: '', scheme: 'fs', options: {}, root: '', encrypt: true, required_for_purge: true, deep_check: { mode: 'full' }, recovery_secrets: false };
+    return { revision: null, name: '', scheme: 'fs', options: {}, root: '', encrypt: true, required_for_purge: true, deep_check: { mode: 'full' }, recovery_secrets: false, features: defaultFeatures() };
   }
+
+  function defaultFeatures(): T.DestinationFeatures {
+    return { compress: true, upload_kib_per_sec: 0, download_kib_per_sec: 0 };
+  }
+
+  /** Object Lock needs a bucket created with it, on S3 (or compatible) or B2. */
+  const lockable = $derived(kind === 's3' || kind === 'b2');
 
   function create() {
     editing = null;
@@ -57,7 +68,7 @@
 
   function edit(d: T.DestinationView) {
     editing = d;
-    form = { revision: d.revision, name: d.name, scheme: d.scheme, options: { ...d.options }, root: d.root, encrypt: d.encrypt, required_for_purge: d.required_for_purge, deep_check: d.deep_check, recovery_secrets: d.recovery_secrets ?? false };
+    form = { revision: d.revision, name: d.name, scheme: d.scheme, options: { ...d.options }, root: d.root, encrypt: d.encrypt, required_for_purge: d.required_for_purge, deep_check: d.deep_check, recovery_secrets: d.recovery_secrets ?? false, features: { ...defaultFeatures(), ...d.features } };
     kind = d.scheme in schemes ? d.scheme : 'other';
     customScheme = d.scheme;
     const known = new Set(schemes[kind].fields.map((f) => f.key));
@@ -91,7 +102,9 @@
       const v = form.options[f.key];
       if (v) known[f.key] = v;
     }
-    return { ...form, scheme: kind === 'other' ? customScheme : kind, options: { ...known, ...extra } };
+    const features = { ...form.features };
+    if (!lockable) delete features.object_lock;
+    return { ...form, scheme: kind === 'other' ? customScheme : kind, options: { ...known, ...extra }, features };
   }
 
   async function runTest() {
@@ -141,9 +154,27 @@
     attempt(() => api.post('/jobs', { kind: { type: 'rebuild_index_all' } }), 'Index rebuild queued');
   }
 
+  async function compressStored(d: T.DestinationView) {
+    if (!(await ask({
+      title: `Compress the mail stored on “${d.name}”?`,
+      body: `${Number(d.uncompressed_objects).toLocaleString()} messages were stored before compression. Each is read, checked, written again compressed and verified; only then is the old copy deleted. It downloads and uploads everything once.`,
+      confirm: 'Compress',
+    }))) return;
+    attempt(() => api.post('/jobs', { kind: { type: 'compress_stored', destination_id: d.id } }), 'Compression queued');
+  }
+
   function verify(d: T.DestinationView, deep: boolean) {
     attempt(() => api.post('/jobs', { kind: { type: 'check', scope: { scope: 'destination', destination_id: d.id }, deep } }), 'Check queued');
   }
+
+  function limits(f: T.DestinationFeatures): string {
+    const parts = [];
+    if (f.upload_kib_per_sec) parts.push(`↑ ${speed(f.upload_kib_per_sec)}`);
+    if (f.download_kib_per_sec) parts.push(`↓ ${speed(f.download_kib_per_sec)}`);
+    return parts.length ? ` · Limits: ${parts.join(' ')}` : '';
+  }
+
+  const speed = (kib: number) => (kib >= 1024 ? `${(kib / 1024).toLocaleString(undefined, { maximumFractionDigits: 1 })} MiB/s` : `${kib} KiB/s`);
 
   const destMenu = (d: T.DestinationView): Entry[] => [
     { label: 'Edit…', icon: 'pencil', run: () => edit(d) },
@@ -151,6 +182,7 @@
     { label: 'Quick verify', icon: 'shield', run: () => verify(d, false) },
     { label: 'Deep verify', icon: 'shield', run: () => verify(d, true) },
     { label: 'Rebuild index from here…', icon: 'database', run: () => rebuild(d) },
+    d.uncompressed_objects > 0 && { label: 'Compress stored mail…', icon: 'database', run: () => compressStored(d) },
     '-',
     d.options.bucket && { label: 'Copy bucket name', icon: 'copy', run: () => copy(d.options.bucket!, 'Bucket copied') },
     { label: 'Remove…', icon: 'x', danger: true, run: () => remove(d) },
@@ -181,12 +213,16 @@
     <div class="panel" tabindex="0" role="group" aria-label={d.name} {@attach contextMenu(() => destMenu(d))}>
       <div class="row"><strong class="grow">{d.name}</strong>
         {#if d.encrypt}<span class="pill ok">encrypted</span>{:else}<span class="pill warn">plain</span>{/if}
+        {#if d.features.object_lock}<span class="pill info" title="Each object can't be deleted or changed for {d.features.object_lock.days} days ({d.features.object_lock.mode} mode)">locked {d.features.object_lock.days} d</span>{/if}
         {#if d.missing_secrets?.length}<span class="pill warn">needs credentials</span>
         {:else if d.health}{#if d.health.ok}<span class="pill ok">healthy</span>{:else}<span class="pill bad">problems</span>{/if}{/if}
       </div>
       <div class="muted small">{d.scheme}{d.options.bucket ? ` · ${d.options.bucket}` : ''}{d.options.root ? ` · ${d.options.root}` : ''}{d.root ? ` · /${d.root}` : ''}</div>
       <div class="small" style="margin: 0.5rem 0">{Number(d.object_count).toLocaleString()} objects · {bytes(d.stored_bytes)}</div>
-      <div class="small muted">Required for purge: {d.required_for_purge ? 'yes' : 'no'} · Deep check: {d.deep_check.mode === 'rotating' ? `rotating 1/${d.deep_check.slices}` : d.deep_check.mode}</div>
+      <div class="small muted">Required for purge: {d.required_for_purge ? 'yes' : 'no'} · Deep check: {d.deep_check.mode === 'rotating' ? `rotating 1/${d.deep_check.slices}` : d.deep_check.mode}{d.encrypt ? ` · Compression: ${d.features.compress ? 'on' : 'off'}` : ''}{limits(d.features)}</div>
+      {#if d.uncompressed_objects > 0}
+        <p class="small mt-2 mb-0">{Number(d.uncompressed_objects).toLocaleString()} messages were stored before compression. <button class="link" onclick={() => compressStored(d)}>Compress them</button></p>
+      {/if}
       <div class="row" style="margin-top: 0.75rem">
         {#if d.missing_secrets?.length}<button class="primary" onclick={() => edit(d)}>Enter credentials</button>{:else}<button onclick={() => edit(d)}>Edit</button>{/if}
         <button onclick={() => verify(d, false)}>Verify</button>
@@ -220,7 +256,27 @@
     </div>
     <details open={kind === 'other'}><summary>Additional OpenDAL options</summary><KeyValue bind:values={extra} /></details>
     <label class="check"><input type="checkbox" class="switch" bind:checked={form.encrypt} disabled={!!editing} /> Encrypt backups (recommended; can't be changed later)</label>
+    {#if form.encrypt}
+      <label class="check"><input type="checkbox" class="switch" bind:checked={form.features.compress} /> Compress messages before encrypting them</label>
+      <p class="muted small">Usually halves what mail takes up. Mail stored before stays as it is until you compress it from the destination's card.</p>
+    {/if}
     <label class="check"><input type="checkbox" class="switch" bind:checked={form.required_for_purge} /> Offer as a required destination for purges</label>
+    {#if lockable}
+      <label class="check"><input type="checkbox" class="switch" checked={!!form.features.object_lock}
+        onchange={(e) => (form.features.object_lock = e.currentTarget.checked ? { mode: 'governance', days: 30 } : undefined)} /> Object Lock: stored mail can't be deleted or overwritten for a while</label>
+      {#if form.features.object_lock}
+        <div class="row">
+          <label>Keep each object for (days) <input type="number" min="1" max={MAX_LOCK_DAYS} bind:value={form.features.object_lock.days} /></label>
+          <label>Mode
+            <Select bind:value={form.features.object_lock.mode} options={[
+              { value: 'governance', label: 'Governance (special permission can lift it)' },
+              { value: 'compliance', label: 'Compliance (nobody can, not even the account owner)' },
+            ]} />
+          </label>
+        </div>
+        <p class="muted small">Protects backups from ransomware and stolen credentials. The bucket must have been created with Object Lock {kind === 'b2' ? '(“File Lock” in B2)' : ''} turned on; Test checks it. Locks are extended by integrity checks while the mail is kept, and purged or replaced copies stay billed until their lock runs out.{form.features.object_lock.mode === 'compliance' ? ' In compliance mode a mistake can’t be undone: try governance first.' : ''}</p>
+      {/if}
+    {/if}
     {#if kind !== 'fs'}
       <label class="check"><input type="checkbox" class="switch" bind:checked={form.recovery_secrets} /> Keep its credentials in the recovery kit and the settings copies</label>
       <p class="muted small">{form.recovery_secrets
@@ -243,11 +299,22 @@
         <label>Slices <input type="number" min="2" value={form.deep_check.slices} oninput={(e) => (form.deep_check = { mode: 'rotating', slices: Number((e.target as HTMLInputElement).value) || 7 })} /></label>
       {/if}
     </div>
+    <details><summary>Speed limits and price</summary>
+      <div class="cards">
+        <label>Upload (KiB/s, 0 = no limit) <input type="number" min="0" step="128" bind:value={form.features.upload_kib_per_sec} /></label>
+        <label>Download (KiB/s, 0 = no limit) <input type="number" min="0" step="128" bind:value={form.features.download_kib_per_sec} /></label>
+        <label>Price per GB and month (for the cost estimate)
+          <input type="number" min="0" step="0.001" placeholder={PRICE_HINT[kind] ?? 'e.g. 0.023'} value={form.features.price_per_gb_month ?? ''}
+            oninput={(e) => { const v = e.currentTarget.value; form.features.price_per_gb_month = v === '' ? undefined : Number(v); }} />
+        </label>
+      </div>
+      <p class="muted small">Limits apply on top of the server's own. The price is only used under Storage to estimate what this destination costs.</p>
+    </details>
     {#if editing?.missing_secrets?.length}<p class="callout small">Restored without its credentials: enter {editing.missing_secrets.map(fieldName).join(', ')} to use it again. Saving brings back what is stored there.</p>{/if}
     {#if secretsToReenter.length}<p class="callout small">The storage settings changed: enter {secretsToReenter.join(', ')} again. Saved secrets are only reused for unchanged settings.</p>{/if}
     {#if !form.encrypt}<p class="callout">Plain destinations store readable .eml files with mailbox names visible. Anyone with access to the storage can read your mail.</p>{/if}
     {#if error}<p class="callout bad">{error}</p>{/if}
-    {#if test}<p class="callout" class:ok={test.ok} class:bad={!test.ok}>{test.ok ? `Write/read/delete OK (${test.write_ms} ms / ${test.read_ms} ms)` : test.error}</p>{/if}
+    {#if test}<p class="callout" class:ok={test.ok} class:bad={!test.ok}>{test.ok ? `Write/read/delete OK (${test.write_ms} ms / ${test.read_ms} ms)` : test.error}{#if test.ok && test.lock}<br />{test.lock}{/if}</p>{/if}
     <div class="row"><button onclick={runTest} disabled={busy}>Test</button><button class="primary" onclick={save} disabled={busy || !form.name}>Save</button></div>
   </Modal>
 {/if}

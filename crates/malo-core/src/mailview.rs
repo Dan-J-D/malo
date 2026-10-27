@@ -23,6 +23,35 @@ pub enum FolderSource {
     AllMail,
     /// The inbox messages of one Gmail category (`social`, `promotions`, `updates`, `forums`).
     Category(String),
+    /// A saved search (search box syntax): the account's messages it finds.
+    Search(String),
+}
+
+/// Most messages a smart folder shows (the newest).
+pub const SMART_FOLDER_MAX: usize = 10_000;
+
+/// Saved searches shown as folders (under `Smart/`) to mail apps signed in to `account`: those
+/// marked for it, of all accounts or this one. A name taken by a real folder is left out.
+pub fn smart_folders(
+    searches: &[malo_api::SavedSearch],
+    account: &str,
+    existing: &[Folder],
+) -> Vec<Folder> {
+    searches
+        .iter()
+        .filter(|s| s.mail_folder && s.account_id.as_deref().is_none_or(|a| a == account))
+        .map(|s| Folder {
+            name: format!("Smart/{}", crate::layout::encode_utf7(&s.name)),
+            delimiter: Some("/".into()),
+            special_use: None,
+            source: FolderSource::Search(s.query.clone()),
+        })
+        .filter(|f| {
+            !existing
+                .iter()
+                .any(|e| e.name.eq_ignore_ascii_case(&f.name))
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -243,8 +272,12 @@ const IN_LABEL: &str =
 
 /// Which memberships belong in a folder: an SQL condition over `m`, `mb` and `g` (with `?1` the
 /// account and `?2` the folder name) and its further parameters from `?3` on.
-fn belongs(source: &FolderSource) -> (String, Vec<String>) {
+fn belongs(source: &FolderSource, found: &str) -> (String, Vec<String>) {
     match source {
+        FolderSource::Search(_) => (
+            "m.message IN (SELECT value FROM json_each(?3))".into(),
+            vec![found.to_string()],
+        ),
         FolderSource::Mailbox => ("mb.name=?2".into(), vec![]),
         FolderSource::AllMail => ("mb.special_use='\\All'".into(), vec![]),
         FolderSource::Label(l) => (IN_LABEL.into(), vec![l.clone()]),
@@ -412,10 +445,17 @@ impl Index {
     /// A message that left a label or category leaves its folder too, unless a mail app moved
     /// it there.
     pub fn imap_view(&self, account: &str, folder: &Folder) -> anyhow::Result<FolderView> {
+        // A smart folder's messages are what its search finds now (as a JSON list of ids).
+        let found = match &folder.source {
+            FolderSource::Search(q) => {
+                serde_json::to_string(&self.matching_ids(Some(account), q, SMART_FOLDER_MAX)?)?
+            }
+            _ => String::new(),
+        };
         self.with(|c| {
             let tx = c.unchecked_transaction()?;
             let (uidvalidity, mut uidnext) = ensure_mailbox(&tx, account, &folder.name)?;
-            let (cond, extra) = belongs(&folder.source);
+            let (cond, extra) = belongs(&folder.source, &found);
             let mut args: Vec<&dyn ToSql> = vec![&account, &folder.name];
             args.extend(extra.iter().map(|e| e as &dyn ToSql));
             if folder.source != FolderSource::Mailbox {
@@ -745,6 +785,63 @@ mod tests {
         let names: Vec<&str> = folders.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, vec!["INBOX", "All Mail", "Labels/Work"]);
         assert_eq!(ix.imap_view("a", &folders[0]).unwrap().messages.len(), 1);
+    }
+
+    #[test]
+    fn saved_searches_become_smart_folders() {
+        let ix = Index::open_in_memory().unwrap();
+        let inbox = ix
+            .upsert_mailbox("a", "INBOX", "INBOX", "i", Some("/"), None, 1)
+            .unwrap();
+        let with_subject = |uid: u32, sha: &str, subject: &str| {
+            let mut env = crate::index::empty_envelope();
+            env.subject = subject.into();
+            let id = ix
+                .insert_message(&NewMessage {
+                    account: "a",
+                    run: None,
+                    size: 10,
+                    internaldate: None,
+                    message_id_hdr: None,
+                    gm_msgid: None,
+                    envelope: &env,
+                    state: MessageState::Verified,
+                    sha256: Some(sha),
+                })
+                .unwrap();
+            ix.add_membership(id, inbox.id, uid, &[], &[]).unwrap();
+            id
+        };
+        let first = with_subject(1, "s1", "Invoice March");
+        with_subject(2, "s2", "Hello");
+        let search = |name: &str, account: Option<&str>, shown: bool| malo_api::SavedSearch {
+            id: name.into(),
+            name: name.into(),
+            query: "subject:invoice".into(),
+            account_id: account.map(str::to_string),
+            mail_folder: shown,
+        };
+        let existing = ix.imap_folders("a").unwrap();
+        let smart = smart_folders(
+            &[
+                search("Invoices", None, true),
+                search("Rechnungen ü", Some("a"), true),
+                search("Elsewhere", Some("b"), true),
+                search("Not shown", None, false),
+            ],
+            "a",
+            &existing,
+        );
+        let names: Vec<&str> = smart.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["Smart/Invoices", "Smart/Rechnungen &APw-"]);
+        let v = ix.imap_view("a", &smart[0]).unwrap();
+        assert_eq!(v.messages.len(), 1);
+        assert_eq!((v.messages[0].uid, v.messages[0].message), (1, first));
+        // New matching mail gets the next UID; the old one keeps its UID.
+        let second = with_subject(3, "s3", "invoice april");
+        let v = ix.imap_view("a", &smart[0]).unwrap();
+        let uids: Vec<(u32, i64)> = v.messages.iter().map(|m| (m.uid, m.message)).collect();
+        assert_eq!(uids, [(1, first), (2, second)]);
     }
 
     #[test]

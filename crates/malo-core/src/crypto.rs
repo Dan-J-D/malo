@@ -372,6 +372,15 @@ const STREAM_MAGIC: &[u8; 8] = b"MALOENC1";
 /// `magic(8) | version(1) | segment(4) | salt(32) | nonce prefix(7)`
 pub const STREAM_HEADER_LEN: usize = 8 + 1 + 4 + 32 + 7;
 const TAG: usize = 16;
+/// Version 1: the segments hold the plaintext. Version 2: they hold one zstd frame of it. The
+/// version is in the header, which every segment authenticates, so it can't be swapped.
+const STREAM_PLAIN: u8 = 1;
+const STREAM_ZSTD: u8 = 2;
+/// zstd level for compressed objects: most of the gain of higher levels at a fraction of the CPU.
+const ZSTD_LEVEL: i32 = 6;
+/// Upper bound on what one compressed object may expand to. Objects are authenticated, so only
+/// the key holder could craft a larger one, but a decoder must never be told to fill memory.
+pub const MAX_DECOMPRESSED: u64 = 4 << 30;
 
 /// Ciphertext size for a plaintext of `len` bytes.
 pub fn encrypted_len(len: u64) -> u64 {
@@ -396,11 +405,26 @@ fn object_cipher(archive_key: &Key, salt: &[u8]) -> Aes256Gcm {
 /// Encrypts a whole object with the STREAM construction (per-object HKDF key, 64 KiB segments,
 /// counter + last-segment flag in the nonce, header as AAD). Truncation and reordering are detected.
 pub fn encrypt_object(archive_key: &Key, plaintext: &[u8]) -> Vec<u8> {
+    seal_stream(archive_key, STREAM_PLAIN, plaintext)
+}
+
+/// [`encrypt_object`], compressing with zstd first when that makes the object smaller. Mail is
+/// mostly text and base64, which compresses well; already-compressed attachments are stored as
+/// they are. Compressing before encrypting reveals the compressed size, which an observer of the
+/// storage could already estimate from the plain size.
+pub fn encrypt_object_compressed(archive_key: &Key, plaintext: &[u8]) -> Vec<u8> {
+    match zstd::bulk::compress(plaintext, ZSTD_LEVEL) {
+        Ok(z) if z.len() < plaintext.len() => seal_stream(archive_key, STREAM_ZSTD, &z),
+        _ => encrypt_object(archive_key, plaintext),
+    }
+}
+
+fn seal_stream(archive_key: &Key, version: u8, plaintext: &[u8]) -> Vec<u8> {
     let salt: [u8; 32] = random_bytes();
     let prefix: [u8; 7] = random_bytes();
     let mut header = Vec::with_capacity(STREAM_HEADER_LEN);
     header.extend_from_slice(STREAM_MAGIC);
-    header.push(1);
+    header.push(version);
     header.extend_from_slice(&(SEGMENT as u32).to_be_bytes());
     header.extend_from_slice(&salt);
     header.extend_from_slice(&prefix);
@@ -429,7 +453,75 @@ pub fn encrypt_object(archive_key: &Key, plaintext: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Incremental decryptor: feed ciphertext in arbitrary chunks, get plaintext back.
+/// Streaming zstd decoder for version-2 objects, bounded by [`MAX_DECOMPRESSED`].
+struct Inflater {
+    dec: zstd::stream::raw::Decoder<'static>,
+    total: u64,
+    /// The frame ended: anything after it is an error.
+    done: bool,
+}
+
+impl Inflater {
+    fn new() -> Result<Self, CryptoError> {
+        Ok(Inflater {
+            dec: zstd::stream::raw::Decoder::new()
+                .map_err(|e| CryptoError::Format(format!("zstd: {e}")))?,
+            total: 0,
+            done: false,
+        })
+    }
+
+    fn feed(&mut self, mut input: &[u8], out: &mut Vec<u8>) -> Result<(), CryptoError> {
+        use zstd::stream::raw::{InBuffer, Operation, OutBuffer};
+        let bad = |e: std::io::Error| CryptoError::Format(format!("zstd: {e}"));
+        let mut chunk = vec![0u8; 128 * 1024];
+        while !input.is_empty() {
+            if self.done {
+                return Err(CryptoError::Format(
+                    "data after the compressed frame".into(),
+                ));
+            }
+            let mut inb = InBuffer::around(input);
+            let mut outb = OutBuffer::around(&mut chunk[..]);
+            let hint = self.dec.run(&mut inb, &mut outb).map_err(bad)?;
+            let (read, wrote) = (inb.pos(), outb.pos());
+            input = &input[read..];
+            self.push(&chunk[..wrote], out)?;
+            self.done = hint == 0;
+            if read == 0 && wrote == 0 {
+                break;
+            }
+        }
+        // Drain output the decoder still holds for input it has already taken.
+        loop {
+            let mut inb = InBuffer::around(&[][..]);
+            let mut outb = OutBuffer::around(&mut chunk[..]);
+            let hint = self.dec.run(&mut inb, &mut outb).map_err(bad)?;
+            let wrote = outb.pos();
+            self.push(&chunk[..wrote], out)?;
+            if hint == 0 {
+                self.done = true;
+            }
+            if wrote < chunk.len() {
+                return Ok(());
+            }
+        }
+    }
+
+    fn push(&mut self, data: &[u8], out: &mut Vec<u8>) -> Result<(), CryptoError> {
+        self.total += data.len() as u64;
+        if self.total > MAX_DECOMPRESSED {
+            return Err(CryptoError::Format(
+                "object expands beyond the size limit".into(),
+            ));
+        }
+        out.extend_from_slice(data);
+        Ok(())
+    }
+}
+
+/// Incremental decryptor: feed ciphertext in arbitrary chunks, get plaintext back. Reads both
+/// plain (version 1) and compressed (version 2) objects.
 pub struct StreamDecryptor {
     archive_key: Key,
     header: Vec<u8>,
@@ -438,6 +530,7 @@ pub struct StreamDecryptor {
     buf: Vec<u8>,
     counter: u32,
     finished: bool,
+    inflate: Option<Inflater>,
 }
 
 impl StreamDecryptor {
@@ -450,7 +543,13 @@ impl StreamDecryptor {
             buf: Vec::new(),
             counter: 0,
             finished: false,
+            inflate: None,
         }
+    }
+
+    /// The object holds compressed data (known once the header has been fed).
+    pub fn compressed(&self) -> bool {
+        self.inflate.is_some()
     }
 
     fn init(&mut self) -> Result<(), CryptoError> {
@@ -458,8 +557,10 @@ impl StreamDecryptor {
         if &h[..8] != STREAM_MAGIC {
             return Err(CryptoError::Format("not a malo encrypted object".into()));
         }
-        if h[8] != 1 {
-            return Err(CryptoError::Format(format!("object version {}", h[8])));
+        match h[8] {
+            STREAM_PLAIN => {}
+            STREAM_ZSTD => self.inflate = Some(Inflater::new()?),
+            v => return Err(CryptoError::Format(format!("object version {v}"))),
         }
         if u32::from_be_bytes(h[9..13].try_into().unwrap()) as usize != SEGMENT {
             return Err(CryptoError::Format("unsupported segment size".into()));
@@ -505,9 +606,20 @@ impl StreamDecryptor {
         let mut out = Vec::new();
         // Keep at least one byte beyond a full segment so we know it isn't the final one.
         while self.buf.len() > SEGMENT + TAG {
-            out.extend(self.open_segment(SEGMENT + TAG, false)?);
+            let pt = self.open_segment(SEGMENT + TAG, false)?;
+            self.emit(pt, &mut out)?;
         }
         Ok(out)
+    }
+
+    fn emit(&mut self, pt: Vec<u8>, out: &mut Vec<u8>) -> Result<(), CryptoError> {
+        match self.inflate.as_mut() {
+            Some(z) => z.feed(&pt, out),
+            None => {
+                out.extend(pt);
+                Ok(())
+            }
+        }
     }
 
     /// Decrypts the final segment. Fails if the stream was truncated.
@@ -518,7 +630,12 @@ impl StreamDecryptor {
         let len = self.buf.len();
         let pt = self.open_segment(len, true)?;
         self.finished = true;
-        Ok(pt)
+        let mut out = Vec::new();
+        self.emit(pt, &mut out)?;
+        if self.inflate.as_ref().is_some_and(|z| !z.done) {
+            return Err(CryptoError::Format("compressed data ends early".into()));
+        }
+        Ok(out)
     }
 }
 
@@ -687,6 +804,44 @@ mod tests {
             out.extend(d.finish().unwrap());
             assert_eq!(out, pt);
         }
+    }
+
+    #[test]
+    fn compressed_stream_round_trip() {
+        let k = random_key();
+        let text =
+            b"Subject: invoice\r\n\r\nThe quick brown fox jumps over the lazy dog. ".repeat(20_000);
+        for pt in [
+            vec![],
+            b"x".to_vec(),
+            sample(3 * SEGMENT + 17),
+            text.clone(),
+        ] {
+            let ct = encrypt_object_compressed(&k, &pt);
+            assert_eq!(decrypt_object(&k, &ct).unwrap(), pt);
+            let mut d = StreamDecryptor::new(&k);
+            let mut out = Vec::new();
+            for c in ct.chunks(1000) {
+                out.extend(d.update(c).unwrap());
+            }
+            out.extend(d.finish().unwrap());
+            assert_eq!(out, pt);
+        }
+        let ct = encrypt_object_compressed(&k, &text);
+        assert_eq!(ct[8], STREAM_ZSTD);
+        assert!(ct.len() < text.len() / 20, "{} of {}", ct.len(), text.len());
+        // Incompressible data is stored as a plain stream.
+        let noise: Vec<u8> = (0..100_000).map(|_| rand::random::<u8>()).collect();
+        let ct = encrypt_object_compressed(&k, &noise);
+        assert_eq!(ct[8], STREAM_PLAIN);
+        assert_eq!(ct.len() as u64, encrypted_len(noise.len() as u64));
+        // The version byte is authenticated: claiming "plain" for a compressed object fails.
+        let mut ct = encrypt_object_compressed(&k, &text);
+        ct[8] = STREAM_PLAIN;
+        assert!(decrypt_object(&k, &ct).is_err());
+        // Truncation is still detected.
+        let ct = encrypt_object_compressed(&k, &text);
+        assert!(decrypt_object(&k, &ct[..ct.len() - 1]).is_err());
     }
 
     #[test]

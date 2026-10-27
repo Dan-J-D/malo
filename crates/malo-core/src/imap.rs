@@ -457,10 +457,65 @@ impl ImapConn {
             .await?
             .try_collect()
             .await?;
-        Ok(fetches
+        let found = fetches
             .iter()
             .find(|f| f.uid == Some(uid))
-            .and_then(|f| f.body().map(|b| (b.to_vec(), f.size))))
+            .and_then(|f| f.body().map(|b| (b.to_vec(), f.size)));
+        if let Some((raw, _)) = &found {
+            crate::ratelimit::imap_download(raw.len() as u64).await;
+        }
+        Ok(found)
+    }
+
+    /// Creates a mailbox unless the server already lists it.
+    pub async fn create_if_missing(
+        &mut self,
+        name: &str,
+        existing: &[MailboxListing],
+    ) -> anyhow::Result<()> {
+        if name.eq_ignore_ascii_case("INBOX") || existing.iter().any(|m| m.name == name) {
+            return Ok(());
+        }
+        if let Err(e) = self.session.create(name).await {
+            // Created meanwhile, or an [ALREADYEXISTS] the listing didn't show.
+            let again = self.list_mailboxes().await?;
+            if !again.iter().any(|m| m.name == name) {
+                return Err(e).with_context(|| format!("cannot create mailbox {name}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// `APPEND` of a whole message, with its flags and received date.
+    pub async fn append(
+        &mut self,
+        mailbox: &str,
+        flags: &[String],
+        internaldate: Option<DateTime<Utc>>,
+        raw: &[u8],
+    ) -> anyhow::Result<()> {
+        // System flags the server sets itself, and keywords that aren't plain atoms, stay out.
+        let flags: Vec<&str> = flags
+            .iter()
+            .map(String::as_str)
+            .filter(|f| {
+                !f.eq_ignore_ascii_case("\\Recent")
+                    && !f.is_empty()
+                    && f.chars().enumerate().all(|(i, c)| {
+                        (c == '\\' && i == 0) || (c.is_ascii_graphic() && !"(){%*\"\\]".contains(c))
+                    })
+            })
+            .collect();
+        let flags = (!flags.is_empty()).then(|| format!("({})", flags.join(" ")));
+        let date = internaldate.map(|d| format!("\"{}\"", d.format("%d-%b-%Y %H:%M:%S +0000")));
+        crate::ratelimit::global_upload()
+            .take(raw.len() as u64)
+            .await;
+        self.session
+            .append(mailbox, flags.as_deref(), date.as_deref(), raw)
+            .await
+            .with_context(|| format!("APPEND to {mailbox}"))?;
+        Ok(())
     }
 
     /// `UID STORE +FLAGS.SILENT (\Deleted)` then `UID EXPUNGE <set>`. Returns the expunged UIDs.

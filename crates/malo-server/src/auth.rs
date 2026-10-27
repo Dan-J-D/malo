@@ -209,6 +209,7 @@ pub fn me(state: &AppState, user: &UserRow) -> Me {
         .map(|u| u.config().settings.auto_lock_hours)
         .unwrap_or(24);
     let max = max_lock_hours(state);
+    let (totp_enabled, totp_recovery_codes_left) = crate::totp::status(state, &user.id);
     Me {
         id: user.id.clone(),
         username: user.username.clone(),
@@ -226,6 +227,8 @@ pub fn me(state: &AppState, user: &UserRow) -> Me {
             .as_ref()
             .map(|u| u.skipped_while_locked.load(Ordering::Relaxed))
             .unwrap_or(0),
+        totp_enabled,
+        totp_recovery_codes_left,
     }
 }
 
@@ -355,6 +358,26 @@ pub async fn login(
             return Err(ApiErr::unauthorized("invalid username or password"));
         }
     };
+    if state.db.totp(&user.id)?.is_some_and(|t| t.enabled) {
+        let Some(code) = req.totp.as_deref().filter(|c| !c.trim().is_empty()) else {
+            return Err(ApiErr::new(
+                StatusCode::UNAUTHORIZED,
+                "totp_required",
+                "enter the code from your authenticator app",
+            ));
+        };
+        let config_key = crypto::UserKeys::derive(&mdk).config;
+        if let crate::totp::Verdict::Wrong =
+            crate::totp::verify_login(&state, &user.id, &config_key, code)?
+        {
+            record_failure(&state, &key, ip);
+            return Err(ApiErr::new(
+                StatusCode::UNAUTHORIZED,
+                "totp_wrong",
+                "the code is wrong or was already used",
+            ));
+        }
+    }
     clear_failures(&state, &key, ip);
     let unlocked = state.keyring.unlock(
         &state.cfg.data_dir,
@@ -371,6 +394,7 @@ pub async fn login(
         .store(skipped, Ordering::Relaxed);
     state.db.touch_login(&user.id)?;
     scheduler::sync_schedules(&state, &unlocked)?;
+    crate::alerts::on_unlock(&state, &unlocked);
     // A user restored from a kit: rebuild from its destinations, bringing back accounts,
     // settings and mail. The job clears the flag when it starts. Destinations that came back
     // without credentials wait for them (see `update_destination`).
@@ -433,26 +457,36 @@ pub async fn verify_password(
     auth: AuthUser,
     Json(req): Json<VerifyPasswordRequest>,
 ) -> ApiResult<StatusCode> {
+    check_password(&state, &auth, ip, Zeroizing::new(req.password)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The caller's password, asked again before a sensitive change. Wrong guesses count toward the
+/// same lockout as logins; a wrong one is 403, not 401: the session itself is fine.
+pub(crate) async fn check_password(
+    state: &SharedState,
+    auth: &AuthUser,
+    ip: IpAddr,
+    password: Zeroizing<String>,
+) -> ApiResult<()> {
     let key = auth.user.username.to_lowercase();
-    check_failures(&state, &key, ip)?;
+    check_failures(state, &key, ip)?;
     let data_dir = state.cfg.data_dir.clone();
     let uid = auth.user.id.clone();
-    let pw = Zeroizing::new(req.password);
-    let ok = run_kdf(&state, KdfKind::Session, move || {
-        keyring::open_vault(&data_dir, &uid, &pw).is_ok()
+    let ok = run_kdf(state, KdfKind::Session, move || {
+        keyring::open_vault(&data_dir, &uid, &password).is_ok()
     })
     .await?;
     if !ok {
-        record_failure(&state, &key, ip);
-        // Not 401: the session is fine, only the password given is wrong.
+        record_failure(state, &key, ip);
         return Err(ApiErr::new(
             StatusCode::FORBIDDEN,
             "wrong_password",
             "password is wrong",
         ));
     }
-    clear_failures(&state, &key, ip);
-    Ok(StatusCode::NO_CONTENT)
+    clear_failures(state, &key, ip);
+    Ok(())
 }
 
 /// Self-service account deletion. The GUI asks twice (warning, then typed confirmation + password);
@@ -790,6 +824,9 @@ pub async fn recover(
     clear_failures(&state, &name, ip);
     let user = user.expect("checked in the reset");
     scheduler::lock_user(&state, &user.id, "password reset with the recovery kit");
+    // The kit holds the archive key, which reads every backup: a second factor next to it
+    // protects nothing, and an authenticator lost with the password must not lock the user out.
+    state.db.delete_totp(&user.id)?;
     admin_audit(
         &state,
         "self",

@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use malo_api::{
-    AccountAuth, AccountInput, AccountView, DeepCheckMode, DestinationInput, DestinationView,
-    PurgePolicy, SmtpSettings, TlsMode, UserSettings, REDACTED,
+    AccountAuth, AccountInput, AccountView, DeepCheckMode, DestinationFeatures, DestinationInput,
+    DestinationView, PurgePolicy, SavedSearch, SmtpSettings, TlsMode, UserSettings, REDACTED,
 };
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -56,6 +56,8 @@ pub struct Destination {
     /// Until they are entered again it is not used: [`crate::store::Store::open`] refuses it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_secrets: Vec<String>,
+    #[serde(default)]
+    pub features: DestinationFeatures,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -70,6 +72,13 @@ pub struct UserConfig {
     pub destinations: Vec<Destination>,
     #[serde(default)]
     pub settings: UserSettings,
+    /// Searches kept in the sidebar (and as folders in mail apps).
+    #[serde(default)]
+    pub saved_searches: Vec<SavedSearch>,
+    /// Where and when to send alerts. Not in the settings copies: webhook addresses and tokens
+    /// are secrets.
+    #[serde(default)]
+    pub alerts: malo_api::AlertSettings,
     /// Set up from a recovery kit that carried destinations: the first login rebuilds from them,
     /// which also restores accounts and settings.
     #[serde(default)]
@@ -117,6 +126,8 @@ impl UserConfig {
             accounts: vec![],
             destinations: vec![],
             settings: UserSettings::default(),
+            saved_searches: vec![],
+            alerts: Default::default(),
             restore_pending: false,
             kit_destinations: None,
             kit_fetched: None,
@@ -554,7 +565,9 @@ impl Destination {
             recovery_secrets: input.recovery_secrets,
             // Saving the form with the storage's credentials makes it whole again.
             missing_secrets: vec![],
+            features: input.features,
         };
+        dest.check_features()?;
         crate::store::validate_destination(&dest)?;
         Ok(dest)
     }
@@ -615,7 +628,36 @@ impl Destination {
             object_count: 0,
             stored_bytes: 0,
             health: None,
+            features: self.features.clone(),
+            uncompressed_objects: 0,
         }
+    }
+
+    /// Compression applies: plain destinations keep browsable `.eml` files.
+    pub fn compresses(&self) -> bool {
+        self.encrypt && self.features.compress
+    }
+
+    fn check_features(&self) -> anyhow::Result<()> {
+        let f = &self.features;
+        if let Some(lock) = &f.object_lock {
+            anyhow::ensure!(
+                matches!(self.scheme.to_ascii_lowercase().as_str(), "s3" | "b2"),
+                "Object Lock is only available for S3 and B2 destinations"
+            );
+            anyhow::ensure!(
+                (1..=malo_api::MAX_LOCK_DAYS).contains(&lock.days),
+                "Object Lock needs between 1 and {} days",
+                malo_api::MAX_LOCK_DAYS
+            );
+        }
+        if let Some(p) = f.price_per_gb_month {
+            anyhow::ensure!(
+                p.is_finite() && p >= 0.0,
+                "the price must be a positive number"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -718,6 +760,7 @@ mod tests {
                 required_for_purge: true,
                 deep_check: DeepCheckMode::Full,
                 recovery_secrets: false,
+                features: Default::default(),
             },
             None,
         )
@@ -746,6 +789,7 @@ mod tests {
             revision: 1,
             recovery_secrets: false,
             missing_secrets: vec![],
+            features: Default::default(),
         };
         let r = d.for_recovery();
         assert_eq!(r.missing_secrets, ["secret_access_key"]);

@@ -2,7 +2,12 @@
 
 export type Role = "admin" | "user";
 
-export type LoginRequest = { username: string, password: string, };
+export type LoginRequest = { username: string, password: string, 
+/**
+ * Code from the authenticator app (or a recovery code) when two-step login is on. Without
+ * it, such a login fails with the code `totp_required` and changes nothing.
+ */
+totp?: string, };
 
 export type LoginResponse = { token: string, me: Me, };
 
@@ -24,7 +29,35 @@ recovery_kit_outdated: boolean,
 /**
  * Jobs that came due while the user was locked and were skipped.
  */
-skipped_while_locked: number, };
+skipped_while_locked: number, 
+/**
+ * Logging in also asks for a code from an authenticator app. Older servers don't send it.
+ */
+totp_enabled: boolean, 
+/**
+ * Recovery codes left for two-step login.
+ */
+totp_recovery_codes_left: number, };
+
+export type TotpSetupRequest = { password: string, };
+
+export type TotpSetup = { 
+/**
+ * Base32, for typing into the app by hand.
+ */
+secret: string, 
+/**
+ * `otpauth://totp/…`
+ */
+uri: string, 
+/**
+ * The URI as a QR code (SVG markup).
+ */
+qr_svg: string, };
+
+export type TotpCodeRequest = { code: string, password?: string, };
+
+export type TotpRecoveryCodes = { codes: Array<string>, };
 
 export type ChangePasswordRequest = { old_password: string, new_password: string, };
 
@@ -199,7 +232,7 @@ name: string, display_name: string,
  */
 special_use: string | null, kind: MailFolderKind, shown: boolean, messages: number, };
 
-export type MailFolderKind = "mailbox" | "label" | "primary" | "all_mail" | "category";
+export type MailFolderKind = "mailbox" | "label" | "primary" | "all_mail" | "category" | "smart";
 
 export type MailViewSettings = { 
 /**
@@ -216,6 +249,33 @@ split_categories: boolean,
 hidden: Array<string>, };
 
 export type DeepCheckMode = { "mode": "full" } | { "mode": "rotating", slices: number, } | { "mode": "off" };
+
+export type LockMode = "governance" | "compliance";
+
+export type ObjectLock = { mode: LockMode, days: number, };
+
+export type DestinationFeatures = { 
+/**
+ * Compress messages with zstd before encrypting them (encrypted destinations only; plain
+ * destinations keep browsable `.eml` files).
+ */
+compress: boolean, 
+/**
+ * S3 and B2 only.
+ */
+object_lock?: ObjectLock, 
+/**
+ * Limit on writes to this destination, in KiB/s (0: none).
+ */
+upload_kib_per_sec: number, 
+/**
+ * Limit on reads from this destination, in KiB/s (0: none).
+ */
+download_kib_per_sec: number, 
+/**
+ * Storage price per GB and month, for the cost estimate.
+ */
+price_per_gb_month?: number, };
 
 export type DestinationInput = { 
 /**
@@ -239,7 +299,7 @@ root: string, encrypt: boolean, required_for_purge: boolean, deep_check: DeepChe
  * Keep this destination's credentials in the recovery kit and the settings copies. Off, a
  * restore brings the destination back without them and asks for them again.
  */
-recovery_secrets: boolean, };
+recovery_secrets: boolean, features: DestinationFeatures, };
 
 export type DestinationView = { 
 /**
@@ -254,9 +314,17 @@ recovery_secrets?: boolean,
  * Credentials it came back without from a recovery kit or settings copy: until they are
  * entered again, nothing is written to or read from it.
  */
-missing_secrets?: Array<string>, object_count: number, stored_bytes: number, health: DestinationHealth | null, };
+missing_secrets?: Array<string>, object_count: number, stored_bytes: number, health: DestinationHealth | null, features: DestinationFeatures, 
+/**
+ * Objects still stored without compression (a *Compress stored mail* job shrinks them).
+ */
+uncompressed_objects: number, };
 
-export type DestinationTest = { ok: boolean, error: string | null, write_ms: number, read_ms: number, };
+export type DestinationTest = { ok: boolean, error: string | null, write_ms: number, read_ms: number, 
+/**
+ * With Object Lock set: what the bucket and a locked probe object showed.
+ */
+lock?: string, };
 
 export type PurgePolicy = { 
 /**
@@ -317,7 +385,111 @@ skipped: number, errors: Array<string>, };
 
 export type CheckScope = { "scope": "all" } | { "scope": "account", account_id: string, } | { "scope": "destination", destination_id: string, };
 
-export type JobKind = { "type": "backup", account_id: string, } | { "type": "check", scope: CheckScope, deep: boolean, } | { "type": "purge_dry_run", account_id: string, } | { "type": "purge", account_id: string, } | { "type": "repair", scope: CheckScope, } | { "type": "rebuild_index", destination_id: string, } | { "type": "rebuild_index_all" } | { "type": "search_index" } | { "type": "delete_messages", account_id: string, message_ids: Array<number>, scope: DeleteScope, } | { "type": "move_spam", account_id: string, message_ids: Array<number>, spam: boolean, };
+export type JobKind = { "type": "backup", account_id: string, } | { "type": "check", scope: CheckScope, deep: boolean, } | { "type": "purge_dry_run", account_id: string, } | { "type": "purge", account_id: string, } | { "type": "repair", scope: CheckScope, } | { "type": "rebuild_index", destination_id: string, } | { "type": "rebuild_index_all" } | { "type": "search_index" } | { "type": "delete_messages", account_id: string, message_ids: Array<number>, scope: DeleteScope, } | { "type": "move_spam", account_id: string, message_ids: Array<number>, spam: boolean, } | { "type": "restore_to_imap", target_account_id: string, selection: RestoreSelection, target: RestoreTarget, } | { "type": "compress_stored", destination_id?: string, };
+
+export type RestoreSelection = { "by": "messages", ids: Array<number>, } | { "by": "search", query: string, account_id?: string, } | { "by": "account", account_id: string, mailbox?: string, };
+
+export type RestoreTarget = { "to": "original" } | { "to": "folder", name: string, };
+
+export type RestoreRequest = { target_account_id: string, selection: RestoreSelection, target: RestoreTarget, };
+
+export type RestoreSummary = { target_account_id: string, restored: number, 
+/**
+ * Already in the target mailbox (same Message-ID).
+ */
+skipped: number, failed: number, errors: Array<string>, };
+
+export type CompressSummary = { objects: number, bytes_before: number, bytes_after: number, failed: number, errors: Array<string>, };
+
+export type UsageCell = { account_id: string, destination_id: string, messages: number, 
+/**
+ * Size of the messages themselves.
+ */
+message_bytes: number, 
+/**
+ * What the objects take up on the destination (after compression and encryption;
+ * duplicates stored once).
+ */
+stored_bytes: number, };
+
+export type UsagePoint = { 
+/**
+ * `YYYY-MM-DD`
+ */
+date: string, destination_id: string, stored_bytes: number, };
+
+export type UsageReport = { cells: Array<UsageCell>, 
+/**
+ * Daily totals per destination, oldest first, from the first backup on.
+ */
+history: Array<UsagePoint>, };
+
+export type SavedSearch = { id: string, name: string, 
+/**
+ * Search box syntax.
+ */
+query: string, 
+/**
+ * Limited to one account; all accounts without.
+ */
+account_id?: string, 
+/**
+ * Also a folder in mail apps (under `Smart/`), with the messages of the mail login's account.
+ */
+mail_folder: boolean, };
+
+export type SavedSearchInput = { name: string, query: string, account_id?: string, mail_folder: boolean, };
+
+export type AlertChannel = { "kind": "webhook", url: string, } | { "kind": "ntfy", 
+/**
+ * Defaults to `https://ntfy.sh`.
+ */
+server: string, topic: string, 
+/**
+ * An access token for protected topics ([`REDACTED`] in views).
+ */
+token?: string, } | { "kind": "apprise", url: string, } | { "kind": "email", account_id: string, to: string, };
+
+export type AlertSettings = { channels: Array<AlertChannel>, 
+/**
+ * Alert when an account's backup failed this many times in a row (0: never).
+ */
+backup_failures: number, 
+/**
+ * An integrity check found missing or damaged copies, or couldn't run.
+ */
+check_problems: boolean, 
+/**
+ * Signing in to a mail account with OAuth stopped working (the refresh token was refused).
+ */
+oauth_failures: boolean, 
+/**
+ * A destination can't be reached.
+ */
+destination_unreachable: boolean, 
+/**
+ * Scheduled jobs are being skipped because you're locked. Sent through webhooks, ntfy and
+ * Apprise only, whose addresses the server then keeps readable while you're locked.
+ */
+skipped_locked: boolean, 
+/**
+ * Also say when a problem alerted about is over.
+ */
+recoveries: boolean, };
+
+export type AlertEvent = "backup_failing" | "check_problems" | "oauth_failing" | "destination_unreachable" | "skipped_locked" | "recovered" | "test";
+
+export type AlertDelivery = { 
+/**
+ * The channel, e.g. "ntfy alerts" or "email to me@example.com".
+ */
+channel: string, ok: boolean, error: string | null, };
+
+export type ExportFormat = "mbox" | "maildir" | "zip";
+
+export type ExportRequest = { selection: RestoreSelection, format: ExportFormat, };
+
+export type ExportTicket = { token: string, filename: string, messages: number, };
 
 export type JobState = "queued" | "running" | "done" | "failed" | "cancelled" | "skipped_locked";
 
@@ -481,7 +653,15 @@ export type AdminSettings = { max_auto_lock_hours: number, allowed_fs_mounts: Ar
  * so users can't make the server probe its own network. Off by default: a self-hosted mail
  * server or MinIO on the LAN is common.
  */
-block_private_networks: boolean, };
+block_private_networks: boolean, 
+/**
+ * Server-wide limit on writes to storage, in KiB/s, shared by every user (0: none).
+ */
+upload_kib_per_sec: number, 
+/**
+ * Server-wide limit on downloads from mail servers and storage, in KiB/s (0: none).
+ */
+download_kib_per_sec: number, };
 
 export type SyncEvent = { "type": "job_queued", job: JobInfo, } | { "type": "job_started", job: JobInfo, } | { "type": "job_progress", job_id: string, progress: JobProgress, } | { "type": "job_finished", job: JobInfo, } | { "type": "new_message_discovered", message: MessageSummary, } | { "type": "message_state_changed", id: number, account_id: string, state: MessageState, stored: number, destinations: number, error: string | null, } | { "type": "check_progress", job_id: string, destination_id: string, done: number, total: number, } | { "type": "check_finished", report: CheckReport, } | { "type": "purge_summary", summary: PurgeSummary, } | { "type": "messages_deleted", account_id: string, ids: Array<number>, } | { "type": "accounts_changed" } | { "type": "locked", reason: string, } | { "type": "notice", level: string, message: string, };
 
@@ -490,3 +670,4 @@ export type EventBatch = { events: Array<SyncEvent>, };
 export type ApiError = { error: string, code: string, };
 
 export const REDACTED = "********";
+export const MAX_LOCK_DAYS = 3650;

@@ -263,6 +263,12 @@ impl NameKey {
         let h = self.mac(&format!("object:{sha256}"));
         join(&[root, account_dir, "objects", &h[..2], &format!("{h}.enc")])
     }
+    /// Where a destination that compresses keeps the message: next to the uncompressed name, so
+    /// recompressing an object writes a new one and never overwrites the only copy.
+    pub fn compressed_object_path(&self, root: &str, account_dir: &str, sha256: &str) -> String {
+        let h = self.mac(&format!("object:{sha256}"));
+        join(&[root, account_dir, "objects", &h[..2], &format!("{h}.z.enc")])
+    }
     pub fn manifest_path(&self, root: &str, account_dir: &str, mailbox: &str) -> String {
         let h = self.mac(&format!("mailbox:{mailbox}"));
         join(&[

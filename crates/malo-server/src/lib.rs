@@ -1,5 +1,6 @@
 //! malo-server: HTTPS API, auth + key ring, scheduler and job queue on top of `malo-core`.
 
+pub mod alerts;
 pub mod auth;
 pub mod config;
 pub mod db;
@@ -14,6 +15,7 @@ pub mod routes;
 pub mod scheduler;
 pub mod state;
 pub mod tlsgen;
+pub mod totp;
 pub mod trust_page;
 pub mod ws;
 
@@ -100,6 +102,10 @@ pub fn router(state: SharedState) -> Router {
         .route("/recovery-kit", post(auth::recovery_kit))
         .route("/auth/verify-password", post(auth::verify_password))
         .route("/setup", post(auth::setup))
+        .route("/auth/totp/setup", post(totp::setup))
+        .route("/auth/totp/enable", post(totp::enable))
+        .route("/auth/totp/disable", post(totp::disable))
+        .route("/auth/totp/recovery-codes", post(totp::new_recovery))
         .layer(GovernorLayer { config: governor });
     Router::new()
         .merge(limited)
@@ -162,6 +168,20 @@ pub fn router(state: SharedState) -> Router {
         .route("/drafts/{id}", axum::routing::delete(delete_draft))
         .route("/messages/{id}/raw", get(raw_message))
         .route("/messages/{id}/attachments/{n}", get(attachment))
+        .route("/restore", post(restore))
+        .route("/usage", get(usage))
+        .route("/export", post(prepare_export))
+        .route("/export/{token}", get(download_export))
+        .route("/alerts", get(get_alerts).put(put_alerts))
+        .route("/alerts/test", post(test_alerts))
+        .route(
+            "/saved-searches",
+            get(list_saved_searches).post(create_saved_search),
+        )
+        .route(
+            "/saved-searches/{id}",
+            put(update_saved_search).delete(delete_saved_search),
+        )
         .route("/checks", get(list_checks))
         .route("/checks/latest", get(latest_check))
         .route("/audit", get(audit))
@@ -291,6 +311,7 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<Running> {
             fingerprint: mail_tls.as_ref().map(|t| t.1.clone()),
         },
         idle_watchers: Mutex::new(HashMap::new()),
+        exports: Mutex::new(HashMap::new()),
         shutdown: tokio_util::sync::CancellationToken::new(),
         cfg: cfg.clone(),
     });

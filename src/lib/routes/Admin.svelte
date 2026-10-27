@@ -174,6 +174,12 @@
       <label>Default max accounts per user <input type="number" min="1" bind:value={settings.default_max_accounts} /></label>
       <label>Concurrent jobs per user <input type="number" min="1" max="16" bind:value={settings.max_jobs_per_user} /></label>
     </div>
+    <h3>Speed limits</h3>
+    <div class="cards">
+      <label>Upload (KiB/s, 0 = no limit) <input type="number" min="0" step="128" bind:value={settings.upload_kib_per_sec} /></label>
+      <label>Download (KiB/s, 0 = no limit) <input type="number" min="0" step="128" bind:value={settings.download_kib_per_sec} /></label>
+    </div>
+    <p class="muted small">Shared by every user's backups, checks and restores on this server: uploads to storage and to mail servers, downloads from mail servers and storage. Destinations can have tighter limits of their own. 1024 KiB/s is about 8 Mbit/s.</p>
     <label class="check"><input type="checkbox" class="switch" bind:checked={settings.self_registration} /> Allow self-registration without an invite</label>
     <label class="check"><input type="checkbox" class="switch" bind:checked={settings.block_private_networks} /> Block mail servers and storage on private networks (loopback, LAN, link-local)</label>
     <p class="muted small">Turn this on when users you don't fully trust share the server: otherwise their accounts and destinations can make the server connect to hosts on its own network. Leave it off if users back up a mail server or MinIO on the LAN.</p>

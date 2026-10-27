@@ -17,6 +17,9 @@
   import Select from '../components/Select.svelte';
   import Segmented from '../components/Segmented.svelte';
   import DeleteMessages from '../components/DeleteMessages.svelte';
+  import RestoreDialog from '../components/RestoreDialog.svelte';
+  import ExportDialog from '../components/ExportDialog.svelte';
+  import SavedSearchDialog from '../components/SavedSearchDialog.svelte';
   import { fade } from 'svelte/transition';
   import { ms } from '../motion';
 
@@ -61,6 +64,40 @@
     const a = params.get('account');
     if (a) scope.account = a;
     if (params.get('new')) newOnly = true;
+  });
+
+  // A saved search from the sidebar: its words in the search box, its account in view.
+  const savedId = $derived(params.get('search'));
+  const saved = $derived(live.savedSearches.find((s) => s.id === savedId) ?? null);
+  $effect(() => {
+    const s = saved;
+    if (!s) return;
+    untrack(() => {
+      scope.account = s.account_id ?? '';
+      field = '';
+      q = s.query;
+      folder = 'mail';
+      showDrafts = false;
+      newOnly = false;
+      onSearch(true);
+    });
+  });
+
+  // ── Restoring to a mail account, and saving searches ──
+  let restoring = $state<{ selection: T.RestoreSelection; what: string; from: string } | null>(null);
+  let savingSearch = $state(false);
+  let exporting = $state<{ selection: T.RestoreSelection; what: string } | null>(null);
+  const exportMessages = (list: T.MessageSummary[]) => (exporting = { selection: { by: 'messages', ids: list.map((m) => m.id) }, what: plural(list.length, 'message') });
+  const plural = (n: number, one: string) => `${n.toLocaleString()} ${one}${n === 1 ? '' : 's'}`;
+  function restoreMessages(list: T.MessageSummary[]) {
+    const from = list.every((m) => m.account_id === list[0]?.account_id) ? (list[0]?.account_id ?? '') : '';
+    restoring = { selection: { by: 'messages', ids: list.map((m) => m.id) }, what: plural(list.length, 'message'), from };
+  }
+  /** Everything the list shows: a search, a mailbox or a whole account. */
+  const restoreView = $derived.by((): { selection: T.RestoreSelection; what: string; from: string } | null => {
+    if (q.trim()) return { selection: { by: 'search', query: q.trim(), account_id: account || undefined }, what: `the ${plural(total, 'message')} this search finds`, from: account };
+    if (account) return { selection: { by: 'account', account_id: account, mailbox: mailbox || undefined }, what: mailbox ? `everything in ${reveal(mailbox)}` : `all mail of ${accountName(account)}`, from: account };
+    return null;
   });
 
   // A different account starts on its whole mailbox list.
@@ -350,6 +387,8 @@
       { label: 'Mark as read', icon: 'check', keys: 'shift+i', run: () => markSelected(true) },
       { label: 'Mark as unread', icon: 'mail', keys: 'shift+u', run: () => markSelected(false) },
       { label: `Save ${n === 1 ? '.eml' : `${n.toLocaleString()} .eml files`}…`, icon: 'download', run: saveSelected },
+      { label: 'Export as mbox, Maildir or zip…', icon: 'download', run: () => exportMessages(chosen()) },
+      { label: 'Restore to a mail account…', icon: 'upload', run: () => restoreMessages(chosen()) },
       '-',
       folder === 'spam'
         ? { label: 'Not spam', icon: 'inbox', keys: '!', run: () => spam([...selected.keys()], false) }
@@ -452,6 +491,8 @@
       { label: 'Copy sender address', icon: 'copy', run: () => copy(m.envelope.from, 'Address copied') },
       subject && { label: 'Copy subject', icon: 'copy', run: () => copy(subject, 'Subject copied') },
       { label: 'Save .eml…', icon: 'download', run: () => attempt(() => app.saveRaw(m.id)) },
+      { label: 'Export as mbox, Maildir or zip…', icon: 'download', run: () => exportMessages([m]) },
+      { label: 'Restore to a mail account…', icon: 'upload', run: () => restoreMessages([m]) },
       '-',
       m.spam
         ? { label: 'Not spam', icon: 'inbox', keys: '!', run: () => spam([m.id], false) }
@@ -473,6 +514,9 @@
     { label: newOnly ? 'Show all messages' : 'Show only new messages', icon: 'mail', keys: 'n', run: () => (newOnly = !newOnly) },
     { label: 'Mark all read', icon: 'checks', keys: 'shift+a', run: markAll },
     { label: 'Reload list', icon: 'refresh', keys: 'shift+r', run: reset },
+    q.trim() && { label: 'Save this search…', icon: 'bookmark', run: () => (savingSearch = true) },
+    restoreView && total > 0 && { label: 'Export all in this view…', icon: 'download', run: () => restoreView && (exporting = { selection: restoreView.selection, what: restoreView.what }) },
+    restoreView && total > 0 && { label: 'Restore all in this view…', icon: 'upload', run: () => (restoring = restoreView) },
     '-',
     ...sorts.map(([k, label]): Entry => ({ label: `Sort: ${label}`, icon: k === sort ? 'check' : undefined, run: () => setSort(k) })),
   ];
@@ -602,7 +646,12 @@
     {/if}
 
     <div class="flex flex-col gap-2.5 px-3 pt-3 pb-2">
-      <SearchBox bind:this={searchBox} bind:value={q} bind:field {account} onchange={onSearch} />
+      <div class="flex items-center gap-1.5">
+        <div class="min-w-0 flex-1"><SearchBox bind:this={searchBox} bind:value={q} bind:field {account} onchange={onSearch} /></div>
+        {#if q.trim() && !(saved && saved.query === q.trim())}
+          <button class="flex-none bg-transparent p-1.5 text-muted hover:text-fg" onclick={() => (savingSearch = true)} title="Save this search" aria-label="Save this search"><Icon name="bookmark" size={15} /></button>
+        {/if}
+      </div>
 
       {#if inFolder}
         <!-- In place of the view switch, the same height: where this is, and the way back. -->
@@ -832,4 +881,13 @@
 {#if deleteScope}
   <DeleteMessages messages={chosen()} scope={deleteScope} onclose={() => (deleteScope = null)}
     onstarted={(jobs) => { pendingJobs = [...pendingJobs, ...jobs]; deleteScope = null; clearSelection(); }} />
+{/if}
+{#if exporting}
+  <ExportDialog {...exporting} onclose={() => (exporting = null)} />
+{/if}
+{#if restoring}
+  <RestoreDialog {...restoring} onclose={() => (restoring = null)} />
+{/if}
+{#if savingSearch}
+  <SavedSearchDialog query={q.trim()} {account} onclose={(s) => { savingSearch = false; if (s) go(`/browse?search=${s.id}`); }} />
 {/if}

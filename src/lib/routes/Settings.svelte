@@ -9,6 +9,8 @@
   import KitExport from '../components/KitExport.svelte';
   import ProfileSave from '../components/ProfileSave.svelte';
   import Icon from '../components/Icon.svelte';
+  import TwoStep from '../components/TwoStep.svelte';
+  import Alerts from '../components/Alerts.svelte';
   import { commands } from '../commands.svelte';
 
   let settings: T.UserSettings | null = $state(null);
@@ -159,6 +161,10 @@
     <button class="mt-1" type="submit">Change password</button>
   </form>
 </div>
+
+<TwoStep />
+
+<Alerts />
 
 <div class="panel">
   <h2>Recovery kit</h2>

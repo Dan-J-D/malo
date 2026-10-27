@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context};
@@ -15,6 +16,8 @@ use crate::config::{Account, Destination};
 use crate::crypto::{self, Key, StreamDecryptor};
 use crate::faults;
 use crate::layout::{self, NameKey};
+use crate::objectlock::Locker;
+use crate::ratelimit::{self, Limiter};
 
 /// Where `fs` destinations may write.
 #[derive(Debug, Clone)]
@@ -36,6 +39,11 @@ pub struct Store {
     op: Operator,
     names: NameKey,
     archive_key: Key,
+    /// Speed limits of this destination (shared with every job using it).
+    up: Arc<Limiter>,
+    down: Arc<Limiter>,
+    /// Sets Object Lock retention on message objects (S3 and B2 with Object Lock set).
+    locker: Option<Arc<Locker>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +72,10 @@ pub struct ManifestEntry {
     pub message_id: Option<String>,
     pub object_path: String,
     pub envelope: malo_api::Envelope,
+    /// Size of the object on this destination. Absent in manifests from before compression,
+    /// whose objects all have the size [`crypto::encrypted_len`] (or the plain size) gives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stored_size: Option<u64>,
 }
 
 /// Result of [`Store::scan`].
@@ -195,6 +207,21 @@ pub fn confine_fs_root(requested: Option<&str>, policy: &FsPolicy) -> anyhow::Re
 }
 
 const MAX_PREFIX_BYTES: usize = 512;
+
+/// Size of an object stored without compression: what manifests and replicas from before
+/// compression imply.
+pub fn expected_stored_len(encrypted: bool, size: u64) -> u64 {
+    if encrypted {
+        crypto::encrypted_len(size)
+    } else {
+        size
+    }
+}
+
+/// The object was written compressed (by its name: see [`NameKey::compressed_object_path`]).
+pub fn is_compressed_path(path: &str) -> bool {
+    path.ends_with(".z.enc")
+}
 
 /// The OpenDAL services a destination can use.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -535,6 +562,7 @@ pub fn raw_operator(scheme: &str, options: &BTreeMap<String, String>) -> anyhow:
         revision: 0,
         recovery_secrets: false,
         missing_secrets: vec![],
+        features: Default::default(),
     };
     validate_destination(&dest)?;
     operator(s, forced_options(s, dest.options.clone()))
@@ -578,6 +606,7 @@ impl Store {
         }
         let scheme = Scheme::parse(&dest.scheme)?;
         validate_destination(dest)?;
+        Locker::for_destination(dest)?;
         let mut opts = forced_options(scheme, dest.options.clone());
         if scheme == Scheme::Fs {
             let root = confine_fs_root(opts.get("root").map(String::as_str), fs)?;
@@ -585,12 +614,7 @@ impl Store {
         }
         let op =
             operator(scheme, opts).with_context(|| format!("cannot configure {}", dest.scheme))?;
-        Ok(Store {
-            dest: dest.clone(),
-            op,
-            names: NameKey::new(archive_key),
-            archive_key: archive_key.clone(),
-        })
+        Ok(Store::from_operator(dest, op, archive_key))
     }
 
     fn settings_path(&self) -> String {
@@ -625,12 +649,42 @@ impl Store {
 
     /// For tests: wrap an existing operator.
     pub fn from_operator(dest: &Destination, op: Operator, archive_key: &Key) -> Store {
+        let (up, down) = ratelimit::destination(
+            &dest.id,
+            dest.features.upload_kib_per_sec,
+            dest.features.download_kib_per_sec,
+        );
+        let locker = match Locker::for_destination(dest) {
+            Ok(l) => l.map(Arc::new),
+            Err(e) => {
+                tracing::warn!(dest = %dest.name, "Object Lock can't be used: {e:#}");
+                None
+            }
+        };
         Store {
             dest: dest.clone(),
             op,
             names: NameKey::new(archive_key),
             archive_key: archive_key.clone(),
+            up,
+            down,
+            locker,
         }
+    }
+
+    /// The Object Lock of this destination, when it has one.
+    pub fn locker(&self) -> Option<&Locker> {
+        self.locker.as_deref()
+    }
+
+    async fn throttle_up(&self, bytes: u64) {
+        self.up.take(bytes).await;
+        ratelimit::global_upload().take(bytes).await;
+    }
+
+    async fn throttle_down(&self, bytes: u64) {
+        self.down.take(bytes).await;
+        ratelimit::global_download().take(bytes).await;
     }
 
     pub fn operator(&self) -> &Operator {
@@ -640,6 +694,7 @@ impl Store {
     /// All uploads go through here (fault injection in test builds).
     async fn write_obj(&self, path: &str, mut data: Vec<u8>) -> anyhow::Result<()> {
         use faults::Fault;
+        self.throttle_up(data.len() as u64).await;
         match faults::pick(faults::Site::StoreWrite, &self.dest.id) {
             None => {}
             Some(f @ (Fault::Error | Fault::NoSpace)) => {
@@ -675,6 +730,7 @@ impl Store {
             .await
             .with_context(|| format!("read {path}"))?
             .to_vec();
+        self.throttle_down(buf.len() as u64).await;
         match faults::pick(faults::Site::StoreRead, &self.dest.id) {
             Some(faults::Fault::Slow) => {
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -724,7 +780,8 @@ impl Store {
         }
     }
 
-    /// Object path of one message. Encrypted objects are content-addressed (deduplicated).
+    /// Object path of one message. Encrypted objects are content-addressed (deduplicated);
+    /// compressed ones have a name of their own.
     pub fn object_path(
         &self,
         account: &Account,
@@ -734,7 +791,10 @@ impl Store {
         sha256: &str,
     ) -> String {
         let dir = self.account_dir(account);
-        self.portable(if self.dest.encrypt {
+        self.portable(if self.dest.compresses() {
+            self.names
+                .compressed_object_path(&self.dest.root, &dir, sha256)
+        } else if self.dest.encrypt {
             self.names.object_path(&self.dest.root, &dir, sha256)
         } else {
             layout::plain_object_path(&self.dest.root, &dir, mailbox_path, uidvalidity, uid)
@@ -750,6 +810,8 @@ impl Store {
         })
     }
 
+    /// Manifests, markers and other small files: encrypted on encrypted destinations, never
+    /// compressed (they are rewritten in place and must stay readable by older versions).
     fn encode(&self, plaintext: &[u8]) -> Vec<u8> {
         if self.dest.encrypt {
             crypto::encrypt_object(&self.archive_key, plaintext)
@@ -758,8 +820,17 @@ impl Store {
         }
     }
 
-    /// Writes an object (skipping identical existing encrypted objects) and reads it back to verify.
-    /// Returns the stored size.
+    /// A message object: compressed first where the destination compresses.
+    fn encode_message(&self, plaintext: &[u8]) -> Vec<u8> {
+        if self.dest.compresses() {
+            crypto::encrypt_object_compressed(&self.archive_key, plaintext)
+        } else {
+            self.encode(plaintext)
+        }
+    }
+
+    /// Writes a message object (skipping identical existing encrypted objects) and reads it back
+    /// to verify. Returns the stored size.
     pub async fn put_verified(
         &self,
         path: &str,
@@ -767,28 +838,30 @@ impl Store {
         sha256: &str,
     ) -> anyhow::Result<u64> {
         let path = self.checked(path)?;
+        let size = plaintext.len() as u64;
         if self.dest.encrypt {
-            if let Verify::Ok = self
-                .verify(path, true, sha256, plaintext.len() as u64, true)
+            if let (Verify::Ok, Some(stored)) = self
+                .verify_sized(path, true, sha256, size, None, true)
                 .await?
             {
-                return Ok(crypto::encrypted_len(plaintext.len() as u64));
+                return Ok(stored);
             }
         }
-        let data = self.encode(plaintext);
+        let data = self.encode_message(plaintext);
         let len = data.len() as u64;
         self.write_obj(path, data).await?;
         match self
-            .verify(
-                path,
-                self.dest.encrypt,
-                sha256,
-                plaintext.len() as u64,
-                true,
-            )
+            .verify(path, self.dest.encrypt, sha256, size, Some(len), true)
             .await?
         {
-            Verify::Ok => Ok(len),
+            Verify::Ok => {
+                // A copy that isn't locked doesn't count as stored on a destination meant to be
+                // immutable; integrity checks extend the lock later.
+                if let Some(l) = &self.locker {
+                    l.lock(path, l.until_from_now()).await?;
+                }
+                Ok(len)
+            }
             Verify::Missing => bail!("object {path} missing right after write"),
             Verify::Corrupt(e) => bail!("read-back of {path} failed: {e}"),
         }
@@ -805,39 +878,62 @@ impl Store {
         }
     }
 
-    /// Stat (quick) or download + decrypt + hash (deep).
+    /// Stat (quick) or download + decrypt + hash (deep). `stored` is the object's size on the
+    /// destination when known (the index records it); without it, the size an uncompressed object
+    /// has is expected, except in a deep check, where the hash decides.
     pub async fn verify(
         &self,
         path: &str,
         encrypted: bool,
         sha256: &str,
         size: u64,
+        stored: Option<u64>,
         deep: bool,
     ) -> anyhow::Result<Verify> {
+        Ok(self
+            .verify_sized(path, encrypted, sha256, size, stored, deep)
+            .await?
+            .0)
+    }
+
+    /// [`Store::verify`], also returning the object's size on the destination.
+    async fn verify_sized(
+        &self,
+        path: &str,
+        encrypted: bool,
+        sha256: &str,
+        size: u64,
+        stored: Option<u64>,
+        deep: bool,
+    ) -> anyhow::Result<(Verify, Option<u64>)> {
         let path = self.checked(path)?;
-        let expected_len = if encrypted {
-            crypto::encrypted_len(size)
-        } else {
-            size
-        };
+        let expected_len = stored
+            .filter(|s| *s > 0)
+            .or_else(|| (!deep).then(|| expected_stored_len(encrypted, size)));
         self.meta_fault(&format!("stat {path}"))?;
         let meta = match self.op.stat(path).await {
             Ok(m) => m,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Verify::Missing),
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok((Verify::Missing, None)),
             Err(e) => return Err(e.into()),
         };
-        if meta.content_length() != expected_len {
-            return Ok(Verify::Corrupt(format!(
-                "size {} ≠ expected {expected_len}",
-                meta.content_length()
-            )));
+        let len = Some(meta.content_length());
+        if let Some(expected_len) = expected_len {
+            if meta.content_length() != expected_len {
+                return Ok((
+                    Verify::Corrupt(format!(
+                        "size {} ≠ expected {expected_len}",
+                        meta.content_length()
+                    )),
+                    len,
+                ));
+            }
         }
         if !deep {
-            return Ok(Verify::Ok);
+            return Ok((Verify::Ok, len));
         }
         let reader = match self.op.reader(path).await {
             Ok(r) => r,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Verify::Missing),
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok((Verify::Missing, None)),
             Err(e) => return Err(e.into()),
         };
         let mut stream = reader.into_bytes_stream(..).await?;
@@ -849,6 +945,7 @@ impl Store {
             return Err(faults::io_error(f)).with_context(|| format!("read {path}"));
         }
         while let Some(chunk) = stream.try_next().await? {
+            self.throttle_down(chunk.len() as u64).await;
             let chunk = match read_fault.take() {
                 Some(faults::Fault::FlipBit) => {
                     let mut c = chunk.to_vec();
@@ -870,7 +967,7 @@ impl Store {
                         total += pt.len() as u64;
                         hasher.update(&pt);
                     }
-                    Err(e) => return Ok(Verify::Corrupt(e.to_string())),
+                    Err(e) => return Ok((Verify::Corrupt(e.to_string()), len)),
                 },
                 None => {
                     total += chunk.len() as u64;
@@ -884,17 +981,17 @@ impl Store {
                     total += pt.len() as u64;
                     hasher.update(&pt);
                 }
-                Err(e) => return Ok(Verify::Corrupt(e.to_string())),
+                Err(e) => return Ok((Verify::Corrupt(e.to_string()), len)),
             }
         }
         let got = hex::encode(hasher.finalize());
         if total != size || got != sha256 {
-            return Ok(Verify::Corrupt(format!(
-                "sha256 mismatch ({} bytes)",
-                total
-            )));
+            return Ok((
+                Verify::Corrupt(format!("sha256 mismatch ({} bytes)", total)),
+                len,
+            ));
         }
-        Ok(Verify::Ok)
+        Ok((Verify::Ok, len))
     }
 
     pub async fn delete(&self, path: &str) -> anyhow::Result<()> {
@@ -1005,7 +1102,7 @@ impl Store {
             .await
             .with_context(|| format!("write manifest {path}"))?;
         match self
-            .verify(path, self.dest.encrypt, &sha, body.len() as u64, true)
+            .verify(path, self.dest.encrypt, &sha, body.len() as u64, None, true)
             .await?
         {
             Verify::Ok => Ok(()),
@@ -1090,6 +1187,26 @@ impl Store {
         })
     }
 
+    /// Whether the destination answers, by listing its folder (writes nothing). A folder that
+    /// doesn't exist yet counts as reachable.
+    pub async fn reachable(&self) -> anyhow::Result<()> {
+        let root = self.checked(&self.dest.root)?;
+        let dir = if root.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", root.trim_end_matches('/'))
+        };
+        self.meta_fault(&format!("list {dir}"))?;
+        match self.op.lister_with(&dir).await {
+            Ok(mut l) => {
+                l.try_next().await?;
+                Ok(())
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Writes, reads back and deletes a probe object.
     pub async fn test(&self) -> DestinationTest {
         let path = self.portable(layout::join(&[
@@ -1104,9 +1221,26 @@ impl Store {
                 error: Some(format!("write failed: {e}")),
                 write_ms: 0,
                 read_ms: 0,
+                lock: None,
             };
         }
         let write_ms = t0.elapsed().as_millis() as u64;
+        let lock = match &self.locker {
+            None => None,
+            Some(l) => match self.test_lock(l, &path).await {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    let _ = self.op.delete(&path).await;
+                    return DestinationTest {
+                        ok: false,
+                        error: Some(format!("Object Lock: {e:#}")),
+                        write_ms,
+                        read_ms: 0,
+                        lock: None,
+                    };
+                }
+            },
+        };
         let t1 = Instant::now();
         let read = self.op.read(&path).await.map(|b| b.to_vec());
         let read_ms = t1.elapsed().as_millis() as u64;
@@ -1122,12 +1256,26 @@ impl Store {
             error,
             write_ms,
             read_ms,
+            lock,
         }
+    }
+
+    /// Checks the bucket's lock settings, and that a probe object can be locked (for a minute,
+    /// so the probe goes away soon; on a versioned bucket its deletion leaves a delete marker).
+    async fn test_lock(&self, l: &Locker, probe: &str) -> anyhow::Result<String> {
+        let bucket = l.check_bucket().await?;
+        l.lock(probe, chrono::Utc::now() + chrono::Duration::seconds(60))
+            .await?;
+        let r = l
+            .retention(probe)
+            .await?
+            .ok_or_else(|| anyhow!("the probe object shows no retention after locking it"))?;
+        Ok(format!("{bucket}; a test object was locked ({})", r.mode))
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use malo_api::{DeepCheckMode, TlsMode};
     use opendal::services::Memory;
@@ -1145,10 +1293,11 @@ mod tests {
             deep_check: DeepCheckMode::Full,
             recovery_secrets: false,
             missing_secrets: vec![],
+            features: Default::default(),
         }
     }
 
-    fn account() -> Account {
+    pub fn account() -> Account {
         Account {
             revision: 1,
             id: "0123456789abcdef".into(),
@@ -1190,11 +1339,20 @@ mod tests {
                     "backup/Work_01234567/mailboxes/INBOX/1-83ecb521/2.eml"
                 );
             }
-            store.put_verified(&path, &msg, &sha).await.unwrap();
+            let stored = store.put_verified(&path, &msg, &sha).await.unwrap();
+            if encrypt {
+                // Compressed: far smaller than the message, and named as such.
+                assert!(stored < msg.len() as u64 / 10, "{stored}");
+                assert!(is_compressed_path(&path));
+            } else {
+                assert_eq!(stored, msg.len() as u64);
+            }
+            // Writing the same message again finds the stored copy and reports its real size.
+            assert_eq!(store.put_verified(&path, &msg, &sha).await.unwrap(), stored);
             assert_eq!(store.get(&path, encrypt).await.unwrap(), msg);
             assert_eq!(
                 store
-                    .verify(&path, encrypt, &sha, msg.len() as u64, true)
+                    .verify(&path, encrypt, &sha, msg.len() as u64, None, true)
                     .await
                     .unwrap(),
                 Verify::Ok
@@ -1205,22 +1363,33 @@ mod tests {
             store.operator().write(&path, raw).await.unwrap();
             assert!(matches!(
                 store
-                    .verify(&path, encrypt, &sha, msg.len() as u64, true)
+                    .verify(&path, encrypt, &sha, msg.len() as u64, None, true)
                     .await
                     .unwrap(),
                 Verify::Corrupt(_)
             ));
             assert_eq!(
                 store
-                    .verify(&path, encrypt, &sha, msg.len() as u64, false)
+                    .verify(&path, encrypt, &sha, msg.len() as u64, Some(stored), false)
                     .await
                     .unwrap(),
                 Verify::Ok
             );
+            // Without the recorded size, a quick check of a compressed object expects the
+            // uncompressed size and can't confirm it.
+            if encrypt {
+                assert!(matches!(
+                    store
+                        .verify(&path, encrypt, &sha, msg.len() as u64, None, false)
+                        .await
+                        .unwrap(),
+                    Verify::Corrupt(_)
+                ));
+            }
             store.delete(&path).await.unwrap();
             assert_eq!(
                 store
-                    .verify(&path, encrypt, &sha, msg.len() as u64, false)
+                    .verify(&path, encrypt, &sha, msg.len() as u64, None, false)
                     .await
                     .unwrap(),
                 Verify::Missing
@@ -1265,6 +1434,7 @@ mod tests {
             message_id: None,
             object_path: "x".into(),
             envelope: crate::index::empty_envelope(),
+            stored_size: None,
         };
         let path = store.manifest_path(&a, "INBOX", "INBOX");
         store

@@ -30,6 +30,8 @@ pub struct AppState {
     pub mail: crate::mail::MailInfo,
     /// Background IMAP IDLE watchers per (user, account).
     pub idle_watchers: Mutex<HashMap<(String, String), tokio_util::sync::CancellationToken>>,
+    /// Exports prepared for download, by ticket.
+    pub exports: Mutex<HashMap<String, crate::routes::PendingExport>>,
     /// Cancelled on shutdown: stops the scheduler and refuses new jobs.
     pub shutdown: tokio_util::sync::CancellationToken,
 }

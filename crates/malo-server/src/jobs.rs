@@ -233,6 +233,7 @@ pub fn record_skipped(
     job.finished_at = Some(Utc::now());
     job.error = Some("user was locked".into());
     state.db.insert_job(user_id, &job)?;
+    crate::alerts::skipped_while_locked(state, user_id);
     Ok(job)
 }
 
@@ -367,6 +368,7 @@ async fn run_job(
         Ok(value) => {
             job.result = Some(value);
             finish(&mut job, JobState::Done, None);
+            crate::alerts::after_job(state, &user, &job);
             index_for_search_after(state, &user, &job.kind);
         }
         Err(e) if is_cancelled(&e) || cancel.is_cancelled() => {
@@ -380,6 +382,7 @@ async fn run_job(
         Err(e) => {
             tracing::warn!(job = %job.id, "job failed: {e:#}");
             finish(&mut job, JobState::Failed, Some(format!("{e:#}")));
+            crate::alerts::after_job(state, &user, &job);
         }
     }
 }
@@ -397,7 +400,11 @@ async fn execute(
     | JobKind::Purge { account_id }
     | JobKind::PurgeDryRun { account_id }
     | JobKind::DeleteMessages { account_id, .. }
-    | JobKind::MoveSpam { account_id, .. } = kind
+    | JobKind::MoveSpam { account_id, .. }
+    | JobKind::RestoreToImap {
+        target_account_id: account_id,
+        ..
+    } = kind
     {
         crate::net::check_account(state, ctx.account(account_id)?)
             .await
@@ -441,6 +448,16 @@ async fn execute(
             serde_json::to_value(purge::run_purge(ctx, account_id).await?)?
         }
         JobKind::SearchIndex => serde_json::to_value(malo_core::search::run_index(ctx).await?)?,
+        JobKind::RestoreToImap {
+            target_account_id,
+            selection,
+            target,
+        } => serde_json::to_value(
+            malo_core::restore::run_restore(ctx, target_account_id, selection, target).await?,
+        )?,
+        JobKind::CompressStored { destination_id } => serde_json::to_value(
+            malo_core::compress::compress_stored(ctx, destination_id.as_deref()).await?,
+        )?,
         JobKind::DeleteMessages {
             account_id,
             message_ids,

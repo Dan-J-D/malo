@@ -564,6 +564,9 @@ pub struct Unlocked {
     me: Option<Me>,
     /// Why logging in with the kept password failed (it was probably changed since).
     login_error: Option<String>,
+    /// The kept password is right, but two-step login wants a code: `login_profile` finishes.
+    #[serde(default)]
+    totp_required: bool,
 }
 
 /// The message of a `"<status>|<code>|<message>"` error.
@@ -627,10 +630,11 @@ async fn unlock_profile(
             return Err(e);
         }
     };
-    let (mut me, mut login_error) = (None, None);
+    let (mut me, mut login_error, mut totp_required) = (None, None, false);
     if let (Some((user, pw)), false) = (creds, status.needs_setup) {
-        match login_as(&state, &user, &pw).await {
+        match login_as(&state, &user, &pw, None).await {
             Ok(m) => me = Some(m),
+            Err(e) if e.starts_with("401|totp_required|") => totp_required = true,
             Err(e) => login_error = Some(message_of(&e)),
         }
     }
@@ -642,7 +646,23 @@ async fn unlock_profile(
         setup_token,
         me,
         login_error,
+        totp_required,
     })
+}
+
+/// Finishes logging in with the password kept in the open profile and a two-step login code.
+#[tauri::command]
+async fn login_profile(state: State<'_, AppState>, totp: String) -> CmdResult<Me> {
+    let creds = state
+        .profile
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|p| p.data.username.clone().zip(p.data.password.clone()));
+    let Some((user, pw)) = creds else {
+        return Err("the open profile doesn't keep a password".into());
+    };
+    login_as(&state, &user, &pw, Some(totp)).await
 }
 
 #[tauri::command]
@@ -885,8 +905,13 @@ async fn reset_local_data(
 // ───────────────────────────── session ─────────────────────────────
 
 #[tauri::command]
-async fn login(state: State<'_, AppState>, username: String, password: String) -> CmdResult<Me> {
-    let me = login_as(&state, &username, &password).await?;
+async fn login(
+    state: State<'_, AppState>,
+    username: String,
+    password: String,
+    totp: Option<String>,
+) -> CmdResult<Me> {
+    let me = login_as(&state, &username, &password, totp).await?;
     // A profile without a username learns it; one made for someone else stays as it is.
     let mut open = state.profile.lock().unwrap();
     if let Some(p) = open.as_mut().filter(|p| p.data.username.is_none()) {
@@ -919,13 +944,19 @@ async fn verify_login(state: &AppState, password: &str) -> CmdResult<()> {
     }
 }
 
-async fn login_as(state: &AppState, username: &str, password: &str) -> CmdResult<Me> {
+async fn login_as(
+    state: &AppState,
+    username: &str,
+    password: &str,
+    totp: Option<String>,
+) -> CmdResult<Me> {
     let mut c = conn(state)?;
     c.token = None;
     let resp = request(&c, reqwest::Method::POST, "/auth/login")
         .json(&LoginRequest {
             username: username.to_string(),
             password: password.to_string(),
+            totp: totp.filter(|t| !t.trim().is_empty()),
         })
         .send()
         .await
@@ -1255,6 +1286,20 @@ async fn save_raw(
     .await
 }
 
+/// Saves a prepared export (`POST /export` returned the ticket) where the user picks.
+#[tauri::command]
+async fn save_export(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    token: String,
+    filename: String,
+) -> CmdResult<Option<String>> {
+    if !token.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("invalid export ticket".into());
+    }
+    download_to(&app, &state, &format!("/export/{token}"), &filename).await
+}
+
 /// Saves several messages as `.eml` files into a folder the user picks (`MALO_AUTOSAVE_DIR` in
 /// headless tests). Existing files are never overwritten. Returns the folder and how many were
 /// saved; a failure stops there and reports how far it got.
@@ -1532,12 +1577,14 @@ pub fn run() {
             change_profile_password,
             disconnect,
             login,
+            login_profile,
             logout,
             api,
             subscribe_events,
             save_attachment,
             save_raw,
             save_raw_many,
+            save_export,
             raw_source,
             save_recovery_kit,
             pick_recovery_kit,

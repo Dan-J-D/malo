@@ -17,6 +17,7 @@
   import Dashboard from './routes/Dashboard.svelte';
   import Accounts from './routes/Accounts.svelte';
   import Destinations from './routes/Destinations.svelte';
+  import Storage from './routes/Storage.svelte';
   import Activity from './routes/Activity.svelte';
   import Integrity from './routes/Integrity.svelte';
   import Purge from './routes/Purge.svelte';
@@ -94,6 +95,8 @@
     <Accounts />
   {:else if top === '/destinations'}
     <Destinations />
+  {:else if top === '/storage'}
+    <Storage />
   {:else if top === '/activity'}
     <Activity />
   {:else if top === '/integrity'}

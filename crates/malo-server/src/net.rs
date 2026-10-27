@@ -20,9 +20,13 @@ fn blocking(state: &AppState) -> bool {
     on
 }
 
-/// Applies the admin setting at startup and after it changes.
+/// Applies the admin settings that act on every connection (the private-network block and the
+/// server-wide speed limits) at startup and after they change.
 pub fn sync_setting(state: &AppState) {
     blocking(state);
+    if let Ok(s) = state.db.admin_settings() {
+        malo_core::ratelimit::set_global(s.upload_kib_per_sec, s.download_kib_per_sec);
+    }
 }
 
 /// Every address `host` resolves to must be public. Checked again when connecting; this check

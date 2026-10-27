@@ -93,6 +93,9 @@ pub trait TokenSource: Send + Sync {
     fn invalidate(&self, account_id: &str);
 }
 
+/// Starts the error of a refused token refresh (alerts look for it).
+pub const REFRESH_FAILED: &str = "token refresh failed";
+
 /// Called with `(account_id, new_refresh_token)`.
 pub type RotateFn = Box<dyn Fn(&str, String) + Send + Sync>;
 
@@ -144,7 +147,7 @@ impl TokenCache {
         let token = req
             .request_async(&self.http)
             .await
-            .map_err(|e| anyhow::anyhow!("token refresh failed: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("{REFRESH_FAILED}: {e}"))?;
         if let Some(new_rt) = token.refresh_token() {
             if new_rt.secret() != refresh_token {
                 (self.on_rotate)(&account.id, new_rt.secret().clone());

@@ -1276,7 +1276,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
     }
 
     fn folders(&self, user: &UnlockedUser) -> anyhow::Result<Vec<Folder>> {
-        user.index.imap_folders(&self.account_id())
+        let account = self.account_id();
+        let mut folders = user.index.imap_folders(&account)?;
+        let smart =
+            malo_core::mailview::smart_folders(&user.config().saved_searches, &account, &folders);
+        folders.extend(smart);
+        Ok(folders)
     }
 
     fn find_folder(&self, user: &UnlockedUser, name: &str) -> anyhow::Result<Option<Folder>> {
@@ -2079,13 +2084,20 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
             .await?;
             return Ok(Flow::Continue);
         }
+        if let FolderSource::Search(_) = &folder.source {
+            self.line(&format!(
+                "{tag} NO [CANNOT] Smart folders show search results; save the message in another folder"
+            ))
+            .await?;
+            return Ok(Flow::Continue);
+        }
         let upstream = match &folder.source {
             FolderSource::Label(l) if l == "\\Inbox" => "INBOX".to_string(),
             FolderSource::Primary | FolderSource::AllMail | FolderSource::Category(_) => {
                 "INBOX".to_string()
             }
             FolderSource::Label(l) => l.clone(),
-            FolderSource::Mailbox => folder.name.clone(),
+            FolderSource::Mailbox | FolderSource::Search(_) => folder.name.clone(),
         };
         let date = date.map(|d| format!("\"{d}\""));
         if let Err(e) = crate::net::check_account(&self.state, &account).await {

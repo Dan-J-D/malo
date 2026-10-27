@@ -116,6 +116,7 @@ services:
           aws --endpoint-url http://rustfs:9000 s3 ls >/dev/null 2>&1 && break; sleep 1
         done
         for b in malo-a malo-b; do aws --endpoint-url http://rustfs:9000 s3 mb s3://$$b || true; done
+        aws --endpoint-url http://rustfs:9000 s3api create-bucket --bucket malo-lock --object-lock-enabled-for-bucket || true
 
   gcs:
     profiles: [test]

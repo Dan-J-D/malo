@@ -21,6 +21,8 @@ export const session = $state({
   kitPending: null as T.Me | null,
   /** Who logged in last on this connection, to fill in after a lock. Never written to disk. */
   lastUsername: null as string | null,
+  /** The profile's kept password was accepted and only the two-step login code is missing. */
+  profileTotp: false,
 });
 
 export const live = $state({
@@ -35,6 +37,7 @@ export const live = $state({
   /** The messages last deleted from the backup (a new array each time), so open lists reload. */
   deleted: [] as number[],
   notices: [] as { id: number; level: string; message: string }[],
+  savedSearches: [] as T.SavedSearch[],
 });
 
 /** Account chosen in the sidebar switcher; '' shows mail from every account. */
@@ -126,6 +129,10 @@ export async function refreshDestinations() {
   live.destinations = await api.get<T.DestinationView[]>('/destinations');
   // Whether the recovery kit still holds the destinations as they are.
   void refreshMe().catch(() => undefined);
+}
+
+export async function refreshSavedSearches() {
+  live.savedSearches = await api.get<T.SavedSearch[]>('/saved-searches');
 }
 
 export async function refreshJobs() {
@@ -252,13 +259,14 @@ export async function enterApp(me: T.Me) {
   session.me = me;
   session.lastUsername = me.username;
   session.lockedReason = null;
+  session.profileTotp = false;
   // Route first, so a page left open by a previous user (e.g. Admin) never mounts for this one.
   route.path = '/dashboard';
   go('/dashboard');
   session.phase = 'app';
   clearFound();
   scope.account = '';
-  await Promise.all([refreshAccounts(), refreshDestinations(), refreshJobs()]).catch((e) => notify(errorText(e), 'error'));
+  await Promise.all([refreshAccounts(), refreshDestinations(), refreshJobs(), refreshSavedSearches()]).catch((e) => notify(errorText(e), 'error'));
   live.latestReport = await api.get<T.CheckReport | null>('/checks/latest').catch(() => null);
   await app.subscribe((batch) => handleBatch(batch.events));
   if (me.skipped_while_locked > 0) {
@@ -318,6 +326,7 @@ export async function fromProfile(u: Unlocked) {
   } else if (u.me) {
     await enterApp(u.me);
   } else {
+    session.profileTotp = u.totp_required;
     session.lockedReason = u.login_error ? `The password kept in the profile didn't work: ${u.login_error}` : null;
     session.phase = 'login';
   }

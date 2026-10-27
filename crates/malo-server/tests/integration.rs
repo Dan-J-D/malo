@@ -553,7 +553,8 @@ async fn auto_lock_stops_jobs_and_restart_seals() {
             "/auth/login",
             Some(&LoginRequest {
                 username: name.clone(),
-                password: "nope-nope-nope".into()
+                password: "nope-nope-nope".into(),
+                totp: None,
             })
         )
         .await
@@ -1296,6 +1297,7 @@ async fn rebuild_index_and_recovery_kit() {
             Some(&LoginRequest {
                 username: name.clone(),
                 password: fran_password.clone(),
+                totp: None,
             }),
         )
         .await;
@@ -1655,7 +1657,8 @@ async fn delete_own_account_requires_phrase_and_password() {
             "/auth/login",
             Some(&LoginRequest {
                 username: name.clone(),
-                password: format!("{name}-password")
+                password: format!("{name}-password"),
+                totp: None,
             }),
         )
         .await
@@ -1727,7 +1730,8 @@ async fn path_traversal_is_rejected_everywhere() {
                     || msg.contains("allowed")
                     || msg.contains("file on the server")
                     || msg.contains("forbidden character")
-                    || msg.contains("too long"),
+                    || msg.contains("too long")
+                    || msg.contains("service account key"),
                 "{msg}"
             ),
             Ok(t) => assert!(!t.ok, "test endpoint used {c:?}"),

@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
+use base64::Engine;
 use futures::future::BoxFuture;
 use futures::StreamExt;
 use malo_api::*;
@@ -17,6 +18,7 @@ use malo_server::config::ServerConfig;
 use malo_server::Running;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 pub const IMAP_PORT: u16 = 10993;
 pub const IMAP_NO_UIDPLUS_PORT: u16 = 11993;
@@ -89,7 +91,7 @@ impl Api {
         }
     }
 
-    fn req(&self, m: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+    pub fn req(&self, m: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         let r = self.http.request(m, format!("{}{}", self.base, path));
         match &self.token {
             Some(t) => r.bearer_auth(t),
@@ -156,6 +158,7 @@ impl Api {
                 &LoginRequest {
                     username: username.into(),
                     password: password.into(),
+                    totp: None,
                 },
             )
             .await;
@@ -363,6 +366,7 @@ pub fn s3_dest(name: &str, bucket: &str, root: &str, encrypt: bool) -> Destinati
         required_for_purge: true,
         deep_check: DeepCheckMode::Full,
         recovery_secrets: false,
+        features: Default::default(),
     }
 }
 
@@ -395,6 +399,7 @@ pub fn gcs_dest(name: &str, root: &str, encrypt: bool) -> DestinationInput {
         required_for_purge: true,
         deep_check: DeepCheckMode::Full,
         recovery_secrets: false,
+        features: Default::default(),
     }
 }
 
@@ -409,6 +414,7 @@ pub fn fs_dest(name: &str, root: &str) -> DestinationInput {
         required_for_purge: true,
         deep_check: DeepCheckMode::Full,
         recovery_secrets: false,
+        features: Default::default(),
     }
 }
 
@@ -529,4 +535,95 @@ pub async fn oauth_imap_conn(imap_user: &str, refresh_token: &str) -> ImapConn {
     imap::connect(&a, &tokens)
         .await
         .expect("oauth imap connect")
+}
+
+#[derive(Default)]
+pub struct Upstream {
+    pub auth: Vec<String>,
+    pub envelopes: Vec<(String, Vec<String>)>,
+    pub messages: Vec<Vec<u8>>,
+}
+
+/// A TLS SMTP server that accepts AUTH PLAIN and refuses recipients at `reject.example`.
+pub async fn fake_smtp() -> (u16, Arc<Mutex<Upstream>>) {
+    let key = rcgen::KeyPair::generate().unwrap();
+    let cert = rcgen::CertificateParams::new(vec!["localhost".into()])
+        .unwrap()
+        .self_signed(&key)
+        .unwrap();
+    let config = rustls::ServerConfig::builder_with_provider(malo_core::tls::provider())
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![cert.der().clone()],
+            rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+        )
+        .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let log = seen.clone();
+    tokio::spawn(async move {
+        loop {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let (acceptor, log) = (acceptor.clone(), log.clone());
+            tokio::spawn(async move {
+                let tls = acceptor.accept(tcp).await.unwrap();
+                let mut io = tokio::io::BufReader::new(tls);
+                let mut from = String::new();
+                let mut to = vec![];
+                io.get_mut().write_all(b"220 fake ESMTP\r\n").await.unwrap();
+                loop {
+                    let mut line = String::new();
+                    if io.read_line(&mut line).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let up = line.to_ascii_uppercase();
+                    let reply: &[u8] = if up.starts_with("EHLO") {
+                        b"250-fake\r\n250-SIZE 1000000\r\n250 AUTH PLAIN LOGIN\r\n"
+                    } else if up.starts_with("AUTH PLAIN") {
+                        let b = base64::engine::general_purpose::STANDARD
+                            .decode(line[11..].trim())
+                            .unwrap();
+                        log.lock().unwrap().auth.push(String::from_utf8(b).unwrap());
+                        b"235 ok\r\n"
+                    } else if up.starts_with("MAIL FROM:") {
+                        from = line[10..].trim().to_string();
+                        b"250 ok\r\n"
+                    } else if up.starts_with("RCPT TO:") {
+                        if up.contains("REJECT.EXAMPLE") {
+                            b"550 5.1.1 no such user\r\n"
+                        } else {
+                            to.push(line[8..].trim().to_string());
+                            b"250 ok\r\n"
+                        }
+                    } else if up.starts_with("DATA") {
+                        io.get_mut().write_all(b"354 go\r\n").await.unwrap();
+                        let mut data = vec![];
+                        loop {
+                            let mut l = vec![];
+                            io.read_until(b'\n', &mut l).await.unwrap();
+                            if l == b".\r\n" {
+                                break;
+                            }
+                            data.extend_from_slice(&l);
+                        }
+                        let mut log = log.lock().unwrap();
+                        log.messages.push(data);
+                        log.envelopes.push((from.clone(), std::mem::take(&mut to)));
+                        b"250 queued\r\n"
+                    } else if up.starts_with("QUIT") {
+                        let _ = io.get_mut().write_all(b"221 bye\r\n").await;
+                        return;
+                    } else {
+                        b"250 ok\r\n"
+                    };
+                    io.get_mut().write_all(reply).await.unwrap();
+                }
+            });
+        }
+    });
+    (port, seen)
 }

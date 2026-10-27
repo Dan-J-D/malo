@@ -46,6 +46,10 @@ libc = "0.2"
 url = "2"
 ipnet = { version = "2", features = ["serde"] }
 memsec = "0.7"
+hmac.workspace = true
+sha1 = "0.10"
+data-encoding = "2"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 reqwest.workspace = true
 
 [features]
@@ -62,3 +66,4 @@ sha2.workspace = true
 opendal = { version = "0.59", default-features = false, features = ["services-s3"] }
 # A real IMAP client against the IMAP service.
 async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }

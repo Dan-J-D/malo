@@ -57,6 +57,8 @@ export interface Unlocked {
   me: T.Me | null;
   /** Why logging in with the kept password failed. */
   login_error: string | null;
+  /** The kept password is right, but two-step login wants a code: finish with `loginProfile`. */
+  totp_required: boolean;
 }
 export interface LocalDataInfo { path: string; exists: boolean; bytes: number; files: number; users: number; running: boolean }
 export interface OAuthRequest {
@@ -83,7 +85,10 @@ export const app = {
     call<ProfileInfo | null>('save_profile', { password, loginPassword }),
   setProfileLogin: (password: string | null) => call<ProfileInfo>('set_profile_login', { password }),
   changeProfilePassword: (password: string) => call<void>('change_profile_password', { password }),
-  login: (username: string, password: string) => call<T.Me>('login', { username, password }),
+  login: (username: string, password: string, totp: string | null = null) =>
+    call<T.Me>('login', { username, password, totp }),
+  /** Logs in with the password kept in the open profile and a two-step login code. */
+  loginProfile: (totp: string) => call<T.Me>('login_profile', { totp }),
   logout: (lock: boolean) => call<void>('logout', { lock }),
   subscribe(onBatch: (b: T.EventBatch) => void) {
     const ch = new Channel<T.EventBatch>();
@@ -95,6 +100,8 @@ export const app = {
   saveRaw: (messageId: number) => call<string | null>('save_raw', { messageId }),
   /** Saves messages as .eml files into a folder the user picks: [folder, count saved]. */
   saveRawMany: (messageIds: number[]) => call<[string, number] | null>('save_raw_many', { messageIds }),
+  /** Saves a prepared export (see `POST /export`) where the user picks; null when cancelled. */
+  saveExport: (token: string, filename: string) => call<string | null>('save_export', { token, filename }),
   rawSource: (messageId: number) => call<string>('raw_source', { messageId }),
   saveRecoveryKit: (username: string, password: string, passphrase: string) =>
     call<string | null>('save_recovery_kit', { username, password, passphrase }),

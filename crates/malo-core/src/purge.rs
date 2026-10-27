@@ -296,7 +296,14 @@ async fn delete_on_server(
                 break;
             };
             match store
-                .verify(&rep.object_path, rep.encrypted, &sha, c.message.size, true)
+                .verify(
+                    &rep.object_path,
+                    rep.encrypted,
+                    &sha,
+                    c.message.size,
+                    (rep.stored_size > 0).then_some(rep.stored_size),
+                    true,
+                )
                 .await
             {
                 Ok(Verify::Ok) => {}

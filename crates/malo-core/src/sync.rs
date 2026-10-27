@@ -625,7 +625,7 @@ pub async fn write_manifests(
     mailboxes: &[i64],
 ) -> anyhow::Result<()> {
     let dest_key = dest_generation_key(&account.id, &store.dest.id);
-    let dirty_key = format!("manifest_dirty:{}:{}", account.id, store.dest.id);
+    let dirty_key = manifest_dirty_key(&account.id, &store.dest.id);
     let mut known = ctx
         .index
         .kv_get(&dest_key)?
@@ -707,6 +707,7 @@ pub async fn write_manifests(
                 message_id: msg.message_id_hdr.clone(),
                 object_path: rep.object_path.clone(),
                 envelope: msg.envelope.clone(),
+                stored_size: (rep.stored_size > 0).then_some(rep.stored_size),
             });
         }
     }
@@ -732,6 +733,21 @@ pub async fn write_manifests(
         tracing::warn!(dest = %store.dest.name, "deleting objects of deleted messages: {e:#}");
     }
     Ok(())
+}
+
+fn manifest_dirty_key(account_id: &str, destination_id: &str) -> String {
+    format!("manifest_dirty:{account_id}:{destination_id}")
+}
+
+/// The account's manifests on a destination no longer match the index: the next manifest write
+/// rewrites every one of them.
+pub fn mark_manifests_dirty(
+    ctx: &JobCtx,
+    account_id: &str,
+    destination_id: &str,
+) -> anyhow::Result<()> {
+    ctx.index
+        .kv_set(&manifest_dirty_key(account_id, destination_id), "1")
 }
 
 fn object_deletes_key(destination_id: &str) -> String {

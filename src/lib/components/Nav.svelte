@@ -2,12 +2,16 @@
   import { onDestroy, tick } from 'svelte';
   import { fly, slide } from 'svelte/transition';
   import { ms, ease } from '../motion';
-  import { session, route, live, scope, go, logout } from '../state.svelte';
+  import { session, route, live, scope, go, logout, attempt, refreshSavedSearches } from '../state.svelte';
+  import { api } from '../api/client';
+  import type * as T from '../api/types';
+  import { ask } from '../confirm.svelte';
+  import SavedSearchDialog from './SavedSearchDialog.svelte';
   import { until } from '../format';
   import Icon from './Icon.svelte';
   import Avatar from './Avatar.svelte';
   import { navRail } from '../layout.svelte';
-  import { contextMenu } from '../menu.svelte';
+  import { contextMenu, type Entry } from '../menu.svelte';
   import { accountMenu, backupAll, verifyAll } from '../actions';
 
   // `drawer`: the whole sidebar, slid in over a phone's screen.
@@ -24,10 +28,31 @@
   const manage = [
     ['/accounts', 'Accounts', 'at'],
     ['/destinations', 'Destinations', 'database'],
+    ['/storage', 'Storage', 'chart'],
     ['/integrity', 'Integrity', 'shield'],
     ['/purge', 'Purge', 'trash'],
   ];
   let manageOpen = $state(true);
+
+  // Saved searches, listed under Mail.
+  let editingSearch = $state<T.SavedSearch | null>(null);
+  async function saveSearch(s: T.SavedSearch, patch: Partial<T.SavedSearchInput>) {
+    const input: T.SavedSearchInput = { name: s.name, query: s.query, account_id: s.account_id, mail_folder: s.mail_folder, ...patch };
+    await attempt(() => api.put(`/saved-searches/${s.id}`, input));
+    await refreshSavedSearches().catch(() => undefined);
+  }
+  async function deleteSearch(s: T.SavedSearch) {
+    if (!(await ask({ title: `Delete the saved search “${s.name}”?`, body: s.mail_folder ? 'Its folder disappears from mail apps. No mail is deleted.' : 'No mail is deleted.', confirm: 'Delete', danger: true }))) return;
+    await attempt(() => api.del(`/saved-searches/${s.id}`), 'Saved search deleted');
+    await refreshSavedSearches().catch(() => undefined);
+    if (route.path.startsWith(`/browse?search=${s.id}`)) go('/browse');
+  }
+  const savedMenu = (s: T.SavedSearch): Entry[] => [
+    { label: 'Edit…', icon: 'pencil', run: () => (editingSearch = s) },
+    { label: s.mail_folder ? 'Hide from mail apps' : 'Show in mail apps', icon: 'inbox', run: () => saveSearch(s, { mail_folder: !s.mail_folder }) },
+    '-',
+    { label: 'Delete…', icon: 'x', danger: true, run: () => deleteSearch(s) },
+  ];
   let now = $state(Date.now());
   const timer = setInterval(() => (now = Date.now()), 30_000);
   onDestroy(() => clearInterval(timer));
@@ -160,6 +185,18 @@
   <div class="flex flex-col gap-px">
     {#each core as [href, label, icon]}
       {@render link(href, label, icon)}
+      {#if href === '/browse' && !rail}
+        {#each live.savedSearches as s (s.id)}
+          {@const active = route.path.startsWith(`/browse?search=${s.id}`)}
+          <a href="#/browse?search={s.id}" aria-current={active ? 'page' : undefined} {@attach contextMenu(() => savedMenu(s))}
+            title={s.query + (s.mail_folder ? '\nShown in mail apps' : '')}
+            class="group flex items-center gap-2 rounded-lg py-1 pr-2.5 pl-8 text-[0.9rem] no-underline! {active ? 'font-medium text-fg' : 'text-muted hover:bg-hover/60 hover:text-fg'}">
+            <span class="text-faint"><Icon name="bookmark" size={13} /></span>
+            <span class="min-w-0 flex-1 truncate">{s.name}</span>
+            {#if s.mail_folder}<span class="text-faint" title="Shown in mail apps"><Icon name="inbox" size={12} /></span>{/if}
+          </a>
+        {/each}
+      {/if}
     {/each}
   </div>
 
@@ -217,6 +254,10 @@
   </div>
   {/if}
 </nav>
+
+{#if editingSearch}
+  <SavedSearchDialog search={editingSearch} onclose={() => (editingSearch = null)} />
+{/if}
 
 <svelte:window
   onresize={place}

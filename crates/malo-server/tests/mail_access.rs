@@ -3,8 +3,6 @@
 
 mod common;
 
-use std::sync::{Arc, Mutex};
-
 use async_imap::imap_proto;
 use base64::Engine;
 use futures::TryStreamExt;
@@ -13,104 +11,13 @@ use malo_core::crypto::sha256_hex;
 use malo_core::index::NewMessage;
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 
 use common::*;
 
 fn setup_env() {
     std::env::set_var("MALO_INSECURE_FAST_KDF", "1");
     std::env::set_var("MALO_LOGIN_BURST", "1000");
-}
-
-#[derive(Default)]
-struct Upstream {
-    auth: Vec<String>,
-    envelopes: Vec<(String, Vec<String>)>,
-    messages: Vec<Vec<u8>>,
-}
-
-/// A TLS SMTP server that accepts AUTH PLAIN and refuses recipients at `reject.example`.
-async fn fake_smtp() -> (u16, Arc<Mutex<Upstream>>) {
-    let key = rcgen::KeyPair::generate().unwrap();
-    let cert = rcgen::CertificateParams::new(vec!["localhost".into()])
-        .unwrap()
-        .self_signed(&key)
-        .unwrap();
-    let config = rustls::ServerConfig::builder_with_provider(malo_core::tls::provider())
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![cert.der().clone()],
-            rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()),
-        )
-        .unwrap();
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let seen = Arc::new(Mutex::new(Upstream::default()));
-    let log = seen.clone();
-    tokio::spawn(async move {
-        loop {
-            let (tcp, _) = listener.accept().await.unwrap();
-            let (acceptor, log) = (acceptor.clone(), log.clone());
-            tokio::spawn(async move {
-                let tls = acceptor.accept(tcp).await.unwrap();
-                let mut io = BufReader::new(tls);
-                let mut from = String::new();
-                let mut to = vec![];
-                io.get_mut().write_all(b"220 fake ESMTP\r\n").await.unwrap();
-                loop {
-                    let mut line = String::new();
-                    if io.read_line(&mut line).await.unwrap_or(0) == 0 {
-                        return;
-                    }
-                    let up = line.to_ascii_uppercase();
-                    let reply: &[u8] = if up.starts_with("EHLO") {
-                        b"250-fake\r\n250-SIZE 1000000\r\n250 AUTH PLAIN LOGIN\r\n"
-                    } else if up.starts_with("AUTH PLAIN") {
-                        let b = base64::engine::general_purpose::STANDARD
-                            .decode(line[11..].trim())
-                            .unwrap();
-                        log.lock().unwrap().auth.push(String::from_utf8(b).unwrap());
-                        b"235 ok\r\n"
-                    } else if up.starts_with("MAIL FROM:") {
-                        from = line[10..].trim().to_string();
-                        b"250 ok\r\n"
-                    } else if up.starts_with("RCPT TO:") {
-                        if up.contains("REJECT.EXAMPLE") {
-                            b"550 5.1.1 no such user\r\n"
-                        } else {
-                            to.push(line[8..].trim().to_string());
-                            b"250 ok\r\n"
-                        }
-                    } else if up.starts_with("DATA") {
-                        io.get_mut().write_all(b"354 go\r\n").await.unwrap();
-                        let mut data = vec![];
-                        loop {
-                            let mut l = vec![];
-                            io.read_until(b'\n', &mut l).await.unwrap();
-                            if l == b".\r\n" {
-                                break;
-                            }
-                            data.extend_from_slice(&l);
-                        }
-                        let mut log = log.lock().unwrap();
-                        log.messages.push(data);
-                        log.envelopes.push((from.clone(), std::mem::take(&mut to)));
-                        b"250 queued\r\n"
-                    } else if up.starts_with("QUIT") {
-                        let _ = io.get_mut().write_all(b"221 bye\r\n").await;
-                        return;
-                    } else {
-                        b"250 ok\r\n"
-                    };
-                    io.get_mut().write_all(reply).await.unwrap();
-                }
-            });
-        }
-    });
-    (port, seen)
 }
 
 async fn tls(addr: std::net::SocketAddr) -> tokio_rustls::client::TlsStream<TcpStream> {
@@ -521,6 +428,83 @@ async fn mail_apps_read_backups_and_send() {
         2,
         "reset shows it again"
     );
+
+    // Saved searches shown in mail apps are read-only folders of their matches.
+    let hidden: SavedSearch = admin
+        .post(
+            "/saved-searches",
+            &SavedSearchInput {
+                name: "Not in apps".into(),
+                query: "hello".into(),
+                account_id: None,
+                mail_folder: false,
+            },
+        )
+        .await;
+    let smart: SavedSearch = admin
+        .post(
+            "/saved-searches",
+            &SavedSearchInput {
+                name: "Hello mail".into(),
+                query: "hello".into(),
+                account_id: Some(acc.id.clone()),
+                mail_folder: true,
+            },
+        )
+        .await;
+    let dup = admin
+        .call::<_, serde_json::Value>(
+            reqwest::Method::POST,
+            "/saved-searches",
+            Some(&SavedSearchInput {
+                name: "hello MAIL".into(),
+                query: "x".into(),
+                account_id: None,
+                mail_folder: false,
+            }),
+        )
+        .await;
+    assert_eq!(dup.unwrap_err().0, 400, "names are unique");
+    let all: Vec<SavedSearch> = admin.get("/saved-searches").await;
+    assert_eq!(all.len(), 2);
+    let names: Vec<String> = s
+        .list(Some(""), Some("*"))
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap()
+        .iter()
+        .map(|n| n.name().to_string())
+        .collect();
+    assert!(names.contains(&"Smart/Hello mail".to_string()), "{names:?}");
+    assert!(
+        !names.iter().any(|n| n.contains("Not in apps")),
+        "{names:?}"
+    );
+    let found = s.select("Smart/Hello mail").await.unwrap();
+    assert_eq!(found.exists, 1);
+    let hit: Vec<_> = s
+        .fetch("1", "BODY.PEEK[]")
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(hit[0].body().unwrap(), FIRST);
+    assert!(
+        s.append("Smart/Hello mail", None, None, b"Subject: x\r\n\r\ny\r\n")
+            .await
+            .is_err(),
+        "smart folders take no new mail"
+    );
+    for id in [&hidden.id, &smart.id] {
+        let gone = admin
+            .status_of(reqwest::Method::DELETE, &format!("/saved-searches/{id}"))
+            .await;
+        assert_eq!(gone, 204);
+    }
+    s.select("INBOX").await.unwrap();
     let mut idle = s.idle();
     idle.init().await.unwrap();
     let mut s = idle.done().await.unwrap();

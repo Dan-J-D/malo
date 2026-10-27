@@ -1,4 +1,6 @@
-//! `server.db`: plain SQLite without secrets — users, sessions, invites, job metadata, schedules, settings.
+//! `server.db`: plain SQLite — users, sessions, invites, job metadata, schedules, settings, and
+//! alert bookkeeping. No secrets, except the alert addresses of users who want alerts while
+//! they're locked (`alert_mirror`; see `crate::alerts`).
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -65,6 +67,24 @@ CREATE TABLE IF NOT EXISTS mail_logins (
     created_at TEXT NOT NULL,
     last_used TEXT,
     UNIQUE(user_id, account_id)
+);
+CREATE TABLE IF NOT EXISTS totp (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    secret BLOB NOT NULL,
+    recovery TEXT NOT NULL DEFAULT '[]',
+    last_step INTEGER NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS alert_state (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    key TEXT NOT NULL,
+    value INTEGER NOT NULL,
+    PRIMARY KEY(user_id, key)
+);
+CREATE TABLE IF NOT EXISTS alert_mirror (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    channels TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS admin_audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -216,6 +236,90 @@ impl Db {
     /// of two concurrent callers exactly one wins.
     pub fn take_setting(&self, k: &str, v: &str) -> anyhow::Result<bool> {
         Ok(self.with(|c| c.execute("DELETE FROM settings WHERE k=?1 AND v=?2", [k, v]))? == 1)
+    }
+
+    // ───── alerts ─────
+
+    /// A counter or flag of the alert bookkeeping (0 when unset).
+    pub fn alert_state(&self, user_id: &str, key: &str) -> anyhow::Result<i64> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT value FROM alert_state WHERE user_id=?1 AND key=?2",
+                [user_id, key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map(|v| v.unwrap_or(0))
+        })
+    }
+
+    /// Adds one to a counter; returns the new value.
+    pub fn alert_count(&self, user_id: &str, key: &str) -> anyhow::Result<i64> {
+        self.with(|c| {
+            c.query_row(
+                "INSERT INTO alert_state(user_id,key,value) VALUES(?1,?2,1)
+                 ON CONFLICT(user_id,key) DO UPDATE SET value=value+1 RETURNING value",
+                [user_id, key],
+                |r| r.get(0),
+            )
+        })
+    }
+
+    /// Sets a flag. True when it wasn't set before, so of two callers exactly one alerts.
+    pub fn alert_flag(&self, user_id: &str, key: &str) -> anyhow::Result<bool> {
+        Ok(self.with(|c| {
+            c.execute(
+                "INSERT INTO alert_state(user_id,key,value) VALUES(?1,?2,1) ON CONFLICT DO NOTHING",
+                [user_id, key],
+            )
+        })? == 1)
+    }
+
+    /// Clears a counter or flag; returns what it was.
+    pub fn alert_clear(&self, user_id: &str, key: &str) -> anyhow::Result<i64> {
+        self.with(|c| {
+            c.query_row(
+                "DELETE FROM alert_state WHERE user_id=?1 AND key=?2 RETURNING value",
+                [user_id, key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map(|v| v.unwrap_or(0))
+        })
+    }
+
+    /// Keys of a user's bookkeeping that start with `prefix`.
+    pub fn alert_keys(&self, user_id: &str, prefix: &str) -> anyhow::Result<Vec<String>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT key FROM alert_state WHERE user_id=?1 AND substr(key,1,length(?2))=?2",
+            )?;
+            let rows = stmt.query_map([user_id, prefix], |r| r.get(0))?.collect();
+            rows
+        })
+    }
+
+    pub fn alert_mirror(&self, user_id: &str) -> anyhow::Result<Option<String>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT channels FROM alert_mirror WHERE user_id=?1",
+                [user_id],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+    }
+
+    pub fn set_alert_mirror(&self, user_id: &str, channels: Option<&str>) -> anyhow::Result<()> {
+        self.with(|c| match channels {
+            Some(ch) => c.execute(
+                "INSERT INTO alert_mirror(user_id,channels) VALUES(?1,?2)
+                 ON CONFLICT(user_id) DO UPDATE SET channels=?2",
+                [user_id, ch],
+            ),
+            None => c.execute("DELETE FROM alert_mirror WHERE user_id=?1", [user_id]),
+        })?;
+        Ok(())
     }
 
     // ───── admin audit ─────
@@ -760,6 +864,107 @@ impl Db {
     }
 
     // ───── IMAP/SMTP logins ─────
+
+    // ───────── two-step login (secrets sealed; see crate::totp) ─────────
+
+    pub fn totp(&self, user_id: &str) -> anyhow::Result<Option<crate::totp::TotpRow>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT secret, recovery, last_step, enabled FROM totp WHERE user_id=?1",
+                [user_id],
+                |r| {
+                    Ok(crate::totp::TotpRow {
+                        secret: r.get(0)?,
+                        recovery: serde_json::from_str(&r.get::<_, String>(1)?).unwrap_or_default(),
+                        last_step: r.get(2)?,
+                        enabled: r.get::<_, i32>(3)? != 0,
+                    })
+                },
+            )
+            .optional()
+        })
+    }
+
+    /// A new secret waiting for its first code (replaces another pending one, never an enabled one).
+    pub fn set_totp_pending(&self, user_id: &str, sealed: &[u8]) -> anyhow::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO totp(user_id, secret, updated_at) VALUES(?1,?2,?3)
+                 ON CONFLICT(user_id) DO UPDATE SET secret=?2, recovery='[]', last_step=0, updated_at=?3
+                 WHERE enabled=0",
+                params![user_id, sealed, Utc::now().to_rfc3339()],
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn enable_totp(&self, user_id: &str, step: i64, recovery: &[String]) -> anyhow::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE totp SET enabled=1, last_step=?2, recovery=?3, updated_at=?4 WHERE user_id=?1",
+                params![
+                    user_id,
+                    step,
+                    serde_json::to_string(recovery).unwrap_or_default(),
+                    Utc::now().to_rfc3339()
+                ],
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Records `step` as used, if no login used it (or a later one) meanwhile.
+    pub fn totp_use_step(&self, user_id: &str, seen: i64, step: i64) -> anyhow::Result<bool> {
+        let n = self.with(|c| {
+            c.execute(
+                "UPDATE totp SET last_step=?3 WHERE user_id=?1 AND last_step=?2 AND ?3>?2",
+                params![user_id, seen, step],
+            )
+        })?;
+        Ok(n == 1)
+    }
+
+    /// Uses up a recovery code (by its hash). False when it was used meanwhile.
+    pub fn totp_use_recovery(&self, user_id: &str, hash: &str) -> anyhow::Result<bool> {
+        let mut conn = malo_core::index::lock_db(&self.conn);
+        let tx = conn.transaction()?;
+        let codes: Option<String> = tx
+            .query_row(
+                "SELECT recovery FROM totp WHERE user_id=?1",
+                [user_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let mut codes: Vec<String> = codes
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let before = codes.len();
+        codes.retain(|h| h != hash);
+        if codes.len() == before {
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE totp SET recovery=?2 WHERE user_id=?1",
+            params![user_id, serde_json::to_string(&codes)?],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn set_totp_recovery(&self, user_id: &str, recovery: &[String]) -> anyhow::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE totp SET recovery=?2 WHERE user_id=?1",
+                params![user_id, serde_json::to_string(recovery).unwrap_or_default()],
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn delete_totp(&self, user_id: &str) -> anyhow::Result<()> {
+        self.with(|c| c.execute("DELETE FROM totp WHERE user_id=?1", [user_id]))?;
+        Ok(())
+    }
 
     pub fn mail_login(&self, username: &str) -> anyhow::Result<Option<MailLoginRow>> {
         self.with(|c| {

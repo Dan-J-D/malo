@@ -320,10 +320,12 @@ fn import_entry(
         .any(|r| r.destination == destination_id);
     if !have {
         stats.replicas += 1;
-        let stored = if store.dest.encrypt {
-            crate::crypto::encrypted_len(e.size)
-        } else {
-            e.size
+        // Unknown (0) for a compressed object listed without its size: the next deep check
+        // confirms it by its hash.
+        let stored = match e.stored_size {
+            Some(s) => s,
+            None if crate::store::is_compressed_path(&e.object_path) => 0,
+            None => crate::store::expected_stored_len(store.dest.encrypt, e.size),
         };
         // Marked verified from the manifest; the next integrity check re-confirms it.
         ctx.index.upsert_replica(
@@ -368,6 +370,7 @@ mod tests {
             deep_check: DeepCheckMode::Full,
             recovery_secrets: false,
             missing_secrets: vec![],
+            features: Default::default(),
         };
         let mut cfg = UserConfig::new(&archive);
         cfg.destinations.push(dest.clone());
@@ -414,6 +417,7 @@ mod tests {
             message_id: None,
             object_path: path.into(),
             envelope: crate::index::empty_envelope(),
+            stored_size: None,
         };
         let entries = vec![
             entry(good_path, "aaaaaaaa-1111"),
