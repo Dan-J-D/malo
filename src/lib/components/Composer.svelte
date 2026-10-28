@@ -164,7 +164,7 @@
   <div class="flex flex-col divide-y divide-line px-4">
     {#if !start.message.in_reply_to && senders.length > 1}
       <div class="flex items-center gap-2 py-1.5">
-        <span class="w-10 flex-none text-[0.85rem] text-muted">From</span>
+        <span class="w-14 flex-none text-[0.85rem] text-muted">From</span>
         <Select variant="ghost" class="text-[0.9rem]" label="Send from" bind:value={accountId}
           options={senders.map((a) => ({ value: a.id, label: `${a.name} · ${a.username}`, disabled: !a.smtp }))} />
       </div>
@@ -178,7 +178,7 @@
       <div class="py-1.5"><Recipients label="Bcc" bind:value={bcc} account={accountId} /></div>
     {/if}
     <div class="flex items-center gap-2 py-1.5">
-      <span class="w-10 flex-none text-[0.85rem] text-muted">Subject</span>
+      <span class="w-14 flex-none text-[0.85rem] text-muted">Subject</span>
       <input bind:value={subject} aria-label="Subject" class="min-w-0 flex-1 border-0 bg-transparent px-0 py-1 font-medium shadow-none outline-none focus-visible:outline-none" />
     </div>
   </div>

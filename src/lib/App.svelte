@@ -93,7 +93,8 @@
 
 {#snippet page()}
   {#key top}
-  <div class="h-full" in:fade={{ duration: ms(160) }}>
+  <!-- Only Browse fills the pane; other pages must grow with their content so the spacer after them stays below it. -->
+  <div class={top === '/browse' ? 'h-full' : ''} in:fade={{ duration: ms(160) }}>
   {#if top === '/accounts'}
     <Accounts />
   {:else if top === '/destinations'}

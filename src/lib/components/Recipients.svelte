@@ -95,7 +95,7 @@
 </script>
 
 <div class="relative flex min-w-0 flex-1 items-start gap-2">
-  <span class="w-10 flex-none pt-1 text-[0.85rem] text-muted">{label}</span>
+  <span class="w-14 flex-none pt-1 text-[0.85rem] text-muted">{label}</span>
   <div class="flex min-w-0 flex-1 flex-wrap items-center gap-1" role="presentation"
     onmousedown={(e) => { if (e.target === e.currentTarget) { e.preventDefault(); input?.focus(); } }}>
     {#each value as r, i (r)}
